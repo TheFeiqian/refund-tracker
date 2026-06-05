@@ -3818,7 +3818,7 @@ function renderOrderFlowchart(o, flags) {
 //   never overwritten by auto-derivation; the tree is advisory until confirmed.
 // ============================================================
 const MC_NEED_LABEL = {
-  store_unwanted:'store drop-off flags (set in Stores)',
+  store_unwanted:'store drop-off options not yet assessed (check in Stores)',
   inbound_courier:'inbound courier (order field)',
   delivery_photo_shows_person:'whether the delivery photo shows the recipient (order field)',
   weight:'total weight in kg (order field)'
@@ -3826,7 +3826,10 @@ const MC_NEED_LABEL = {
 // Pure tree over an explicit variable bag -> {method, blocked, need, at}
 function mcEvaluate(v){
   if(v.bbm) return {method:'BBM', at:'BBM', blocked:false};
-  if(v.store_unwanted===null||v.store_unwanted===undefined) return {method:'', blocked:'Q1', need:'store_unwanted'};
+  // Q1/Q2: store drop-off label. Only a NEVER-ASSESSED store stalls here.
+  // An assessed store with no drop-off label (unwanted=false, damaged=false) is a
+  // definite "no" — LIT/LIT-with-pic are ruled out and we flow on to Q3+.
+  if(!v.assessed) return {method:'', blocked:'Q1', need:'store_unwanted'};
   if(v.store_unwanted===true) return {method:'LIT', at:'Q1', blocked:false};
   if(v.store_damaged===true) return {method:'LIT with pic', at:'Q2', blocked:false};
   if(!v.inbound_courier) return {method:'', blocked:'Q3', need:'inbound_courier'};
@@ -3842,7 +3845,8 @@ function mcVarsForOrder(o, flags){
   const f = flags[o.store];
   return {
     bbm: o.bought_by_mistake==='yes',
-    store_unwanted: f ? (f.unwanted===undefined?null:f.unwanted) : null,
+    assessed: !!(f && f.assessed),
+    store_unwanted: f ? !!f.unwanted : false,
     store_damaged: f ? !!f.damaged : false,
     inbound_courier: o.inbound_courier || (f&&f.inbound_courier) || '',
     delivery_photo_shows_person: o.delivery_photo_shows_person || '',
@@ -3920,8 +3924,8 @@ function mcFlowchartBlock(flags){
   function val(marker){
     switch(marker){
       case 'BBM': return v.bbm?'yes':'no';
-      case 'Q1': return v.store_unwanted==null?'?':(v.store_unwanted?'yes':'no');
-      case 'Q2': return v.store_damaged?'yes':'no';
+      case 'Q1': return !v.assessed?'? not assessed':(v.store_unwanted?'yes':'no');
+      case 'Q2': return !v.assessed?'?':(v.store_damaged?'yes':'no');
       case 'Q3': return v.inbound_courier||'?';
       case 'Q4': return v.delivery_photo_shows_person||'?';
       case 'Q5': return v.qty||'?';
@@ -3930,8 +3934,8 @@ function mcFlowchartBlock(flags){
   }
   const Q=[
     ['BBM','Bought by mistake?', v.bbm?'→ BBM chain':'continue'],
-    ['Q1','Parcel-shop label for unwanted?', v.store_unwanted===true?'→ LIT':'no'],
-    ['Q2','Parcel-shop label for damaged?', v.store_damaged===true?'→ LIT with pic':'no'],
+    ['Q1','Parcel-shop label for unwanted?', !v.assessed?'assess store first':(v.store_unwanted===true?'→ LIT':'no → continue')],
+    ['Q2','Parcel-shop label for damaged?', !v.assessed?'—':(v.store_damaged===true?'→ LIT with pic':'no → continue')],
     ['Q3','Inbound courier DPD/RM/Parcelforce?', RET_COURIERS.includes(v.inbound_courier)?'→ RTS':'no'],
     ['Q4','Delivery photo shows recipient?', v.delivery_photo_shows_person==='yes'?'→ DNA':'no'],
     ['Q5','Quantity over 10?', (v.qty||0)>10?'→ PEB':'no'],
@@ -3944,8 +3948,13 @@ function mcFlowchartBlock(flags){
   const methodCell = r.blocked
     ? '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">stalls at '+r.blocked+' — needs '+escapeHtml(MC_NEED_LABEL[r.need]||r.need)+'</span>'
     : '<span class="badge-mini" style="'+methodBadgeClass(r.method)+'">'+escapeHtml(r.method)+'</span>';
-  const confirmBtn = (o && !r.blocked)
-    ? '<button class="primary small" style="margin-top:10px" onclick="mcConfirm(\''+escAttr(o.order_id)+'\',\''+escAttr(r.method)+'\')">✓ Confirm '+escapeHtml(r.method)+' for #'+escapeHtml(o.order_id)+'</button>'
+  const isBBMo = o && o.bought_by_mistake==='yes';
+  const confirmBtn = o ? ('<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">'
+    + ((!r.blocked && !isBBMo) ? '<button class="primary small" onclick="mcConfirm(\''+escAttr(o.order_id)+'\',\''+escAttr(r.method)+'\')">✓ Confirm '+escapeHtml(r.method)+' for #'+escapeHtml(o.order_id)+'</button>' : '')
+    + (isBBMo
+        ? '<span class="badge-mini" style="background:var(--accent-soft);color:var(--accent-deep)">on BBM chain</span> <button class="small" onclick="setBBM(\''+escAttr(o.order_id)+'\',\'no\')">Remove BBM</button>'
+        : '<button class="small" onclick="setBBM(\''+escAttr(o.order_id)+'\',\'yes\',true)" title="mark bought-by-mistake; runs the BBM collection/label chain">Mark as BBM</button>')
+    + '</div>')
     : '';
   return '<div id="mcFlow" class="order-flowchart" style="border:1px dashed var(--blue);background:var(--blue-soft)"'
     + ' ondragover="event.preventDefault();this.style.borderColor=\'var(--green)\'" ondragleave="this.style.borderColor=\'var(--blue)\'"'
@@ -3983,6 +3992,7 @@ function mcReadyCard(o, r){
     + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
     + '<button class="primary small" onclick="mcConfirm(\''+escAttr(o.order_id)+'\',\''+escAttr(r.method)+'\')">✓ Confirm '+escapeHtml(r.method)+'</button>'
     + '<button class="small" onclick="mcLoad(\''+escAttr(o.order_id)+'\')">View in flowchart</button>'
+    + '<button class="small" onclick="setBBM(\''+escAttr(o.order_id)+'\',\'yes\',true)" title="mark bought-by-mistake → BBM chain">Mark BBM</button>'
     + '</div></div>';
 }
 // ---- Missing-info card: delegatable task (UI now; full send in Deploy B) ----
@@ -3999,12 +4009,13 @@ function mcMissingCard(o, r){
     + '<div style="display:flex;gap:6px;align-items:center">'+dwellBadge+'<span style="font-size:12px;color:var(--ink-faded)">'+fmtMoney(o.price||0)+'</span></div></div>'
     + '<div style="margin-top:8px;padding:9px 11px;background:var(--amber-soft);border-radius:6px;font-size:13px;color:var(--amber)">'
     + '<div style="font-weight:600;margin-bottom:2px">Missing to decide: '+escapeHtml(MC_NEED_LABEL[need]||need)+'</div>'
-    + '<div style="font-size:12px;opacity:.85">Tree stalls at <strong>'+r.blocked+'</strong>. '+(isStore?'Set this store\'s drop-off flags and every order from it resolves.':'Supply this one field and the method auto-resolves.')+'</div></div>'
+    + '<div style="font-size:12px;opacity:.85">Tree stalls at <strong>'+r.blocked+'</strong>. '+(isStore?'This store hasn\'t been assessed for drop-off returns yet — assess it and every order from it can resolve.':'Supply this one field and the method auto-resolves.')+'</div></div>'
     + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
     + (isStore
-        ? '<button class="primary small" onclick="openStoreByName(\''+escAttr(o.store)+'\')">Set store flags</button>'
+        ? '<button class="primary small" onclick="openStoreByName(\''+escAttr(o.store)+'\')">Assess store</button>'
         : '<button class="primary small" onclick="mcSendInfoTask(\''+escAttr(o.order_id)+'\',\''+escAttr(need)+'\')">📋 Send info request'+(who?(' to '+escapeHtml(who)):'')+'</button>'
-          + '<button class="small" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">Open order</button>')
+          + '<button class="small" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">Open order</button>'
+          + '<button class="small" onclick="setBBM(\''+escAttr(o.order_id)+'\',\'yes\',true)" title="mark bought-by-mistake → BBM chain (skips the tree)">Mark BBM</button>')
     + '</div></div>';
 }
 // Send-info-task: UI lands now; full Google-form/send + sent_at tracking is Deploy B.
@@ -4176,7 +4187,7 @@ function saveStoreForm(){
   const cats=[...document.querySelectorAll('.sf_cat_cb')].filter(c=>c.checked).map(c=>c.value);
   let revRaw=(document.getElementById('sf_rev').value||'').replace(/[,£\s]/g,'');
   const revenue = revRaw && !isNaN(parseFloat(revRaw)) ? parseFloat(revRaw) : null;
-  const rec={ unwanted:document.getElementById('sf_unwanted').checked, damaged:document.getElementById('sf_damaged').checked,
+  const rec={ assessed:true, unwanted:document.getElementById('sf_unwanted').checked, damaged:document.getElementById('sf_damaged').checked,
     collection:document.getElementById('sf_collection').checked, cat:cats,
     contactInfo:contactInfo, courier:document.getElementById('sf_courier').value,
     inbound_courier:document.getElementById('sf_inbound').value, revenue:revenue };
@@ -4258,9 +4269,17 @@ function renderDelivery() {
   });
   const recentlyDelivered = DATA.orders.filter(o => {
     const t = o.triggers||{}; if (!t.item_delivered) return false;
-    const d = parseDateLoose(o.delivery_date_text); if (!d) return true;
-    return (now - d) < 14*86400000;
-  }).slice(0,6);
+    // delivered but NOT yet progressed beyond the delivery/awaiting-method stage:
+    // exclude anything with a method chosen, returns/refund underway, or resolved.
+    const st = orderStage(o);
+    if (st !== 'delivered' && st !== 'awaiting_method') return false;
+    if (o.method && o.method !== '') return false;
+    if (o.bought_by_mistake === 'yes') return false; // BBM goes onto its own chain
+    return true;
+  }).sort((a,b)=>{
+    const da=parseDateLoose(a.delivery_date_text), db=parseDateLoose(b.delivery_date_text);
+    return (db?db.getTime():0) - (da?da.getTime():0); // newest first
+  });
 
   function dateLineDelivery(o){
     const d = parseDateLoose(o.delivery_date_text);
@@ -4317,7 +4336,7 @@ function renderDelivery() {
   h += '<h3 class="delivery-h" style="margin-top:24px">Awaiting collection <span class="count">'+awaitingCollection.length+'</span></h3>';
   h += awaitingCollection.length ? '<div class="delivery-grid">'+awaitingCollection.map(o=>card(o,'collection')).join('')+'</div>' : '<div class="empty-state">No home collections booked.</div>';
   if (recentlyDelivered.length) {
-    h += '<h3 class="delivery-h" style="margin-top:24px">Recently received <span class="count">'+recentlyDelivered.length+'</span></h3>';
+    h += '<h3 class="delivery-h" style="margin-top:24px">Received — awaiting next step <span class="count">'+recentlyDelivered.length+'</span></h3>';
     h += '<div class="delivery-grid">'+recentlyDelivered.map(o=>card(o,'received')).join('')+'</div>';
   }
   target.innerHTML = h;
