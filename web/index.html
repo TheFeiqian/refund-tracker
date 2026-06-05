@@ -3473,6 +3473,7 @@ function buildStoreRegistry() {
     else r.auto_method='(needs per-order data)';
     const ci = (f && f.contactInfo) || CONTACT_DATA[s.name] || null;
     r.contact_info = ci; r.contact = !!(ci && (ci.phone||ci.email||ci.portal||ci.chat));
+    r.website = (ci && ci.website) || (f && f.website) || '';
     r.return_label_courier = (f && f.courier) || default_return_courier || '';
     const miss=[];
     if (r.unwanted===null) miss.push('parcel_shop flags');
@@ -3761,6 +3762,8 @@ function openStoreForm(name) {
   <div class="modal-body">
     <div class="form-grid"><div class="form-field"><label>Store name</label><input type="text" id="sf_name" value="${escAttr(r.name)}"></div>
     <div class="form-field"><label>Yearly revenue (£, min 2M)</label><input type="text" id="sf_rev" value="${r.revenue!=null?r.revenue.toLocaleString():''}" placeholder="e.g. 14,000,000" oninput="sfBudget()"></div></div>
+    <div class="form-field"><label>Store website</label><input type="text" id="sfc_website_v" value="${escAttr((r.website)||(ci.website)||'')}" placeholder="https://..."></div>
+    <div style="display:flex;align-items:center;gap:10px;margin:4px 0 12px"><button type="button" class="primary small" id="sfAutoBtn" onclick="autofillStore()" style="background:linear-gradient(135deg,#6d28d9,#2563eb);border:none">✨ Auto-fill from web</button><span id="sfAutoStatus" style="font-size:12px;color:var(--ink-faded)"></span></div>
     <div id="sf_budget" style="background:var(--blue-soft);color:var(--blue);border-radius:8px;padding:8px 12px;margin:10px 0;font-size:13px">${r.budget==null?'Budget derives from revenue (÷ 10,000, capped £3,000).':(r.budget===0?'Below £2M minimum — store not eligible.':'Budget: <strong>'+fmtMoney(r.budget)+'</strong>'+(r.budget===3000?' (capped)':'')+' · source: '+REV_SOURCE_LABEL[r.rev_source])}</div>
     <div class="form-field"><label><input type="checkbox" id="sf_unwanted" ${chk(r.unwanted)} onchange="if(this.checked)document.getElementById('sf_damaged').checked=false"> Parcel shop label provided for unwanted goods &nbsp;<span style="color:var(--blue);cursor:pointer;font-size:12px" onclick="document.getElementById('sfd1').style.display=document.getElementById('sfd1').style.display==='none'?'block':'none'">what’s this?</span></label><div id="sfd1" style="display:none;background:var(--blue-soft);color:var(--blue);border-radius:8px;padding:8px 12px;margin-top:6px;font-size:12px">A return label for unwanted goods droppable at a parcel shop, usually from the returns portal. If present, method is LIT. Only one of unwanted/damaged can be set.</div></div>
     <div class="form-field"><label><input type="checkbox" id="sf_damaged" ${chk(r.damaged)} onchange="if(this.checked)document.getElementById('sf_unwanted').checked=false"> Parcel shop label provided for damaged goods &nbsp;<span style="color:var(--blue);cursor:pointer;font-size:12px" onclick="document.getElementById('sfd2').style.display=document.getElementById('sfd2').style.display==='none'?'block':'none'">how to find out</span></label><div id="sfd2" style="display:none;background:var(--blue-soft);color:var(--blue);border-radius:8px;padding:8px 12px;margin-top:6px;font-size:12px">Start a return, choose damaged/faulty, see if a drop-off label is offered. Watch for a required damage photo and a time limit. If yes, method is LIT with pic. Only one of unwanted/damaged can be set.</div></div>
@@ -3781,10 +3784,48 @@ function sfBudget(){ const v=parseFloat((document.getElementById('sf_rev').value
   if(v>=2000000){ const x=Math.min(3000,Math.round(v/10000)); b.innerHTML='Budget auto-derived: <strong>'+fmtMoney(x)+'</strong> (÷ 10,000, capped £3,000).'; }
   else if(v>0){ b.textContent='Below £2M minimum — store not eligible.'; } }
 function closeStoreForm(){ const o=document.getElementById('storeModalOv'); if(o) o.remove(); }
+async function autofillStore(){
+  const name=(document.getElementById('sf_name').value||'').trim();
+  const website=(document.getElementById('sfc_website_v').value||'').trim();
+  const status=document.getElementById('sfAutoStatus');
+  const btn=document.getElementById('sfAutoBtn');
+  if(!name && !website){ status.textContent='Enter a store name or website first'; status.style.color='var(--amber)'; return; }
+  if(typeof sb==='undefined' || !sb){ status.textContent='Auto-fill needs the live app (not available offline)'; status.style.color='var(--amber)'; return; }
+  btn.disabled=true; const orig=btn.textContent; btn.textContent='Searching…';
+  status.style.color='var(--ink-faded)'; status.textContent='Looking up returns & contact details…';
+  try{
+    const { data, error } = await sb.functions.invoke('lookup-store', { body:{ name, website } });
+    if(error || !data || !data.fields || data.fields.raw){ status.textContent='Could not find structured details — fill in manually'; status.style.color='var(--amber)'; btn.disabled=false; btn.textContent=orig; return; }
+    const f=data.fields;
+    const setV=(id,val)=>{ const el=document.getElementById(id); if(el && val!=null && val!==''){ el.value=val; el.style.background='#f3e8ff'; el.style.borderColor='#a855f7'; } };
+    const tick=(cbId,boxId,val)=>{ const cb=document.getElementById(cbId); if(cb && val){ cb.checked=true; if(boxId){const b=document.getElementById(boxId); if(b)b.style.display='block';} } };
+    let filled=[];
+    // website + returns portal
+    if(f.website){ setV('sfc_website_v', f.website); filled.push('website'); }
+    if(f.returns_portal){ tick('sfc_portal_cb','sfc_portal',true); setV('sfc_portal_v', f.returns_portal); filled.push('returns portal'); }
+    // phone / email / chat
+    if(f.phone){ tick('sfc_phone_cb','sfc_phone',true); setV('sfc_phone_v', f.phone); filled.push('phone'); }
+    if(f.email){ tick('sfc_email_cb','sfc_email',true); setV('sfc_email_v', f.email); filled.push('email'); }
+    if(f.live_chat){ tick('sfc_chat_cb','sfc_chat',true); setV('sfc_chat_v','yes'); filled.push('chat'); }
+    // method-logic flags (mutually exclusive unwanted/damaged)
+    if(f.parcel_shop_unwanted===true){ const cb=document.getElementById('sf_unwanted'); if(cb){cb.checked=true; const d=document.getElementById('sf_damaged'); if(d)d.checked=false;} filled.push('unwanted-label flag'); }
+    else if(f.parcel_shop_damaged===true){ const cb=document.getElementById('sf_damaged'); if(cb){cb.checked=true; const u=document.getElementById('sf_unwanted'); if(u)u.checked=false;} filled.push('damaged-label flag'); }
+    if(f.offers_collection===true){ const cb=document.getElementById('sf_collection'); if(cb)cb.checked=true; filled.push('collection'); }
+    // categories
+    if(Array.isArray(f.category)){ document.querySelectorAll('.sf_cat_cb').forEach(c=>{ if(f.category.includes(c.value)){ c.checked=true; } }); if(f.category.length) filled.push('category'); }
+    // return courier
+    if(f.return_courier){ const sel=document.getElementById('sf_courier'); if(sel){ [...sel.options].forEach(o=>{ if(o.value===f.return_courier||o.text===f.return_courier) sel.value=o.value; }); sel.style.background='#f3e8ff'; filled.push('return courier'); } }
+    if(f.return_courier){ const sel=document.getElementById('sf_inbound'); }
+    btn.disabled=false; btn.textContent=orig;
+    if(filled.length){ status.style.color='#7c3aed'; status.innerHTML='✓ Filled '+filled.length+' field'+(filled.length>1?'s':'')+' (purple = from web). <strong>Review before saving.</strong>'+(f.notes?'<br><span style="color:var(--ink-faded)">'+escapeHtml(f.notes)+'</span>':''); }
+    else { status.style.color='var(--amber)'; status.textContent='Nothing found to fill — enter details manually'; }
+  }catch(e){ status.style.color='var(--amber)'; status.textContent='Lookup failed: '+(e.message||e); btn.disabled=false; btn.textContent=orig; }
+}
 function saveStoreForm(){
   const name=document.getElementById('sf_name').value.trim(); if(!name){alert('Store name required');return;}
   const cv=id=>{const el=document.getElementById(id);return el?el.value.trim():'';};
   const contactInfo={
+    website: cv('sfc_website_v'),
     phone: document.getElementById('sfc_phone_cb').checked?cv('sfc_phone_v'):'',
     email: document.getElementById('sfc_email_cb').checked?cv('sfc_email_v'):'',
     portal: document.getElementById('sfc_portal_cb').checked?cv('sfc_portal_v'):'',
