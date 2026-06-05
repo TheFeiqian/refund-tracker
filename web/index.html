@@ -3765,7 +3765,9 @@ function deriveMethod(o, flags) {
             collection: isCollectionPath(o, flags), return_label_courier:(f&&f.courier)||''};
   }
   const courier = o.inbound_courier || (f && f.inbound_courier) || '';
-  if (!f || f.unwanted === undefined || f.unwanted === null) return {method:'', blocked_at:'Q1', missing:[{key:'parcel_shop_flags',src:'Stores',scope:'store'}]};
+  // Q1/Q2: only a NEVER-ASSESSED store stalls. An assessed store with no drop-off
+  // label (unwanted/damaged false) is a definite "no" — flow through to Q3+.
+  if (!f || !f.assessed) return {method:'', blocked_at:'Q1', missing:[{key:'parcel_shop_flags',src:'Stores',scope:'store'}]};
   if (f.unwanted) return {method:'LIT', return_label_courier: f.courier||'', resolved:'Q1', blocked_at:'', missing:[]};
   if (f.damaged) return {method:'LIT with pic', return_label_courier: f.courier||'', resolved:'Q2', blocked_at:'', missing:[]};
   if (!courier) return {method:'', blocked_at:'Q3', missing:[{key:'inbound_courier',src:'stage 2',scope:'order'}]};
@@ -3816,7 +3818,7 @@ function buildStoreRegistry() {
     r.suggest_damaged  = (r.damaged===null||r.damaged===undefined)  ? (litPicHist && !litHist ? true : null) : null;
     if (r.unwanted) r.auto_method='LIT';
     else if (r.damaged) r.auto_method='LIT with pic';
-    else if (r.unwanted===null) r.auto_method='(set store flags)';
+    else if (!f || !f.assessed) r.auto_method='(assess store)';
     else if (RET_COURIERS.includes(inbound)) r.auto_method='RTS';
     else r.auto_method='(needs per-order data)';
     const ci = (f && f.contactInfo) || CONTACT_DATA[s.name] || null;
@@ -3824,10 +3826,10 @@ function buildStoreRegistry() {
     r.website = (ci && ci.website) || (f && f.website) || '';
     r.return_label_courier = (f && f.courier) || default_return_courier || '';
     const miss=[];
-    if (r.unwanted===null) miss.push('parcel_shop flags');
+    if (!f || !f.assessed) miss.push('store assessment');
     if (r.cat===null||r.cat===undefined||r.cat.length===0) miss.push('item_category');
     if (!r.contact) miss.push('contact_info');
-    if (r.unwanted===false && r.damaged===false && !inbound) miss.push('inbound_courier');
+    if (f && f.assessed && r.unwanted===false && r.damaged===false && !inbound) miss.push('inbound_courier');
     r.missing=miss; r.complete=miss.length===0;
     const rd = REVENUE_DATA[s.name] || {revenue:null,source:'na',budget:null};
     if (f && f.revenue!=null && f.revenue!=='') {
@@ -4022,6 +4024,7 @@ function renderOrderFlowchart(o, flags) {
   // Determine where the order resolves (or null if blocked)
   let resolvedAt = null, method = '', courierRes = '';
   if (bbm) { resolvedAt='BBM'; method='BBM'; courierRes=f.courier||''; }
+  else if (!f.assessed) { resolvedAt=null; method=''; }  // unassessed store stalls at Q1
   else if (f.unwanted) { resolvedAt='Q1'; method='LIT'; courierRes=f.courier||''; }
   else if (f.damaged) { resolvedAt='Q2'; method='LIT with pic'; courierRes=f.courier||''; }
   else if (RET.indexOf(courier) >= 0) { resolvedAt='Q3'; method='RTS'; courierRes=courier; }
@@ -4313,8 +4316,16 @@ function mcConfirm(orderId, method){
 function setBBM(orderId, val, fromMC){
   const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
   o.bought_by_mistake = val;
-  if(val==='yes'){ o.method = 'BBM'; o.method_confirmed = true; }
-  else if(o.method==='BBM'){ o.method=''; o.method_confirmed = false; }
+  o.triggers = o.triggers || {};
+  if(val==='yes'){
+    o.method = 'BBM'; o.method_confirmed = true;
+    // BBM runs the LIT chain → advance onto stage 4 so the collection-vs-label
+    // fork task (get_collection_date OR generate_return_label) appears in the queue.
+    o.triggers.lit_created = true;
+  } else if(o.method==='BBM'){
+    o.method=''; o.method_confirmed = false;
+    o.triggers.lit_created = false;  // back out of the BBM chain
+  }
   touchStageHistory(o);
   saveData(); renderAll();
 }
