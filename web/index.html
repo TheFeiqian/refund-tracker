@@ -842,7 +842,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
     <button class="tab-btn" data-tab="priority">Priority Queue <span class="count" id="priorityCount">0</span></button>
     <button class="tab-btn" data-tab="missing">Missing Info <span class="count" id="missingCount">0</span></button>
     <button class="tab-btn" data-tab="orders">Orders Database <span class="count" id="ordersCount">0</span></button>
-    <button class="tab-btn" data-tab="method">Method Choice</button>
+    <button class="tab-btn" data-tab="method">Method Logic</button>
     <button class="tab-btn" data-tab="delivery">Delivery <span class="count" id="deliveryCount">0</span></button>
     <button class="tab-btn" data-tab="stores">Stores <span class="count" id="storesCount">0</span></button>
     <button class="tab-btn" data-tab="parcel">Parcelshop</button>
@@ -1031,7 +1031,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
   </section>
 
   <section class="tab-section" data-tab="method">
-    <div class="section-intro"><h2>Method Choice</h2><p>Where the recovery method is decided per order. The method auto-resolves once all the variables the tree needs are present — orders split into auto-decided and missing-info-to-decide. Use the explorer to test variables and commit a method, or set BBM. Time awaiting decision is tracked per order and surfaced as a bottleneck on the dashboard.</p></div>
+    <div class="section-intro"><h2>Method Logic</h2><p>Why each order gets the method it does. The flowchart for each order shows the BBM gate first, then the six-question decision tree, with the actual variables for that order alongside — so you can see exactly which branch is taken and confirm it's right. Orders past the deciding stage are kept in the Orders Database; this tab focuses on what's deciding now.</p></div>
     <div id="methodBody"></div>
   </section>
 
@@ -1395,133 +1395,6 @@ function infoPriorityFor(order, fieldKey, currentStage) {
 // STATE
 // ============================================================
 let DATA;
-
-// ============================================================
-// PHASE 2 — FOUNDATION: people mapping, dual-role, stage timing
-// ============================================================
-const PEOPLE = [
-  { name:'Adam Iyob', email:'adamiyob2005@gmail.com', aliases:[], tg:'447746183124', tgIsPhone:true },
-  { name:'Ali', email:'uthmanajadi0@gmail.com', aliases:[], tg:'@Allister3' },
-  { name:'Celine', email:'celinelicelineli@gmail.com', aliases:[], tg:'@danningli' },
-  { name:'Clara', email:'clarabale2003@gmail.com', aliases:[], tg:'@purpleawefa' },
-  { name:'Fazian', email:'faizan11ijaz@gmail.com', aliases:[], tg:'@Faizanljaz' },
-  { name:'Fivos', email:'', aliases:[], tg:'' },
-  { name:'Hamza', email:'aussie.hamza@gmail.com', aliases:[], tg:'@Aloneslide' },
-  { name:'Janya', email:'janya.g@icloud.com', aliases:[], tg:'@janyayyy' },
-  { name:'Lalia', email:'laila.sarahh@gmail.com', aliases:[], tg:'@neveah154' },
-  { name:'Maitham', email:'maitham123@proton.me', aliases:[], tg:'@spiritmaxxer' },
-  { name:'Phoebus', email:'koulloupasphoebus@gmail.com', aliases:['sbarrow759@gmail.com'], tg:'@EtherialWolf' },
-  { name:'Silmi', email:'silmisyed64@gmail.com', aliases:[], tg:'@selenas3' },
-  { name:'Simon', email:'barrow328@gmail.com', aliases:['team@teloshouse.com','samuelbishop214@gmail.com'], tg:'@FeiQianX' },
-  { name:'Will', email:'willawomoyi@gmail.com', aliases:[], tg:'@alase243' },
-  { name:'Zeddie', email:'zaheedahmed43@gmail.com', aliases:[], tg:'@zeddie26' },
-  { name:'Aris', email:'arispelekanos55@gmail.com', aliases:[], tg:'@AristonMetron' }
-];
-function normEmail(e){ return (e||'').trim().toLowerCase().replace(/\.+$/,''); }
-function personByEmail(email){
-  const n = normEmail(email);
-  if(!n) return null;
-  for(const p of PEOPLE){
-    if(normEmail(p.email)===n) return p;
-    if((p.aliases||[]).some(a=>normEmail(a)===n)) return p;
-  }
-  return null;
-}
-function personByName(name){
-  if(!name) return null;
-  const n=name.trim().toLowerCase();
-  return PEOPLE.find(p=>p.name.toLowerCase()===n) || null;
-}
-function tgDisplay(p){
-  if(!p) return '';
-  if(p.tgIsPhone) return p.tg;          // phone number, no @
-  return p.tg || '';
-}
-// email-holder for an order (who owns the retailer login → email-driven tasks)
-function emailHolder(o){
-  const p = personByEmail(o.email);
-  return p ? p.name : (o.person || '');
-}
-// card-owner for an order (place-order + chargeback). Per-order field card_owner; falls back to person.
-function cardOwner(o){
-  return (o.card_owner && o.card_owner.trim()) ? o.card_owner.trim() : (o.person || emailHolder(o));
-}
-// which person a given TASK routes to, by task type
-const CARD_OWNER_TASKS = new Set(['place_order','chargeback']);
-function taskAssignee(o, taskType){
-  if(CARD_OWNER_TASKS.has(taskType)) return cardOwner(o);
-  return emailHolder(o) || o.person || '';
-}
-
-// ---- STAGE MODEL + TIMING (includes the method-selection stage) ----
-// Ordered pipeline stages. 'awaiting_method' is the method-selection stage:
-// timed as a bottleneck but NOT a delegated task (admin-only, auto-resolves).
-const STAGE_SEQ = [
-  'ordered','awaiting_delivery','delivered','awaiting_method',
-  'method_chosen','return_in_progress','refund_in_progress','resolved'
-];
-const STAGE_LABEL = {
-  ordered:'Ordered', awaiting_delivery:'Awaiting delivery', delivered:'Delivered',
-  awaiting_method:'Awaiting method decision', method_chosen:'Method chosen',
-  return_in_progress:'Return in progress', refund_in_progress:'Refund in progress',
-  resolved:'Resolved'
-};
-// Derive the current stage of an order from its triggers/fields.
-function orderStage(o){
-  const t = o.triggers||{};
-  if(t.refunded || t.refund_successful) return 'resolved';
-  if(t.lit_rts_sent || t.dna_email_sent) return 'refund_in_progress';
-  if(t.lit_created || t.rts_created || (o.method && o.method!=='')) {
-    // method decided and return work begun/possible
-    if(t.lit_created || t.rts_created) return 'return_in_progress';
-    return 'method_chosen';
-  }
-  if(t.item_delivered){
-    // delivered; if method not yet chosen, it's awaiting the (auto) method decision
-    return (o.method && o.method!=='') ? 'method_chosen' : 'awaiting_method';
-  }
-  if(t.item_ordered) return 'awaiting_delivery';
-  return 'ordered';
-}
-// Maintain a per-order stage_history: { stage, at } entries. Called on load + on change.
-function touchStageHistory(o){
-  if(!o.stage_history) o.stage_history = [];
-  const cur = orderStage(o);
-  const last = o.stage_history.length ? o.stage_history[o.stage_history.length-1] : null;
-  if(!last || last.stage !== cur){
-    o.stage_history.push({ stage: cur, at: Date.now() });
-  }
-  o._stage = cur;
-}
-// Days the order has sat in its current stage.
-function daysInCurrentStage(o){
-  if(!o.stage_history || !o.stage_history.length){
-    // fall back to created_at if no history yet
-    const base = o.created_at || Date.now();
-    return Math.max(0, Math.round((Date.now()-base)/86400000));
-  }
-  const last = o.stage_history[o.stage_history.length-1];
-  return Math.max(0, Math.round((Date.now()-last.at)/86400000));
-}
-// Average days-in-stage across orders, per stage (for dashboard bottleneck view).
-function avgDaysPerStage(orders){
-  const acc = {}; const cnt = {};
-  STAGE_SEQ.forEach(s=>{ acc[s]=0; cnt[s]=0; });
-  (orders||[]).forEach(o=>{
-    const hist = o.stage_history||[];
-    for(let i=0;i<hist.length;i++){
-      const cur = hist[i];
-      const next = hist[i+1];
-      const end = next ? next.at : Date.now();
-      const days = Math.max(0,(end-cur.at)/86400000);
-      if(acc[cur.stage]!==undefined){ acc[cur.stage]+=days; cnt[cur.stage]++; }
-    }
-  });
-  const out = {};
-  STAGE_SEQ.forEach(s=>{ out[s] = cnt[s] ? (acc[s]/cnt[s]) : 0; });
-  return out;
-}
-
 let editingOrderId = null;
 let formOrderId = null;
 
@@ -1563,11 +1436,6 @@ function loadData() {
   DATA._burndown = (window.__HOSTED && window.__HOSTED.burndown) ? window.__HOSTED.burndown : [];
   normalizeDeliveryDates();
   (DATA.orders || []).forEach(o => stampRequiredFields(o));
-  (DATA.orders || []).forEach(o => {
-    if (!o.created_at) o.created_at = Date.now() - (o.days_back || 0) * 86400000;
-    if (o.card_owner === undefined) o.card_owner = '';
-    touchStageHistory(o);
-  });
   recordBurndownSnapshot();
   hostedSaveBurndown();
 }
@@ -2989,7 +2857,7 @@ function openOrderModal(orderId) {
   const isNew = orderId === null;
   let order;
   if (isNew) {
-    order = { order_id: '', store: '', items: '', store_order_number: '', card_used: '', card_owner: '', price: 0, phone: '', email: '', address: '', person: '', inbound_tracking: '', inbound_courier: '', order_date: '', delivery_date_text: '', delivery_photo: '', method: '', return_label_pdf: '', return_label_date: '', outbound_tracking: '', investigation_deadline: '', proof_of_postage: '', postage_date: '', posted_from: '', refund_narrative: '', invoice: '', chargeback_bank: '', chargeback_amount: '', chargeback_date: '', notes: '', outbound_courier: '', triggers: { item_ordered: false, item_delivered: false, lit_created: false, rts_created: false, dna_email_sent: false, lit_rts_sent: false, refund_successful: false, refund_unsuccessful: false, refunded: false }, days_back: 0 };
+    order = { order_id: '', store: '', items: '', store_order_number: '', card_used: '', price: 0, phone: '', email: '', address: '', person: '', inbound_tracking: '', inbound_courier: '', order_date: '', delivery_date_text: '', delivery_photo: '', method: '', return_label_pdf: '', return_label_date: '', outbound_tracking: '', investigation_deadline: '', proof_of_postage: '', postage_date: '', posted_from: '', refund_narrative: '', invoice: '', chargeback_bank: '', chargeback_amount: '', chargeback_date: '', notes: '', outbound_courier: '', triggers: { item_ordered: false, item_delivered: false, lit_created: false, rts_created: false, dna_email_sent: false, lit_rts_sent: false, refund_successful: false, refund_unsuccessful: false, refunded: false }, days_back: 0 };
   } else {
     order = DATA.orders.find(o => o.order_id === orderId);
     if (!order) return;
@@ -3121,9 +2989,8 @@ function openOrderModal(orderId) {
       <div class="form-field"><label>Total weight (kg) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">EB branch</span></label><input type="number" step="0.1" id="f_total_weight_kg" value="${order.total_weight_kg || ''}" placeholder="e.g. 1.5"></div>
       <div class="form-field"><label>Total volume (litres) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">BBM: &gt;60 L = collection</span></label><input type="number" step="1" id="f_total_volume_l" value="${order.total_volume_l || ''}" placeholder="e.g. 40"></div>
       <div class="form-field"><label>Card used</label><input type="text" id="f_card_used" value="${escAttr(order.card_used)}"></div>
-      <div class="form-field"><label>Person responsible <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">email-holder · auto from email</span></label><input type="text" id="f_person" value="${escAttr(order.person)}"></div>
-      <div class="form-field"><label>Email</label><input type="text" id="f_email" value="${escAttr(order.email)}" onblur="ofEmailAutofill()"><div id="f_email_hint" style="font-size:11px;margin-top:3px;color:var(--ink-faded)"></div></div>
-      <div class="form-field"><label>Card owner <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">handles place-order + chargeback</span></label><input type="text" id="f_card_owner" value="${escAttr(order.card_owner||'')}" placeholder="defaults to person responsible"></div>
+      <div class="form-field"><label>Person responsible</label><input type="text" id="f_person" value="${escAttr(order.person)}"></div>
+      <div class="form-field"><label>Email</label><input type="text" id="f_email" value="${escAttr(order.email)}"></div>
       <div class="form-field"><label>Phone</label><input type="text" id="f_phone" value="${escAttr(order.phone)}"></div>
       <div class="form-field full"><label>Delivery address</label><textarea id="f_address" rows="2">${escapeHtml(order.address)}</textarea></div>
     </div>
@@ -3302,31 +3169,12 @@ function renderOrderHistory(order) {
 
 function closeOrderModal() { document.getElementById('orderModal').classList.remove('show'); editingOrderId = null; window._fileBuffer = {}; }
 
-function ofEmailAutofill(){
-  const emailEl=document.getElementById('f_email'); const personEl=document.getElementById('f_person'); const hint=document.getElementById('f_email_hint');
-  if(!emailEl||!personEl) return;
-  const email=emailEl.value.trim(); if(!email){ if(hint)hint.textContent=''; return; }
-  const p=personByEmail(email);
-  if(p){
-    // auto-fill person if empty or differs
-    if(!personEl.value.trim()){ personEl.value=p.name; }
-    if(hint){
-      if(personEl.value.trim().toLowerCase()!==p.name.toLowerCase()){
-        hint.innerHTML='<span style="color:var(--amber)">⚠ This email belongs to <strong>'+escapeHtml(p.name)+'</strong>, but person is set to <strong>'+escapeHtml(personEl.value)+'</strong>. <span style="color:var(--blue);cursor:pointer;text-decoration:underline" onclick="document.getElementById(\'f_person\').value=\''+escAttr(p.name)+'\';ofEmailAutofill()">fix to '+escapeHtml(p.name)+'</span></span>';
-      } else {
-        hint.innerHTML='<span style="color:var(--green)">✓ matches '+escapeHtml(p.name)+'</span>';
-      }
-    }
-  } else {
-    if(hint) hint.innerHTML='<span style="color:var(--amber)">⚠ email not recognised — set person manually, or it\'ll be saved as a new contact for that person.</span>';
-  }
-}
 function saveOrderEdit() {
   const id = document.getElementById('f_order_id').value.trim();
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','phone','email','address','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
@@ -3804,191 +3652,48 @@ function renderOrderFlowchart(o, flags) {
     + '</div></div>';
 }
 
-// ============================================================
-// PHASE 2 — METHOD CHOICE (renamed from Method Logic)
-// Interactive, committable decision tree + auto/missing split + dwell time.
-// Method selection is admin-only and auto-resolves; shown here, timed as a stage.
-// ============================================================
-const MC_VARS = [
-  { key:'store_unwanted', label:'Store provides unwanted-goods drop-off label?', src:'Stores', q:'Q1' },
-  { key:'store_damaged',  label:'Store provides damaged-goods drop-off label?',  src:'Stores', q:'Q2' },
-  { key:'inbound_courier',label:'Inbound courier', src:'order', q:'Q3', type:'courier' },
-  { key:'delivery_photo_shows_person', label:'Delivery photo shows recipient?', src:'order', q:'Q4' },
-  { key:'qty', label:'Item quantity', src:'order', q:'Q5', type:'num' },
-  { key:'weight', label:'Total weight (kg)', src:'order', q:'Q6', type:'num' }
-];
-// Pure tree over an explicit variable bag -> {method, blocked_at, missing}
-function mcEvaluate(v){
-  if(v.bbm) return {method:'BBM', at:'manual', blocked:false};
-  if(v.store_unwanted===null||v.store_unwanted===undefined) return {method:'', blocked:'Q1', need:'store_unwanted'};
-  if(v.store_unwanted===true) return {method:'LIT', at:'Q1', blocked:false};
-  if(v.store_damaged===true) return {method:'LIT with pic', at:'Q2', blocked:false};
-  if(!v.inbound_courier) return {method:'', blocked:'Q3', need:'inbound_courier'};
-  if(RET_COURIERS.includes(v.inbound_courier)) return {method:'RTS', at:'Q3', blocked:false};
-  if(v.delivery_photo_shows_person==='yes') return {method:'DNA', at:'Q4', blocked:false};
-  if(!v.delivery_photo_shows_person) return {method:'', blocked:'Q4', need:'delivery_photo_shows_person'};
-  if((v.qty||0) > 10) return {method:'PEB', at:'Q5', blocked:false};
-  if(v.weight && parseFloat(v.weight) < 2) return {method:'EB', at:'Q6', blocked:false};
-  if(!v.weight) return {method:'', blocked:'Q6', need:'weight'};
-  return {method:'purchased as normal', at:'end', blocked:false};
-}
-// Build the real variable bag for an order (from store flags + order fields)
-function mcVarsForOrder(o, flags){
-  const f = flags[o.store];
-  return {
-    bbm: o.bought_by_mistake==='yes',
-    store_unwanted: f ? (f.unwanted===undefined?null:f.unwanted) : null,
-    store_damaged: f ? !!f.damaged : false,
-    inbound_courier: o.inbound_courier || (f&&f.inbound_courier) || '',
-    delivery_photo_shows_person: o.delivery_photo_shows_person || '',
-    qty: orderQty(o),
-    weight: o.total_weight_kg || ''
-  };
-}
-const MC_NEED_LABEL = {
-  store_unwanted:'store drop-off flags (set in Stores)',
-  inbound_courier:'inbound courier (order field)',
-  delivery_photo_shows_person:'whether delivery photo shows the recipient (order field)',
-  weight:'total weight in kg (order field)'
-};
-let MC_HYPO = null; // hypothetical explorer state {orderId, vars}
-
-function renderMethodLogic(){
-  const body = document.getElementById('methodBody'); if(!body) return;
+function renderMethodLogic() {
+  const body = document.getElementById('methodBody'); if (!body) return;
   const flags = getStoreFlags();
-  // Only orders at/with method not yet decided are "to decide"; split auto vs missing.
-  const auto=[], missing=[];
-  DATA.orders.forEach(o=>{
-    const stage = orderStage(o);
-    if(o.method && o.method!=='') return;        // already has a method -> not here
-    if(stage==='resolved') return;
-    // consider it a method-decision candidate once delivered (or BBM flagged)
-    if(!(o.triggers&&o.triggers.item_delivered) && o.bought_by_mistake!=='yes') return;
-    const r = mcEvaluate(mcVarsForOrder(o, flags));
-    if(r.blocked) missing.push({o, r}); else auto.push({o, r});
-  });
-  auto.sort((a,b)=>(b.o.price||0)-(a.o.price||0));
-  missing.sort((a,b)=>(b.o.price||0)-(a.o.price||0));
-
-  let h = '<details class="method-desc-card"><summary>How methods are chosen — definitions</summary><table>'
-    + '<tr><td>LIT</td><td><strong>Label In Transit.</strong> Drop-off label for unwanted goods.</td></tr>'
-    + '<tr><td>LIT with pic</td><td><strong>Damaged goods</strong> — label issued once a damage photo is supplied.</td></tr>'
-    + '<tr><td>RTS</td><td><strong>Return To Sender</strong> — inbound courier is DPD / Royal Mail / Parcelforce.</td></tr>'
-    + '<tr><td>DNA</td><td><strong>Did Not Arrive</strong> — delivery photo doesn\'t show recipient.</td></tr>'
-    + '<tr><td>PEB</td><td><strong>Possible Empty Box</strong> — quantity over 10.</td></tr>'
-    + '<tr><td>EB</td><td><strong>Empty Box</strong> — weight under 2kg.</td></tr>'
-    + '<tr><td>BBM</td><td><strong>Bought By Mistake</strong> — manual flag; runs the LIT chain, forks to collection by volume.</td></tr>'
+  let h = '<details class="method-desc-card">'
+    + '<summary>How methods are chosen — definitions</summary>'
+    + '<table>'
+      + '<tr><td>LIT</td><td><strong>Label In Transit.</strong> Retailer provides a parcel-shop drop-off label for unwanted goods. Most common return path.</td></tr>'
+      + '<tr><td>LIT with pic</td><td><strong>Same, but for damaged goods.</strong> Retailer only provides the label when a damage photo is supplied. A picture of the damaged item is captured as part of the return — the specific how-to-photograph guidance is tailored per item.</td></tr>'
+      + '<tr><td>RTS</td><td><strong>Return To Sender.</strong> No return label needed — when the inbound courier is DPD, Royal Mail, or Parcelforce, mark the parcel "return to sender" and they take it back.</td></tr>'
+      + '<tr><td>DNA</td><td><strong>Did Not Arrive.</strong> The delivery photo doesn\'t show the recipient, suggesting non-delivery. Skip the return entirely; claim immediately.</td></tr>'
+      + '<tr><td>PEB</td><td><strong>Possible Empty Box.</strong> Item quantity above 10 suggests the parcel can\'t hold everything ordered. No physical return; we escalate.</td></tr>'
+      + '<tr><td>EB</td><td><strong>Empty Box.</strong> Total weight under 2 kg for a larger order suggests the parcel was empty.</td></tr>'
+      + '<tr><td>BBM</td><td><strong>Bought By Mistake.</strong> Manual flag. Runs the LIT chain, but forks by volume: ≤ 60 L → return label as normal; > 60 L AND the store offers collection → home collection (book collection date, then hand items over for collection).</td></tr>'
     + '</table></details>';
 
-  // Interactive explorer (hypothetical) — toggle variables, watch the path resolve
-  h += mcExplorerHtml(flags);
+  const deciding = [], preDeciding = [], pastDeciding = [];
+  DATA.orders.forEach(o => {
+    const st = computeStage(o);
+    if (st === 'done' || st >= 4) pastDeciding.push(o);
+    else if (st === 3) deciding.push(o);
+    else preDeciding.push(o);
+  });
+  deciding.sort((a,b) => (b.price||0) - (a.price||0));
+  preDeciding.sort((a,b) => (computeStage(a) - computeStage(b)) || ((b.price||0) - (a.price||0)));
 
-  // AUTO-DECIDED
-  h += '<h3 class="delivery-h" style="margin-top:20px">Auto-decided <span class="count">'+auto.length+'</span></h3>';
-  h += '<p style="font-size:12px;color:var(--ink-faded);margin:0 0 8px">All variables the tree needs are present — the method resolves automatically. Admin can commit it to the order.</p>';
-  h += auto.length ? auto.map(({o,r})=>mcOrderCard(o,r,flags,false)).join('') : '<div class="empty-state">No orders auto-decide right now.</div>';
+  h += '<h3 class="delivery-h" style="margin-top:18px">Deciding now <span class="count">'+deciding.length+'</span></h3>';
+  h += deciding.length ? deciding.map(o => renderOrderFlowchart(o, flags)).join('') : '<div class="empty-state">No orders at the deciding stage right now.</div>';
 
-  // MISSING INFO TO DECIDE
-  h += '<h3 class="delivery-h" style="margin-top:24px">Missing info to decide <span class="count">'+missing.length+'</span></h3>';
-  h += '<p style="font-size:12px;color:var(--ink-faded);margin:0 0 8px">The tree stalls here — each needs one variable before it can resolve.</p>';
-  h += missing.length ? missing.map(({o,r})=>mcOrderCard(o,r,flags,true)).join('') : '<div class="empty-state">Nothing blocked on missing info.</div>';
+  h += '<h3 class="delivery-h" style="margin-top:24px">Pre-deciding <span class="count">'+preDeciding.length+'</span></h3>';
+  if (preDeciding.length) {
+    h += '<p style="font-size:12px;color:var(--ink-faded);margin:0 0 8px">Orders at stages 1–2 — some variables aren\'t known yet (?). The flowchart shows what would resolve given current data.</p>';
+    h += preDeciding.slice(0, 8).map(o => renderOrderFlowchart(o, flags)).join('');
+    if (preDeciding.length > 8) h += '<div style="text-align:center;padding:10px;color:var(--ink-faded);font-size:12px">+ '+(preDeciding.length - 8)+' more — see Orders Database</div>';
+  } else {
+    h += '<div class="empty-state">Nothing in pre-deciding.</div>';
+  }
+
+  h += '<h3 class="delivery-h" style="margin-top:24px">Past deciding <span class="count">'+pastDeciding.length+'</span></h3>';
+  h += '<div class="empty-state" style="text-align:left;font-style:normal;padding:14px 18px">These orders already have a method chosen and are working through the rest of the workflow. They live in the <a style="color:var(--blue);cursor:pointer;text-decoration:underline" onclick="goToTab(\'orders\')">Orders Database</a> — that\'s where you\'ll find them.</div>';
 
   body.innerHTML = h;
 }
-
-function mcOrderCard(o, r, flags, isMissing){
-  const dwell = daysInCurrentStage(o);
-  const dwellBadge = '<span class="badge-mini" title="days awaiting method decision" style="background:'+(dwell>=7?'var(--red-soft);color:var(--red)':dwell>=3?'var(--amber-soft);color:var(--amber)':'var(--line-soft);color:var(--ink-faded)')+'">'+dwell+'d awaiting decision</span>';
-  let inner='';
-  if(isMissing){
-    const need = r.need;
-    inner = '<div style="margin-top:8px;padding:8px 10px;background:var(--amber-soft);border-radius:6px;font-size:13px;color:var(--amber)">Stalls at <strong>'+r.blocked+'</strong> — needs '+escapeHtml(MC_NEED_LABEL[need]||need)+'.</div>'
-      + (need==='store_unwanted'
-          ? '<button class="primary small" style="margin-top:8px" onclick="event.stopPropagation();openStoreByName(\''+escAttr(o.store)+'\')">Set store flags</button>'
-          : '<button class="primary small" style="margin-top:8px" onclick="event.stopPropagation();openOrderModal(\''+escAttr(o.order_id)+'\')">Open order to fill</button>');
-  } else {
-    const badge = '<span class="badge-mini" style="'+methodBadgeClass(r.method)+'">'+escapeHtml(r.method)+'</span>';
-    inner = '<div style="margin-top:8px;padding:8px 10px;background:var(--green-soft);border-radius:6px;font-size:13px;color:var(--green)">Resolves to '+badge+' at '+r.at+'.</div>'
-      + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
-      + '<button class="primary small" onclick="event.stopPropagation();mcCommit(\''+escAttr(o.order_id)+'\',\''+escAttr(r.method)+'\')">✓ Use '+escapeHtml(r.method)+' for this order</button>'
-      + '<button class="small" onclick="event.stopPropagation();mcOpenExplorer(\''+escAttr(o.order_id)+'\')">Explore variables</button>'
-      + '</div>';
-  }
-  return '<div class="order-card" style="border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px">'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
-    + '<div><strong>'+escapeHtml(o.store)+'</strong> <span style="color:var(--ink-faded);font-size:12px">#'+escapeHtml(o.order_id)+' · '+escapeHtml(o.items||'')+'</span></div>'
-    + '<div style="display:flex;gap:6px;align-items:center">'+dwellBadge+'<span style="font-size:12px;color:var(--ink-faded)">'+fmtMoney(o.price||0)+'</span></div>'
-    + '</div>' + inner + '</div>';
-}
-
-// ---- Hypothetical explorer ----
-function mcOpenExplorer(orderId){
-  const o = DATA.orders.find(x=>x.order_id===orderId);
-  const flags = getStoreFlags();
-  MC_HYPO = { orderId, vars: mcVarsForOrder(o, flags) };
-  renderMethodLogic();
-  const el=document.getElementById('mcExplorer'); if(el) el.scrollIntoView({behavior:'smooth',block:'center'});
-}
-function mcExplorerHtml(flags){
-  const v = MC_HYPO ? MC_HYPO.vars : { bbm:false, store_unwanted:null, store_damaged:false, inbound_courier:'', delivery_photo_shows_person:'', qty:1, weight:'' };
-  const r = mcEvaluate(v);
-  const tri = (val)=> val===true?'yes':val===false?'no':'unknown';
-  const seg = (key,val,opts)=> opts.map(op=>{
-    const active = String(v[key])===String(op.val) || (op.val===null && (v[key]===null||v[key]===undefined));
-    return '<button class="small" style="padding:4px 9px;'+(active?'background:var(--ink);color:var(--bg-card)':'')+'" onclick="mcSetHypo(\''+key+'\',\''+(op.val===null?'null':op.val)+'\')">'+op.lab+'</button>';
-  }).join('');
-  const courierOpts = ['',...['DPD','Royal Mail','Parcelforce','Evri','DHL','FedEx','Other']].map(c=>'<option '+(v.inbound_courier===c?'selected':'')+'>'+(c||'unknown')+'</option>').join('');
-  const title = MC_HYPO ? ('Exploring #'+escapeHtml(MC_HYPO.orderId)+' — hypothetical') : 'Decision-tree explorer';
-  const methodCell = r.blocked
-    ? '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">stalls at '+r.blocked+'</span>'
-    : '<span class="badge-mini" style="'+methodBadgeClass(r.method)+'">'+escapeHtml(r.method)+'</span>';
-  return '<div id="mcExplorer" style="border:1px dashed var(--blue);border-radius:10px;padding:14px;margin-top:14px;background:var(--blue-soft)">'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><strong style="font-size:13px">'+title+'</strong>'
-    + (MC_HYPO?'<button class="small" onclick="mcClearHypo()">Clear</button>':'')+'</div>'
-    + '<div style="display:grid;gap:8px;font-size:13px">'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>BBM (bought by mistake)</span><span>'+seg('bbm',v.bbm,[{val:'true',lab:'yes'},{val:'false',lab:'no'}])+'</span></div>'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>Q1 · store unwanted-label</span><span>'+seg('store_unwanted',v.store_unwanted,[{val:'true',lab:'yes'},{val:'false',lab:'no'},{val:null,lab:'unknown'}])+'</span></div>'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>Q2 · store damaged-label</span><span>'+seg('store_damaged',v.store_damaged,[{val:'true',lab:'yes'},{val:'false',lab:'no'}])+'</span></div>'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>Q3 · inbound courier</span><select onchange="mcSetHypo(\'inbound_courier\',this.value===\'unknown\'?\'\':this.value)" style="padding:3px 6px">'+courierOpts+'</select></div>'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>Q4 · photo shows recipient</span><span>'+seg('delivery_photo_shows_person',v.delivery_photo_shows_person,[{val:'yes',lab:'yes'},{val:'no',lab:'no'},{val:'',lab:'unknown'}])+'</span></div>'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>Q5 · quantity</span><input type="number" value="'+(v.qty||1)+'" min="1" style="width:70px;padding:3px 6px" onchange="mcSetHypo(\'qty\',this.value)"></div>'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>Q6 · weight (kg)</span><input type="number" value="'+(v.weight||'')+'" step="0.1" style="width:70px;padding:3px 6px" placeholder="?" onchange="mcSetHypo(\'weight\',this.value)"></div>'
-    + '<div style="border-top:1px solid var(--line);margin-top:4px;padding-top:8px;display:flex;justify-content:space-between;align-items:center"><span style="font-weight:600">Resolves to</span>'+methodCell+'</div>'
-    + (MC_HYPO && !r.blocked ? '<button class="primary small" style="margin-top:4px" onclick="mcCommit(\''+escAttr(MC_HYPO.orderId)+'\',\''+escAttr(r.method)+'\')">✓ Commit '+escapeHtml(r.method)+' to #'+escapeHtml(MC_HYPO.orderId)+'</button>' : '')
-    + '</div></div>';
-}
-function mcSetHypo(key,val){
-  if(!MC_HYPO) MC_HYPO = { orderId:null, vars:{ bbm:false, store_unwanted:null, store_damaged:false, inbound_courier:'', delivery_photo_shows_person:'', qty:1, weight:'' } };
-  let v = val;
-  if(val==='true') v=true; else if(val==='false') v=false; else if(val==='null') v=null;
-  MC_HYPO.vars[key]=v;
-  renderMethodLogic();
-  const el=document.getElementById('mcExplorer'); if(el) el.scrollIntoView({block:'center'});
-}
-function mcClearHypo(){ MC_HYPO=null; renderMethodLogic(); }
-
-// ---- Commit a method to an order ----
-function mcCommit(orderId, method){
-  const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
-  if(method==='BBM'){ setBBM(orderId,'yes',true); return; }
-  o.method = method;
-  // mark the relevant creation trigger so the order advances onto the return chain
-  o.triggers = o.triggers||{};
-  if(method==='LIT'||method==='LIT with pic') o.triggers.lit_created = o.triggers.lit_created||false; // label still to be created
-  if(method==='RTS') o.triggers.rts_created = o.triggers.rts_created||false;
-  touchStageHistory(o);
-  saveData(); renderAll();
-}
-// ---- Set / clear BBM (from delivery stage OR method choice); switches to BBM chain ----
-function setBBM(orderId, val, fromMC){
-  const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
-  o.bought_by_mistake = val;
-  if(val==='yes'){ o.method = 'BBM'; }
-  else if(o.method==='BBM'){ o.method=''; }
-  touchStageHistory(o);
-  saveData(); renderAll();
-}
-
 
 // ---------- STORES TAB ----------
 let storeFilter='all', storeOpenIdx=null, STORE_REG_CACHE=[];
@@ -4145,58 +3850,6 @@ function saveStoreForm(){
 }
 
 // ---------- PARCELSHOP TAB ----------
-let DELIVERY_VIEW='cards', DELIVERY_CAL_MONTH=null; // month = Date of first-of-month
-function setDeliveryView(v){ DELIVERY_VIEW=v; renderDelivery(); }
-function deliveryCalShift(n){
-  const base = DELIVERY_CAL_MONTH || new Date();
-  DELIVERY_CAL_MONTH = new Date(base.getFullYear(), base.getMonth()+n, 1);
-  renderDelivery();
-}
-function renderDeliveryCalendar(awaitingDelivery, awaitingCollection){
-  const today=new Date(); today.setHours(0,0,0,0);
-  const m = DELIVERY_CAL_MONTH || new Date(today.getFullYear(), today.getMonth(), 1);
-  const monthStart = new Date(m.getFullYear(), m.getMonth(), 1);
-  const monthName = monthStart.toLocaleString('en-GB',{month:'long',year:'numeric'});
-  // bucket events by yyyy-mm-dd
-  const ev = {};
-  function add(o, dateStr, kind){
-    const d = parseDateLoose(dateStr); if(!d) return;
-    const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-    (ev[key]=ev[key]||[]).push({o,kind});
-  }
-  awaitingDelivery.forEach(o=>add(o,o.delivery_date_text,'delivery'));
-  awaitingCollection.forEach(o=>add(o,o.collection_date,'collection'));
-  // grid: start on Monday
-  const firstDay = (monthStart.getDay()+6)%7; // 0=Mon
-  const daysInMonth = new Date(m.getFullYear(), m.getMonth()+1, 0).getDate();
-  let cells=[];
-  for(let i=0;i<firstDay;i++) cells.push(null);
-  for(let d=1; d<=daysInMonth; d++) cells.push(d);
-  while(cells.length%7!==0) cells.push(null);
-  const dow=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  let h='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
-    + '<button class="small" onclick="deliveryCalShift(-1)">‹ Prev</button>'
-    + '<strong>'+monthName+'</strong>'
-    + '<button class="small" onclick="deliveryCalShift(1)">Next ›</button></div>';
-  h+='<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">';
-  dow.forEach(d=>h+='<div style="text-align:center;font-size:11px;color:var(--ink-faded);font-weight:600;padding:4px 0">'+d+'</div>');
-  cells.forEach(d=>{
-    if(d===null){ h+='<div style="min-height:78px;background:var(--bg);border-radius:6px"></div>'; return; }
-    const key=m.getFullYear()+'-'+String(m.getMonth()+1).padStart(2,'0')+'-'+String(d).padStart(2,'0');
-    const isToday = (m.getFullYear()===today.getFullYear() && m.getMonth()===today.getMonth() && d===today.getDate());
-    const items = ev[key]||[];
-    let inner='<div style="font-size:11px;font-weight:600;color:'+(isToday?'var(--blue)':'var(--ink-faded)')+'">'+d+'</div>';
-    items.slice(0,3).forEach(({o,kind})=>{
-      const col = kind==='delivery'?'var(--blue-soft);color:var(--blue)':'var(--accent-soft);color:var(--accent-deep)';
-      inner+='<div onclick="openOrderModal(\''+escAttr(o.order_id)+'\')" title="'+escAttr(o.store+' — '+(o.items||''))+'" style="margin-top:2px;font-size:10px;padding:1px 4px;border-radius:3px;background:'+col+';cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+(kind==='delivery'?'📦 ':'🚚 ')+escapeHtml(o.store)+'</div>';
-    });
-    if(items.length>3) inner+='<div style="font-size:9px;color:var(--ink-faded);margin-top:1px">+'+(items.length-3)+' more</div>';
-    h+='<div style="min-height:78px;background:var(--bg-card);border:1px solid '+(isToday?'var(--blue)':'var(--line)')+';border-radius:6px;padding:4px">'+inner+'</div>';
-  });
-  h+='</div>';
-  h+='<div style="display:flex;gap:14px;margin-top:10px;font-size:11px;color:var(--ink-faded)"><span>📦 delivery</span><span>🚚 collection</span></div>';
-  return h;
-}
 function renderDelivery() {
   const target = document.getElementById('deliveryBody'); if (!target) return;
   const now = new Date(); const today = new Date(); today.setHours(0,0,0,0);
@@ -4236,12 +3889,7 @@ function renderDelivery() {
       button = '<button class="prim" style="margin-top:10px;width:100%" onclick="event.stopPropagation(); markDelivered(\''+escAttr(o.order_id)+'\')">Mark received ✓</button>'; }
     else if (kind === 'collection') { const x = dateLineCollection(o); line = x.line; badge = x.badge;
       button = '<button class="prim" style="margin-top:10px;width:100%" onclick="event.stopPropagation(); markHandedOver(\''+escAttr(o.order_id)+'\')">Mark handed over ✓</button>'; }
-    else { line = o.delivery_date_text ? 'Delivered '+escapeHtml(o.delivery_date_text) : 'Delivered'; badge = '<span class="badge-mini" style="background:var(--green-soft);color:var(--green)">received</span>';
-      const isBBM = o.bought_by_mistake==='yes';
-      button = '<div style="margin-top:10px;display:flex;align-items:center;gap:6px;font-size:12px" onclick="event.stopPropagation()">'
-        + '<label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" '+(isBBM?'checked':'')+' onchange="setBBM(\''+escAttr(o.order_id)+'\', this.checked?\'yes\':\'no\')"> Bought by mistake (BBM)</label>'
-        + (isBBM?'<span class="badge-mini" style="background:var(--accent-soft);color:var(--accent-deep)">BBM chain</span>':'')
-        + '</div>'; }
+    else { line = o.delivery_date_text ? 'Delivered '+escapeHtml(o.delivery_date_text) : 'Delivered'; badge = '<span class="badge-mini" style="background:var(--green-soft);color:var(--green)">received</span>'; }
     return '<div class="delivery-card" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">'
       + '<div class="delivery-head"><div class="delivery-store">'+escapeHtml(o.store)+'</div>'+badge+'</div>'
       + '<div class="delivery-items">'+escapeHtml(o.items || '')+'</div>'
@@ -4251,16 +3899,6 @@ function renderDelivery() {
   }
 
   let h = '';
-  h += '<div style="display:flex;gap:6px;margin-bottom:14px">'
-    + '<button class="tab-btn '+(DELIVERY_VIEW==='cards'?'active':'')+'" style="padding:6px 12px" onclick="setDeliveryView(\'cards\')">Cards</button>'
-    + '<button class="tab-btn '+(DELIVERY_VIEW==='calendar'?'active':'')+'" style="padding:6px 12px" onclick="setDeliveryView(\'calendar\')">Calendar</button>'
-    + '</div>';
-  if(DELIVERY_VIEW==='calendar'){
-    h += renderDeliveryCalendar(awaitingDelivery, awaitingCollection);
-    target.innerHTML = h;
-    const cb0 = document.getElementById('deliveryCount'); if (cb0) cb0.textContent = awaitingDelivery.length + awaitingCollection.length;
-    return;
-  }
   h += '<h3 class="delivery-h">Awaiting delivery <span class="count">'+awaitingDelivery.length+'</span></h3>';
   h += awaitingDelivery.length ? '<div class="delivery-grid">'+awaitingDelivery.map(o=>card(o,'delivery')).join('')+'</div>' : '<div class="empty-state">Nothing on the way right now.</div>';
   h += '<h3 class="delivery-h" style="margin-top:24px">Awaiting collection <span class="count">'+awaitingCollection.length+'</span></h3>';
