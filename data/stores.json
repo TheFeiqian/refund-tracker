@@ -1,0 +1,808 @@
+[
+{
+"name": "3HLINEN",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Adidas",
+"unwanted": true,
+"damaged": false,
+"collection": false,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 23000000000,
+"contact": {
+"phone": "+44 207 365 7315",
+"email": "service-running-gb@cs.adidas.com",
+"portal": "https://www.adidas.co.uk/help/returns-refunds",
+"chat": true
+}
+},
+{
+"name": "Andertons Music Co.",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 40000000,
+"contact": null
+},
+{
+"name": "Anker",
+"unwanted": true,
+"damaged": false,
+"collection": false,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 2400000000,
+"contact": {
+"phone": "+44 1604 936 200",
+"email": "uk.support@anker.com",
+"portal": "https://service.anker.com/uk",
+"chat": true
+}
+},
+{
+"name": "Aromatherapy Associates",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 35000000,
+"contact": null
+},
+{
+"name": "Birckenstock",
+"unwanted": true,
+"damaged": false,
+"collection": false,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 1800000000,
+"contact": {
+"phone": "+44 20 7862 1725",
+"email": "customerservice.gb@birkenstock.com",
+"portal": "https://www.birkenstock.com/gb/service-returns.html",
+"chat": true
+}
+},
+{
+"name": "Carhart",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 1000000000,
+"contact": null
+},
+{
+"name": "Charles & Ivy",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Cos",
+"unwanted": true,
+"damaged": false,
+"collection": false,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 1000000000,
+"contact": {
+"phone": "0344 249 2079",
+"email": "customerservice@cosstores.com",
+"portal": "https://www.cos.com/en-gb/customer-service/returns",
+"chat": false
+}
+},
+{
+"name": "Cotswold Company",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"large furniture items",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 90000000,
+"contact": null
+},
+{
+"name": "Covert Companion™ Pro - Locksmith Tool Accessories",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Curry",
+"unwanted": true,
+"damaged": false,
+"collection": true,
+"cat": [
+"tech",
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 8706000000,
+"contact": {
+"phone": "0344 561 1234",
+"email": "customer.services@currys.co.uk",
+"portal": "",
+"chat": true
+}
+},
+{
+"name": "DIY building supply",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items",
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Desktronic",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"large furniture items",
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "DoorJammerUK",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Ebay",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 10000000000,
+"contact": null
+},
+{
+"name": "Foxdry",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Fruugo",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 100000000,
+"contact": null
+},
+{
+"name": "Hackett",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 150000000,
+"contact": null
+},
+{
+"name": "Hbada",
+"unwanted": false,
+"damaged": false,
+"collection": true,
+"cat": [
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Hofats",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Icebreaker",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 300000000,
+"contact": null
+},
+{
+"name": "Ikea",
+"unwanted": true,
+"damaged": false,
+"collection": true,
+"cat": [
+"large furniture items",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 45000000000,
+"contact": {
+"phone": "01733 520006",
+"portal": "https://www.ikea.com/gb/en/customer-service/returns-claims/",
+"chat": true
+}
+},
+{
+"name": "John Lewis",
+"unwanted": true,
+"damaged": false,
+"collection": true,
+"cat": [
+"clothes",
+"tech",
+"home items",
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 12800000000,
+"contact": {
+"phone": "03456 049 049",
+"portal": "https://www.johnlewis.com/customer-services/returns/how-to-return-your-item",
+"chat": true
+}
+},
+{
+"name": "Joseph&Joseph",
+"unwanted": true,
+"damaged": false,
+"collection": true,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 116000000,
+"contact": {
+"email": "info@josephjoseph.com",
+"portal": "https://www.josephjoseph.com/pages/returns"
+}
+},
+{
+"name": "Le Chameau",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 40000000,
+"contact": null
+},
+{
+"name": "Loaf",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"large furniture items",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 60000000,
+"contact": null
+},
+{
+"name": "Luca Faloni",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 26700000,
+"contact": null
+},
+{
+"name": "M&s",
+"unwanted": true,
+"damaged": false,
+"collection": false,
+"cat": [
+"clothes",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 13100000000,
+"contact": {
+"portal": "https://www.marksandspencer.com/help-and-support/returns-and-refunds",
+"chat": true
+}
+},
+{
+"name": "Massmo dutti",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 1900000000,
+"contact": null
+},
+{
+"name": "Mountain Warehouse",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 350000000,
+"contact": null
+},
+{
+"name": "Mr Porter",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 200000000,
+"contact": null
+},
+{
+"name": "ONKRON",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Oakworld",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Phillips",
+"unwanted": true,
+"damaged": false,
+"collection": false,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 18000000000,
+"contact": {
+"phone": "+44 203 996 4987",
+"email": "",
+"portal": "https://www.philips.co.uk/c-w/support-home/support-contact-page",
+"chat": true
+}
+},
+{
+"name": "SharkNinja",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 4300000000,
+"contact": null
+},
+{
+"name": "Soak & Sleep",
+"unwanted": true,
+"damaged": false,
+"collection": true,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 900000,
+"contact": {
+"phone": "0333 011 4200",
+"email": "info@soakandsleep.com",
+"portal": "https://www.soakandsleep.com/pages/returns-guarantee",
+"chat": false
+}
+},
+{
+"name": "Soak and sleep",
+"unwanted": true,
+"damaged": false,
+"collection": true,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 900000,
+"contact": {
+"phone": "0333 011 4200",
+"email": "info@soakandsleep.com",
+"portal": "https://www.soakandsleep.com/pages/returns-guarantee",
+"chat": false
+}
+},
+{
+"name": "SockSnob",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "SwitchBot",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "Therabody",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 500000000,
+"contact": null
+},
+{
+"name": "Tikamoon",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 80000000,
+"contact": null
+},
+{
+"name": "Victorian Plumbing",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items",
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 280000000,
+"contact": null
+},
+{
+"name": "Viking Direct",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 150000000,
+"contact": null
+},
+{
+"name": "XGIMI",
+"unwanted": false,
+"damaged": false,
+"collection": false,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 500000000,
+"contact": null
+},
+{
+"name": "aosom",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"large furniture items",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "chronos",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "coway",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech",
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 3000000000,
+"contact": null
+},
+{
+"name": "cult furniture",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 14800000,
+"contact": null
+},
+{
+"name": "dunelm",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items",
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 1700000000,
+"contact": null
+},
+{
+"name": "dyson",
+"unwanted": true,
+"damaged": false,
+"collection": false,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 7100000000,
+"contact": {
+"phone": "0800 298 0298",
+"email": "",
+"portal": "https://www.dyson.co.uk/support",
+"chat": true
+}
+},
+{
+"name": "ironmongerydirect",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 100000000,
+"contact": null
+},
+{
+"name": "poe direct",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"tech"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "rituals",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 1500000000,
+"contact": null
+},
+{
+"name": "tieco.uk",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"clothes"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": null,
+"contact": null
+},
+{
+"name": "westwing",
+"unwanted": null,
+"damaged": null,
+"collection": null,
+"cat": [
+"home items",
+"large furniture items"
+],
+"inbound_courier": null,
+"return_label_courier": null,
+"revenue": 430000000,
+"contact": null
+}
+]
