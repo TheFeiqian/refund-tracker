@@ -913,12 +913,14 @@ document.addEventListener('DOMContentLoaded', bootHosted);
         </select>
         <label>Person</label><select id="priorityPersonFilter"><option value="all">All</option></select>
         <label>Search</label><input type="text" id="prioritySearch" placeholder="Order ID, store, item...">
+        <label>Group</label><select id="priorityGroupBy"><option value="type">By task type</option><option value="none">Flat (by priority)</option></select>
       </div>
       <div class="filter-group">
         <label>Total priority</label>
         <span id="priorityTotalValue" style="font-family:var(--mono);font-weight:500"></span>
       </div>
     </div>
+    <div id="sentTracker"></div>
     <div class="priority-table-wrap">
       <table class="priority-table">
         <thead>
@@ -1777,6 +1779,78 @@ function getAllPeople() {
 }
 
 // ============================================================
+// PHASE 2 DEPLOY B — TASK STATUS TRACKING (sent_at / completed_at)
+// Stored on DATA._taskStatus keyed by task_id. Copy and Mark-sent are
+// SEPARATE actions (Copy = clipboard, Mark sent = records sent_at). The
+// admin tracker reads this to show sent / completed / days-outstanding.
+// ============================================================
+function taskStatusStore(){ if(!DATA._taskStatus) DATA._taskStatus={}; return DATA._taskStatus; }
+function getTaskStatus(taskId){ return taskStatusStore()[taskId] || null; }
+function markTaskSent(taskId, to, channel){
+  const s = taskStatusStore();
+  s[taskId] = Object.assign({}, s[taskId], { sent_at: Date.now(), sent_to: to||'', channel: channel||'telegram' });
+  saveData();
+}
+function markTaskCompleted(taskId){
+  const s = taskStatusStore();
+  if(!s[taskId]) s[taskId]={};
+  s[taskId].completed_at = Date.now();
+  saveData();
+}
+function clearTaskSent(taskId){
+  const s = taskStatusStore(); if(s[taskId]){ delete s[taskId].sent_at; delete s[taskId].sent_to; saveData(); }
+}
+function daysOutstanding(taskId){
+  const st = getTaskStatus(taskId); if(!st || !st.sent_at) return null;
+  const end = st.completed_at || Date.now();
+  return Math.max(0, (end - st.sent_at)/86400000);
+}
+// Build the copy-paste Telegram message for a task.
+function buildTaskMessage(task, order){
+  const who = (order.person||'').trim();
+  const p = personByName(who);
+  const handle = p ? tgDisplay(p) : '';
+  const instr = generateInstruction(task, order);
+  const lines = [];
+  lines.push((handle?handle+' ':'')+'— task for order #'+(order.order_id||'')+' ('+(order.store||'')+')');
+  if(order.items) lines.push('Item: '+order.items);
+  lines.push('');
+  lines.push('Task: '+(task.type?task.type.name:'')+' ['+(task.type?task.type.code:'')+']');
+  lines.push('');
+  lines.push(instr);
+  lines.push('');
+  lines.push('Once done, reply here or update the tracker.');
+  return lines.join('\n');
+}
+// Build the info-request message for a Method-Choice missing-info field.
+function buildInfoRequestMessage(order, need, needLabel){
+  const who = (emailHolder(order)||order.person||'').trim();
+  const p = personByName(who);
+  const handle = p ? tgDisplay(p) : '';
+  const lines = [];
+  lines.push((handle?handle+' ':'')+'— info needed for order #'+(order.order_id||'')+' ('+(order.store||'')+')');
+  if(order.items) lines.push('Item: '+order.items);
+  lines.push('');
+  lines.push('To decide the return method we need: '+(needLabel||need)+'.');
+  lines.push('');
+  if(need==='inbound_courier') lines.push('Please reply with the courier that delivered it (e.g. DPD, Royal Mail, Evri, DHL).');
+  else if(need==='delivery_photo_shows_person') lines.push('Does the delivery/proof-of-delivery photo show you receiving it? Please reply yes or no.');
+  else if(need==='weight') lines.push('Please reply with the total parcel weight in kg.');
+  else lines.push('Please reply with the missing detail above.');
+  return lines.join('\n');
+}
+function copyToClipboard(text, okMsg){
+  try{
+    const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    let ok=false; try{ ok=document.execCommand('copy'); }catch(e){}
+    document.body.removeChild(ta);
+    if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text).catch(()=>{}); }
+    showToast(okMsg||'Copied to clipboard','success');
+  }catch(e){ showToast('Copy failed — select and copy manually','error'); }
+}
+
+// ============================================================
 // INSTRUCTION GENERATION
 // ============================================================
 function tplVal(order, key) {
@@ -2261,6 +2335,7 @@ function renderPriorityQueue() {
   const stageFilter = document.getElementById('priorityStageFilter').value;
   const personFilter = document.getElementById('priorityPersonFilter').value;
   const search = document.getElementById('prioritySearch').value.toLowerCase().trim();
+  const groupBy = (document.getElementById('priorityGroupBy')||{}).value || 'type';
   
   // Populate people filter
   const personSel = document.getElementById('priorityPersonFilter');
@@ -2277,10 +2352,22 @@ function renderPriorityQueue() {
     (t.order.items || '').toLowerCase().includes(search) ||
     (t.task.type.code || '').toLowerCase().includes(search)
   );
-  tasks.sort((a, b) => b.score - a.score);
+  if (groupBy === 'type') {
+    // group by task type: order groups by their highest in-group priority, then by score within
+    const bestByType = {};
+    tasks.forEach(t => { const c = t.task.type.code; if (bestByType[c]===undefined || t.score>bestByType[c]) bestByType[c]=t.score; });
+    tasks.sort((a, b) => {
+      const ca=a.task.type.code, cb=b.task.type.code;
+      if (ca!==cb) return (bestByType[cb]-bestByType[ca]) || ca.localeCompare(cb);
+      return b.score - a.score;
+    });
+  } else {
+    tasks.sort((a, b) => b.score - a.score);
+  }
   
   document.getElementById('priorityCount').textContent = tasks.length;
   document.getElementById('priorityTotalValue').textContent = fmtMoney(tasks.reduce((s, t) => s + t.score, 0));
+  renderSentTracker();
   
   const tbody = document.getElementById('priorityTableBody');
   if (tasks.length === 0) {
@@ -2290,7 +2377,16 @@ function renderPriorityQueue() {
   
   const allPeople = getAllPeople();
   
+  let _lastType = null;
   tbody.innerHTML = tasks.map((t, idx) => {
+    let groupHeader = '';
+    if (groupBy === 'type' && t.task.type.code !== _lastType) {
+      _lastType = t.task.type.code;
+      const inGroup = tasks.filter(x=>x.task.type.code===_lastType);
+      const groupVal = inGroup.reduce((s,x)=>s+x.score,0);
+      groupHeader = `<tr class="task-group-head"><td colspan="9" style="background:var(--bg);font-weight:700;font-size:12px;padding:8px 12px;border-top:2px solid var(--line)">
+        ${escapeHtml(t.task.type.name)} <span style="color:var(--ink-faded);font-weight:400">· ${inGroup.length} task${inGroup.length===1?'':'s'} · ${fmtMoney(groupVal)} total priority</span></td></tr>`;
+    }
     const rowKey = `task_${idx}_${(t.task.task_id || '').replace(/[^a-z0-9]/gi, '_')}`;
     const overdueClass = t.overdue_days > 0 ? '' : 'priority-on-time';
     const overdueText = t.overdue_days > 0 ? fmtDays(t.overdue_days) + ' overdue' : 'on time';
@@ -2319,7 +2415,7 @@ function renderPriorityQueue() {
         ${peopleSelectHtml}
       </div>`;
     
-    return `
+    return `${groupHeader}
       <tr class="task-row" onclick="togglePriorityExpand('${rowKey}')" id="row_${rowKey}">
         <td><span class="expand-chevron">&rsaquo;</span></td>
         <td>
@@ -2358,8 +2454,12 @@ function renderPriorityQueue() {
             <div class="task-delegate-pane">
               <div class="block-label"><span>Delegation</span></div>
               ${delegateHtml}
-              <div class="send-row" onclick="event.stopPropagation()">
-                <button class="primary" onclick="sendInstruction('${rowKey}', '${escAttr(t.task.task_id)}', ${t.task.type.owner_only}, '${escAttr(t.order.person || '')}'); event.stopPropagation();">&rarr; Send</button>
+              <div class="send-row" onclick="event.stopPropagation()" style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="small" onclick="copyTaskMessage('${escAttr(t.task.task_id)}','${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();">📋 Copy message</button>
+                  <button class="primary small" onclick="markSentFromQueue('${rowKey}','${escAttr(t.task.task_id)}', ${t.task.type.owner_only}, '${escAttr(t.order.person || '')}'); event.stopPropagation();">✓ Mark as sent</button>
+                </div>
+                ${(function(){ const st=getTaskStatus(t.task.task_id); if(st&&st.completed_at) return '<div style="font-size:11px;color:var(--green)">✓ completed '+fmtDays((Date.now()-st.completed_at)/86400000)+' ago</div>'; if(st&&st.sent_at){ const d=daysOutstanding(t.task.task_id); return '<div style="font-size:11px;color:'+(d>=2?'var(--amber)':'var(--ink-faded)')+'">sent to '+escapeHtml(st.sent_to||'?')+' · '+fmtDays(d)+' outstanding <span style="cursor:pointer;text-decoration:underline" onclick=\'markTaskCompleted("'+escAttr(t.task.task_id)+'");renderAll()\'>mark done</span></div>'; } return ''; })()}
               </div>
               <div class="task-info-block">
                 <div class="label">Trigger flow</div>
@@ -2600,8 +2700,71 @@ function sendInstruction(rowKey, taskId, ownerOnly, suggestedPerson) {
   }
   showToast(`→ Would send to ${recipient || '(unassigned)'} (mock send — in production this fires email/Slack/Telegram)`, 'success');
 }
+// Deploy B: admin consolidated tracker — outstanding (sent, not completed) + recent completed.
+function _taskLabelFromId(taskId){
+  if(taskId.indexOf('info_')===0){
+    const rest=taskId.slice(5);
+    const us=rest.lastIndexOf('_');
+    const orderId=rest.slice(0,us), need=rest.slice(us+1);
+    return {orderId, label:'Info request — '+(MC_NEED_LABEL[need]||need)};
+  }
+  const tasks=getAllTasksWithPriority();
+  const t=tasks.find(x=>x.task.task_id===taskId);
+  if(t) return {orderId:t.order.order_id, label:(t.task.type?t.task.type.name:'Task')};
+  return {orderId:'', label:'Task'};
+}
+function renderSentTracker(){
+  const el=document.getElementById('sentTracker'); if(!el) return;
+  const store=taskStatusStore();
+  const ids=Object.keys(store);
+  const outstanding=[], completed=[];
+  ids.forEach(id=>{ const st=store[id]; if(!st||!st.sent_at) return;
+    const info=_taskLabelFromId(id);
+    const o=DATA.orders.find(x=>x.order_id===info.orderId);
+    const row={id, st, label:info.label, order:o, orderId:info.orderId, days:daysOutstanding(id)};
+    if(st.completed_at) completed.push(row); else outstanding.push(row);
+  });
+  if(!outstanding.length && !completed.length){ el.innerHTML=''; return; }
+  outstanding.sort((a,b)=>b.days-a.days);
+  completed.sort((a,b)=>b.st.completed_at-a.st.completed_at);
+  let h='<details class="method-desc-card" open style="margin-bottom:14px"><summary>Sent task tracker — '+outstanding.length+' outstanding'+(completed.length?(' · '+completed.length+' completed'):'')+'</summary>';
+  if(outstanding.length){
+    h+='<div style="overflow-x:auto"><table class="orders-table"><thead><tr><th>Task</th><th>Order</th><th>Sent to</th><th class="r">Outstanding</th><th></th></tr></thead><tbody>';
+    outstanding.forEach(r=>{
+      const dcol = r.days>=3?'color:var(--red)':r.days>=1?'color:var(--amber)':'color:var(--ink-faded)';
+      h+='<tr><td>'+escapeHtml(r.label)+'</td>'
+        +'<td>'+(r.order?('<span style="cursor:pointer;text-decoration:underline" onclick="openOrderModal(\''+escAttr(r.orderId)+'\')">#'+escapeHtml(r.orderId)+'</span> '+escapeHtml(r.order.store||'')):escapeHtml(r.orderId))+'</td>'
+        +'<td>'+escapeHtml(r.st.sent_to||'?')+'</td>'
+        +'<td class="r" style="'+dcol+'">'+fmtDays(r.days)+'</td>'
+        +'<td class="r"><button class="small" onclick="markTaskCompleted(\''+escAttr(r.id)+'\');renderAll()">Mark done</button> <button class="small" onclick="clearTaskSent(\''+escAttr(r.id)+'\');renderAll()" title="un-send">↺</button></td></tr>';
+    });
+    h+='</tbody></table></div>';
+  }
+  if(completed.length){
+    h+='<div style="font-size:12px;color:var(--ink-faded);margin-top:10px">Recently completed: '+completed.slice(0,8).map(r=>escapeHtml(r.label)+' (#'+escapeHtml(r.orderId)+', '+fmtDays((r.st.completed_at-r.st.sent_at)/86400000)+')').join(' · ')+'</div>';
+  }
+  h+='</details>';
+  el.innerHTML=h;
+}
+// Deploy B: Copy the Telegram message (clipboard only — does NOT mark sent).
+function copyTaskMessage(taskId, orderId, taskCode){
+  const order = DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
+  const tasks = getAllTasksWithPriority();
+  const t = tasks.find(x=>x.task.task_id===taskId);
+  const task = t ? t.task : {type:{code:taskCode,name:taskCode}};
+  copyToClipboard(buildTaskMessage(task, order), 'Message copied — paste into Telegram');
+}
+// Deploy B: Mark sent (records sent_at + recipient — separate from copy).
+function markSentFromQueue(rowKey, taskId, ownerOnly, suggestedPerson){
+  let recipient;
+  if(ownerOnly){ recipient = suggestedPerson; }
+  else { const sel=document.getElementById('assign_'+rowKey); recipient = sel?sel.value:suggestedPerson; }
+  markTaskSent(taskId, recipient, 'telegram');
+  renderAll();
+  showToast('Marked sent to '+(recipient||'?')+' — now tracked as outstanding', 'success');
+}
 
-['priorityStageFilter', 'priorityPersonFilter', 'prioritySearch'].forEach(id => {
+['priorityStageFilter', 'priorityPersonFilter', 'prioritySearch', 'priorityGroupBy'].forEach(id => {
   document.addEventListener('input', e => { if (e.target.id === id) renderPriorityQueue(); });
   document.addEventListener('change', e => { if (e.target.id === id) renderPriorityQueue(); });
 });
@@ -3558,6 +3721,20 @@ const STORE_SEED = {
 const SFLAGS_KEY = 'storeflags_v1';
 function getStoreFlags() { return hostedGetStoreFlags(); }
 function setStoreFlags(name, rec) { hostedSetStoreFlags(name, rec); }
+function applyHistFlags(name){
+  const reg = buildStoreRegistry();
+  const r = reg.find(x=>x.name===name); if(!r) return;
+  const flags = getStoreFlags();
+  const existing = flags[name] || {};
+  const rec = Object.assign({}, existing, {
+    assessed: true,
+    unwanted: r.suggest_unwanted ? true : (existing.unwanted||false),
+    damaged: (r.suggest_damaged && !r.suggest_unwanted) ? true : (existing.damaged||false)
+  });
+  setStoreFlags(name, rec);
+  saveData(); renderAll();
+  showToast('Applied history-suggested flags for '+name, 'success');
+}
 function orderQty(o) { return parseInt(o.item_quantity) || 1; }
 function methodOfOrder(o) {
   if (o.bought_by_mistake === 'yes') return 'BBM';
@@ -3617,12 +3794,26 @@ function buildStoreRegistry() {
     const f = flags[s.name];
     const catArr = f ? (Array.isArray(f.cat)?f.cat:(f.cat?[f.cat]:[])) : null;
     const inbound = (f && f.inbound_courier) || default_courier || '';
+    // ---- method-flag-from-history: infer drop-off flags from past confirmed methods ----
+    // LIT seen  -> store provides unwanted-goods label;  LIT with pic seen -> damaged label.
+    // LIT wins on conflict; both can be suggested; only a SUGGESTION where the flag
+    // isn't already explicitly set (so manual settings always override).
+    let litHist=false, litPicHist=false, rtsHist=false;
+    s.orders.forEach(o=>{ const m=(o.method||'').toLowerCase();
+      if(m==='lit') litHist=true;
+      else if(m==='lit with pic') litPicHist=true;
+      else if(m==='rts') rtsHist=true;
+    });
     const r = {name:s.name, order_count:s.orders.length, total_value:s.orders.reduce((x,o)=>x+(o.price||0),0),
       people:[...new Set(s.orders.map(o=>o.person).filter(Boolean))],
       couriers_seen:[...new Set(s.couriers)], default_courier, inbound_courier:inbound,
       unwanted: f?f.unwanted:null, damaged: f?f.damaged:null, collection: f?f.collection:null,
       cat: catArr, onboarded: !!f,
+      hist_unwanted: litHist, hist_damaged: litPicHist, hist_rts: rtsHist,
       order_ids: s.orders.map(o=>o.order_id)};
+    // suggested flags = explicit value if set, else history inference (LIT wins)
+    r.suggest_unwanted = (r.unwanted===null||r.unwanted===undefined) ? (litHist || null) : null;
+    r.suggest_damaged  = (r.damaged===null||r.damaged===undefined)  ? (litPicHist && !litHist ? true : null) : null;
     if (r.unwanted) r.auto_method='LIT';
     else if (r.damaged) r.auto_method='LIT with pic';
     else if (r.unwanted===null) r.auto_method='(set store flags)';
@@ -3661,6 +3852,53 @@ const FIELD_IMPACT = {
 };
 
 // ---------- DASHBOARD MODES ----------
+// ============================================================
+// PHASE 2 DEPLOY B — real cash-flow projection + stage bottleneck
+// Projected inflow = order value × store historical refund-success-rate,
+// dated at the order's expected refund date. Bottleneck = avg days in stage.
+// ============================================================
+function storeSuccessRate(storeName){
+  // success = orders from this store that reached resolved/refunded ÷ those that
+  // reached a terminal outcome (resolved or refund_unsuccessful). Fallback 0.7.
+  const os = DATA.orders.filter(o=>o.store===storeName);
+  let success=0, terminal=0;
+  os.forEach(o=>{ const t=o.triggers||{};
+    if(t.refunded||t.refund_successful){ success++; terminal++; }
+    else if(t.refund_unsuccessful){ terminal++; }
+  });
+  if(terminal>=3) return success/terminal;
+  // blend sparse store data toward the global rate
+  let gS=0,gT=0;
+  DATA.orders.forEach(o=>{ const t=o.triggers||{}; if(t.refunded||t.refund_successful){gS++;gT++;} else if(t.refund_unsuccessful){gT++;} });
+  const global = gT? gS/gT : 0.7;
+  return terminal? (success+global)/(terminal+1) : global;
+}
+function expectedRefundDate(o){
+  // expected = order created + typical days to refund (use avg of resolved orders, else 30)
+  const base = o.created_at || Date.now();
+  let days = 30;
+  const resolved = DATA.orders.filter(x=>{ const t=x.triggers||{}; return (t.refunded||t.refund_successful) && x.created_at; });
+  if(resolved.length){
+    // approximate: use stage history end if present, else 30
+    const spans = resolved.map(x=>{ const h=x.stage_history; if(h&&h.length>=2){ return (h[h.length-1].at - h[0].at)/86400000; } return 30; });
+    days = spans.reduce((a,b)=>a+b,0)/spans.length;
+  }
+  return base + days*86400000;
+}
+function cashflowProjection(){
+  // bucket projected inflow by month for open orders
+  const open = DATA.orders.filter(o=>computeStage(o)!=='done');
+  const byMonth = {};
+  open.forEach(o=>{
+    const d = new Date(expectedRefundDate(o));
+    const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+    const proj = (o.price||0) * storeSuccessRate(o.store);
+    byMonth[key] = (byMonth[key]||0) + proj;
+  });
+  return byMonth;
+}
+function fmtMonthKey(k){ const [y,m]=k.split('-'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m-1]+" '"+y.slice(2); }
+
 function renderDashExtra() {
   const mode = document.getElementById('dashMode').value;
   const ov = document.getElementById('dashOverview');
@@ -3677,23 +3915,41 @@ function renderDashExtra() {
     const pending=open.reduce((s,o)=>s+(o.price||0),0);
     const recovered=orders.filter(o=>computeStage(o)==='done').reduce((s,o)=>s+(o.refund_received_amount||o.price||0),0);
     const cbRisk=orders.filter(o=>computeStage(o)===7).reduce((s,o)=>s+(o.price||0),0);
+    const proj=cashflowProjection();
+    const projTotal=Object.values(proj).reduce((s,v)=>s+v,0);
     h+=`<div class="kpi-grid">
-      <div class="kpi-card amber"><div class="kpi-label">£ pending</div><div class="kpi-value">${fmtMoney(pending)}</div><div class="kpi-sub">${open.length} open orders</div></div>
+      <div class="kpi-card amber"><div class="kpi-label">£ pending (face value)</div><div class="kpi-value">${fmtMoney(pending)}</div><div class="kpi-sub">${open.length} open orders</div></div>
+      <div class="kpi-card blue"><div class="kpi-label">Projected inflow</div><div class="kpi-value">${fmtMoney(projTotal)}</div><div class="kpi-sub">value × store success-rate</div></div>
       <div class="kpi-card"><div class="kpi-label">£ recovered</div><div class="kpi-value">${fmtMoney(recovered)}</div><div class="kpi-sub">${orders.filter(o=>computeStage(o)==='done').length} refunded</div></div>
-      <div class="kpi-card blue"><div class="kpi-label">Median days to refund</div><div class="kpi-value">23</div><div class="kpi-sub">excl. chargebacks</div></div>
       <div class="kpi-card red"><div class="kpi-label">At chargeback risk</div><div class="kpi-value">${fmtMoney(cbRisk)}</div><div class="kpi-sub">${orders.filter(o=>computeStage(o)===7).length} orders</div></div></div>`;
-    const months=['Jan','Feb','Mar','Apr','May','Jun'],vals=[3200,5100,4800,6200,8900,8920],mx=Math.max(...vals);
-    h+=`<div class="chart-card" style="margin-top:16px"><h3>Cashflow recovered (rolling 6 months)</h3><div style="display:flex;align-items:flex-end;gap:14px;height:130px;padding:10px 4px 0">`;
-    months.forEach((m,i)=>h+=`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px"><div style="width:100%;background:var(--accent);border-radius:3px 3px 0 0;height:${Math.round(110*vals[i]/mx)}px"></div><span style="font-size:11px;color:var(--ink-faded)">${m}</span></div>`);
-    h+=`</div></div>`;
+    const keys=Object.keys(proj).sort();
+    if(keys.length){
+      const mx=Math.max(...keys.map(k=>proj[k]),1);
+      h+=`<div class="chart-card" style="margin-top:16px"><h3>Projected cash inflow by expected refund month</h3><div style="display:flex;align-items:flex-end;gap:14px;height:140px;padding:10px 4px 0">`;
+      keys.forEach(k=>h+=`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px" title="${fmtMoney(proj[k])} projected"><div style="width:100%;background:var(--accent);border-radius:3px 3px 0 0;height:${Math.round(115*proj[k]/mx)}px"></div><span style="font-size:10px;color:var(--ink-faded)">${fmtMonthKey(k)}</span></div>`);
+      h+=`</div><p style="color:var(--ink-faded);font-size:12px;margin-top:8px">Each open order contributes value × its store's historical refund-success-rate, placed in its expected-refund month. ${fmtMoney(projTotal)} projected across ${open.length} open orders.</p></div>`;
+    } else {
+      h+=`<div class="chart-card" style="margin-top:16px"><p class="empty-state">No open orders to project.</p></div>`;
+    }
   } else if (mode==='flow') {
     const buckets={}; STAGE_NAMES; [1,2,3,4,5,6,7,8,'done'].forEach(s=>buckets[s]=0);
     orders.forEach(o=>buckets[computeStage(o)]++);
     const mx=Math.max(...Object.values(buckets),1);
-    h+=`<div class="chart-card"><h3>Orders by stage (bottleneck highlighted)</h3>`;
+    h+=`<div class="chart-card"><h3>Orders by stage (count)</h3>`;
     [1,2,3,4,5,6,7,8,'done'].forEach(s=>{ if(!buckets[s])return; const bn=s===3;
       h+=`<div style="display:flex;align-items:center;gap:10px;margin:7px 0"><span style="width:150px;font-size:13px">${escapeHtml(STAGE_NAMES[s])}</span><div style="flex:1;height:20px;background:var(--line-soft);border-radius:4px;overflow:hidden"><div style="height:100%;width:${Math.round(100*buckets[s]/mx)}%;background:${bn?'var(--red)':'var(--accent)'}"></div></div><span style="width:40px;text-align:right;font-family:var(--mono)">${buckets[s]}</span></div>`;});
-    h+=`<p style="color:var(--ink-faded);font-size:12px;margin-top:10px">Biggest bottleneck: <strong>Delivered / choose method</strong> (${buckets[3]} orders) — most blocked on store parcel-shop flags.</p></div>`;
+    h+=`</div>`;
+    // avg days-in-stage (real, from stage history; includes awaiting_method)
+    const avg=avgDaysPerStage(orders);
+    const avgEntries=STAGE_SEQ.map(s=>[s,avg[s]]).filter(([s,d])=>d>0);
+    if(avgEntries.length){
+      const amx=Math.max(...avgEntries.map(([s,d])=>d),1);
+      const slowest=avgEntries.slice().sort((a,b)=>b[1]-a[1])[0];
+      h+=`<div class="chart-card" style="margin-top:16px"><h3>Average days spent in each stage (bottleneck)</h3>`;
+      avgEntries.forEach(([s,d])=>{ const bn=(s===slowest[0]);
+        h+=`<div style="display:flex;align-items:center;gap:10px;margin:7px 0"><span style="width:170px;font-size:13px">${escapeHtml(STAGE_LABEL[s]||s)}</span><div style="flex:1;height:20px;background:var(--line-soft);border-radius:4px;overflow:hidden"><div style="height:100%;width:${Math.round(100*d/amx)}%;background:${bn?'var(--red)':'var(--accent)'}"></div></div><span style="width:54px;text-align:right;font-family:var(--mono)">${d.toFixed(1)}d</span></div>`;});
+      h+=`<p style="color:var(--ink-faded);font-size:12px;margin-top:10px">Slowest stage: <strong>${escapeHtml(STAGE_LABEL[slowest[0]]||slowest[0])}</strong> at ${slowest[1].toFixed(1)} days average. This includes the method-decision wait (awaiting method) so you can see where orders actually stall.</p></div>`;
+    }
   } else if (mode==='store') {
     const grp=document.getElementById('dashGroup').value;
     const g={}; orders.forEach(o=>{const k=grp==='person'?(o.person||'?'):(o.store||'?'); (g[k]=g[k]||{n:0,v:0,done:0}); g[k].n++; g[k].v+=o.price||0; if(computeStage(o)==='done')g[k].done++;});
@@ -4022,9 +4278,24 @@ function mcMissingCard(o, r){
 function mcSendInfoTask(orderId, need){
   const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
   const who = emailHolder(o)||o.person||'';
-  const p = personByName(who); const tg = p?tgDisplay(p):'';
   const label = MC_NEED_LABEL[need]||need;
-  showToast('Info request for "'+label+'" prepared for '+(who||'?')+(tg?(' ('+tg+')'):'')+' — full send arrives in the next update', 'success');
+  const msg = buildInfoRequestMessage(o, need, label);
+  // a synthetic task id so the info request is tracked like any task
+  const taskId = 'info_'+orderId+'_'+need;
+  const ov=document.createElement('div'); ov.className='modal-overlay active'; ov.style.cssText='display:flex'; ov.id='mcInfoOv';
+  const st=getTaskStatus(taskId);
+  ov.innerHTML='<div class="modal" style="max-width:520px"><div class="modal-head"><h2>Send info request</h2><button class="modal-close" onclick="document.getElementById(\'mcInfoOv\').remove()">&times;</button></div>'
+    + '<div class="modal-body">'
+    + '<div style="font-size:13px;color:var(--ink-faded);margin-bottom:8px">To <strong style="color:var(--ink)">'+escapeHtml(who||'?')+'</strong> · order #'+escapeHtml(orderId)+' · needs: '+escapeHtml(label)+'</div>'
+    + '<pre class="instruction-box" id="mcInfoMsg" style="white-space:pre-wrap">'+escapeHtml(msg)+'</pre>'
+    + (st&&st.sent_at?'<div style="font-size:12px;color:var(--amber);margin-top:8px">Already sent '+fmtDays((Date.now()-st.sent_at)/86400000)+' ago to '+escapeHtml(st.sent_to||'?')+'</div>':'')
+    + '</div>'
+    + '<div class="modal-foot">'
+    + '<button class="small" onclick="copyToClipboard(document.getElementById(\'mcInfoMsg\').textContent,\'Message copied — paste into Telegram\')">📋 Copy message</button>'
+    + '<button class="primary" onclick="markTaskSent(\''+escAttr(taskId)+'\',\''+escAttr(who)+'\',\'telegram\');document.getElementById(\'mcInfoOv\').remove();renderAll();showToast(\'Marked sent to '+escAttr(who||'?')+'\',\'success\')">✓ Mark as sent</button>'
+    + '<button onclick="document.getElementById(\'mcInfoOv\').remove()">Close</button>'
+    + '</div></div>';
+  document.body.appendChild(ov);
 }
 
 // ---- Admin CONFIRM: write method to order, lock it (sticky) ----
@@ -4076,6 +4347,7 @@ function renderStores() {
           <div style="font-size:13px;color:var(--ink-faded);line-height:1.8">Total value: <strong style="color:var(--ink)">${fmtMoney(r.total_value)}</strong><br>Ordered by: ${escapeHtml(r.people.join(', '))}<br>Couriers seen: ${escapeHtml(r.couriers_seen.join(', ')||'—')}<br>Yearly revenue: <strong style="color:var(--ink)">${fmtRevenue(r.revenue)}</strong> <span style="font-size:11px">(${REV_SOURCE_LABEL[r.rev_source]})</span><br>Budget: <strong style="color:var(--ink)">${r.budget==null?'set revenue first':(r.budget===0?'ineligible (revenue under £2M)':fmtMoney(r.budget)+(r.budget===3000?' (capped)':''))}</strong></div>
           <div style="margin-top:10px;font-size:12px;color:var(--ink-faded)">Linked orders:</div><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px">${r.order_ids.map(id=>`<span class="badge-mini" style="background:var(--line-soft);cursor:pointer" onclick="event.stopPropagation();openOrderModal('${escAttr(id)}')">#${escapeHtml(id)}</span>`).join('')}</div></div>
           <div><div style="font-weight:600;margin-bottom:8px">Method logic</div>
+          ${(r.suggest_unwanted||r.suggest_damaged)?`<div style="margin-bottom:8px;padding:8px 10px;background:var(--blue-soft);border-radius:6px;font-size:12px;color:var(--blue)">📊 Past orders suggest: ${r.suggest_unwanted?'<strong>unwanted label (LIT)</strong>':''}${r.suggest_damaged?'<strong>damaged label (LIT with pic)</strong>':''}. <span style="cursor:pointer;text-decoration:underline" onclick="event.stopPropagation();applyHistFlags('${escAttr(r.name)}')">Apply &amp; save</span> — or set manually below.</div>`:''}
           ${storeFlagRow('Parcel shop label provided for unwanted goods', r.unwanted)}
           ${storeFlagRow('Parcel shop label provided for damaged goods', r.damaged)}
           ${storeFlagRow('Offers courier collection', r.collection)}
