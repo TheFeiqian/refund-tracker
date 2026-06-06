@@ -1413,7 +1413,7 @@ const FIELD_ACCESS = {
   // admin
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
-  collection_date:'admin', collection_handover:'admin', investigation_deadline:'email_holder', refund_narrative:'admin',
+  collection_date:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_narrative:'admin',
   refund_refused_date:'admin', invoice:'email_holder',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
@@ -2174,22 +2174,39 @@ function activeTaskCodes(order){
   });
   return codes;
 }
-// Missing-Info classification = the normal classifier, MINUS any field that is the completion
-// evidence for one of this order's currently-active queue tasks. Those live ONLY in the queue's
-// completion form. Per-order dynamic (reading B): once the order passes that task, the field can
-// resurface here as backfill.
+// HARD RULE: a field that COMPLETES a Priority-Queue task can't appear in Missing Info while that
+// task is still pending (current OR upcoming in this order's method chain — even if the queue
+// hasn't generated the task row yet, e.g. hand_over_collection sits behind bbm_book_collection).
+// Once the order PASSES that task's stage, a still-missing field unblocks as Missing-Info backfill.
+// Completion fields come from TASK_FORM_FIELDS (authoritative); chain position from METHOD_CHAINS.
+function activeCompletionFields(order){
+  const set = {};
+  const stage = computeStage(order);
+  const curStage = stage === 'done' ? 8 : stage;
+  const mk = (typeof methodKey==='function') ? methodKey(order) : '';
+  const chain = (mk && METHOD_CHAINS[mk]) ? METHOD_CHAINS[mk] : null;
+  // (a) every task the queue has actually generated for this order
+  (getAllTasksForOrder(order)||[]).forEach(t=>{
+    if(t.type && t.type.code === 'choose_method') return;
+    if(t.completed) return;                                   // passed → its fields can backfill
+    (TASK_FORM_FIELDS[t.type.code] || []).forEach(f=> set[f] = true);
+  });
+  // (b) tasks still ahead in the method chain (current stage or later) that aren't generated yet
+  if(chain){
+    chain.forEach(code=>{
+      if(code === 'choose_method') return;
+      const ts = (typeof TASK_STAGE!=='undefined' && TASK_STAGE[code]) ? TASK_STAGE[code] : 99;
+      if(ts >= curStage){ (TASK_FORM_FIELDS[code] || []).forEach(f=> set[f] = true); }
+    });
+  }
+  return set;
+}
 function classifyForMissingInfo(order){
   const c = classifyFields(order);
-  const active = activeTaskCodes(order);
-  const isActiveCompletion = (f)=>{
-    const def = FIELD_MODEL[f]; if(!def) return false;
-    const mk = methodKey(order);
-    const t = (typeof fieldTaskForMethod==='function') ? fieldTaskForMethod(f, mk) : def.task;
-    return t && active[t];     // belongs to a currently-active queue task
-  };
+  const blocked = activeCompletionFields(order);    // fields that complete an ACTIVE queue task
   return {
-    priority: c.priority.filter(f=>!isActiveCompletion(f)),
-    optional: c.optional.filter(f=>!isActiveCompletion(f)),
+    priority: c.priority.filter(f=>!blocked[f]),
+    optional: c.optional.filter(f=>!blocked[f]),
     excluded: c.excluded,
   };
 }
@@ -2343,15 +2360,18 @@ function daysOutstanding(taskId){
 // outgoing message). Returns { field: {url, name} }. Gracefully skips files not yet uploaded.
 async function resolveFileLinks(order){
   const out = {};
-  if(typeof sb === 'undefined' || !sb) return out;
   for(const f of FILE_FIELDS){
     const path = order[f+'_path'];
-    if(path){
+    const name = order[f+'_filename'] || order[f] || (f+'.file');
+    if(path && typeof sb !== 'undefined' && sb){
       try{
         const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, 604800); // 7 days
-        if(signed) out[f] = { url: signed.signedUrl, name: order[f+'_filename'] || (f+'.file') };
+        if(signed){ out[f] = { url: signed.signedUrl, name }; continue; }
       }catch(e){}
     }
+    // fallback: a file already loaded as a usable URL (signed/http) but no durable path yet
+    const fv = order[f+'_file'];
+    if(fv && typeof fv === 'string' && /^https?:/.test(fv)){ out[f] = { url: fv, name }; }
   }
   return out;
 }
@@ -3036,13 +3056,45 @@ function renderInProgress(){
       + '<div class="ev"><strong>'+(done?'Provided':'Needs')+':</strong> '+escapeHtml(ev)+'</div>'
       + '<div class="progress"><i style="width:'+pct+'%"></i></div>'
       + '<div class="acts">'
-      + (done
-          ? '<button class="small" onclick="cancelInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\')">Clear</button>'
-          : '<button class="small" onclick="openOrderModal(\''+escAttr(r.order_id)+'\')">View order</button>'
-            + '<button class="small" onclick="cancelInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\')">Cancel</button>')
+      + (function(){
+          const isInfo = (r.task||'').indexOf('info:')===0;
+          let btns = '';
+          // Re-send the message (so proof/instructions can be sent again)
+          if(!isInfo){
+            btns += '<button class="small" onclick="reSendInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\',\''+escAttr(r.person||'')+'\')" title="Copy the message again to re-send">📋 Re-send message</button>';
+          }
+          // Download any files on the order (label, proof of postage, photos…)
+          const FF = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
+          const labelFor = {order_confirmation:'order confirmation', return_label_pdf:'label', proof_of_postage:'proof of postage', delivery_photo:'delivery photo', damage_photo:'damage photo', collection_handover:'handover proof', invoice:'invoice'};
+          FF.filter(f=> (typeof hasOrderFile==='function') ? hasOrderFile(o,f) : (o && (o[f+'_file']||o[f+'_path']))).forEach(f=>{
+            btns += '<button class="small" onclick="downloadOrderFile(\''+escAttr(r.order_id)+'\',\''+f+'\')" title="Download to attach to an email">📄 '+labelFor[f]+'</button>';
+          });
+          // Re-open the completion-form links view (same as the queue) so the form can be re-sent
+          if(!isInfo){
+            btns += '<button class="small" onclick="showTaskFormLinks(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\',\'\')" title="Re-open the upload form link">🔗 Form link</button>';
+          }
+          btns += '<button class="small" onclick="openOrderModal(\''+escAttr(r.order_id)+'\')">View order</button>';
+          btns += done
+            ? '<button class="small" onclick="cancelInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\')">Clear</button>'
+            : '<button class="small" onclick="cancelInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\')">Cancel</button>';
+          return btns;
+        })()
       + '</div>'
       + '</div>';
   }).join('');
+}
+// Re-send the message for an in-progress task (re-copies it with current file links).
+function reSendInProgress(orderId, taskCode, person){
+  const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
+  const tasks = (typeof getAllTasksForOrder==='function') ? getAllTasksForOrder(o) : [];
+  const t = tasks.find(x=>x.type.code===taskCode);
+  const task = t ? t.type : (TASK_CATALOG.find(x=>x.code===taskCode) || {code:taskCode,name:taskCode,type:{code:taskCode,name:taskCode}});
+  const taskObj = t ? {type:task} : {type:{code:taskCode, name:(task.name||taskCode)}};
+  Promise.resolve(typeof resolveFileLinks==='function'?resolveFileLinks(o):{}).then(fileLinks=>{
+    let completionLink='';
+    try{ const groups=buildTaskFormLinks(o, taskCode, ''); const g=(groups||[]).find(x=>x.link); if(g) completionLink=g.link; }catch(e){}
+    copyToClipboard(buildTaskMessage(taskObj, o, fileLinks, completionLink), 'Message re-copied — paste into Telegram');
+  });
 }
 // Live-tick the outstanding timers every 30s without a full re-render.
 function tickInProgressTimers(){
@@ -3886,7 +3938,7 @@ function sendInfoForm(orderId, cls, person, link){
 // Send a completion form: copy a message that says a link is being sent for them to UPLOAD
 // the evidence after the work is done + WHAT evidence completes the task, then start the
 // In-Progress timer and move the task out of the active queue.
-function sendCompletionForm(orderId, taskCode, person, link){
+async function sendCompletionForm(orderId, taskCode, person, link){
   const o = DATA.orders.find(x=>x.order_id===orderId);
   const groups = buildTaskFormLinks(o, taskCode, '');
   const grp = groups.find(g=>g.holder && g.holder.person===person) || groups[0];
@@ -3895,8 +3947,17 @@ function sendCompletionForm(orderId, taskCode, person, link){
   const handle = p && typeof tgDisplay==='function' ? tgDisplay(p) : '';
   const task = TASK_CATALOG.find(t=>t.code===taskCode);
   const taskName = task ? task.name : taskCode;
+  // include signed URLs for any files already on the order (e.g. proof of postage to forward)
+  let fileLines = '';
+  try {
+    const links = await resolveFileLinks(o);
+    const parts = Object.keys(links).map(f=>'  - '+(FIELD_DEFS[f]?FIELD_DEFS[f].label:f)+': '+links[f].name+' '+links[f].url);
+    if(parts.length) fileLines = '\n\nFiles on this order:\n'+parts.join('\n');
+  } catch(e){}
   const msg = (handle?handle+' ':'')+'— for '+(o?o.store:'this')+' order #'+orderId+': once you\'ve done “'+taskName+'”, please upload the evidence here to complete it:\n'+link
-            + '\n\nWhat to upload: '+(evidence.join(', ')||'the required details')+'.\nThank you!';
+            + '\n\nWhat to upload: '+(evidence.join(', ')||'the required details')+'.'
+            + fileLines
+            + '\nThank you!';
   copyText(msg);
   markFormSent(orderId, taskCode, person, evidence);
   const ov = document.getElementById('taskFormOv'); if(ov) ov.remove();
