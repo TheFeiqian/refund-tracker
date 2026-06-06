@@ -1190,15 +1190,23 @@ const TASK_CATALOG = [
     info_needed: 'Printed label, parcel ready, drop-off options',
     instruction_template: 'Hi {person},\n\nReady to post: return for {store} order {order_id} ({items}).\n\n  Method: {method}\n  Courier: {outbound_courier}\n  Label: {return_label_pdf}\n\nPlease pack and drop off at any {outbound_courier} point. Reply with a clear photo of the proof-of-postage receipt (we need this if we have to chargeback).' },
 
-  { code: 'bbm_book', name: 'Call to book return label or collection', stage: 4, sla: 6, owner_only: false, info_only: false,
-    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o),
-    appears_when: 'BBM order at stage 4 — route/date not yet obtained',
-    advances_when: 'A collection date OR a return label is obtained → next BBM task',
+  { code: 'bbm_book', name: 'Call to book return — ask for a label first', stage: 4, sla: 6, owner_only: false, info_only: false,
+    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && !bbmLargeItem(o) && o.bbm_route!=='collection',
+    appears_when: 'BBM order (normal size) at stage 4 — route/date not yet obtained',
+    advances_when: 'A return label OR collection date is obtained → next BBM task',
     completed_when: (o) => bbmBooked(o),
-    completed_via: 'collection_date filled (→ collection) OR return_label_pdf filled (→ label)',
+    completed_via: 'return_label_pdf filled (→ label) OR collection_date filled (→ collection)',
     info_needed: 'Retailer returns contact, order ref, customer identification',
-    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and needs to go back.\n\nPlease contact {store} and arrange the return. Two possible routes:\n  • a home COLLECTION — reply with the confirmed collection date, or\n  • a RETURN LABEL to post — reply with the return label.\n\nIdentification: {person}, {email}, order no. {store_order_number}, address {address}.\n\nReply with whichever they give you so we can book the next step.' },
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and needs to go back.\n\nPlease call/contact {store} and arrange the return — in this order:\n  1. FIRST ask if they can issue a RETURN LABEL for this item (the easier, free drop-off route). If yes, reply with the return label.\n  2. If they will NOT provide a label for this item, ask them to book a home COLLECTION instead, and reply with the confirmed collection date.\n\nIdentification: {person}, {email}, order no. {store_order_number}, address {address}.\n\nReply with whichever you obtain so we can book the next step.' },
 
+  { code: 'bbm_book_collection', name: 'Call to book a collection (large item)', stage: 4, sla: 6, owner_only: false, info_only: false,
+    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && (bbmLargeItem(o) || o.bbm_route==='collection'),
+    appears_when: 'BBM order — large item (>20kg or >500L) or route forced to collection',
+    advances_when: 'A collection date is obtained → hand-over task',
+    completed_when: (o) => bbmBooked(o),
+    completed_via: 'collection_date filled',
+    info_needed: 'Retailer returns contact, collection address, available dates',
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake. This item is large, so it goes back by home COLLECTION (a parcel-shop label isn’t practical).\n\nPlease contact {store}, book a home collection, and reply with the confirmed collection date.\n\nIdentification: {person}, {email}, order no. {store_order_number}\nCollection address: {address}' },
   { code: 'hand_over_collection', name: 'Hand over items on the collection date', stage: 4, sla: 48, owner_only: false, info_only: false,
     applies_when: (o)=> o.bought_by_mistake==='yes' && bbmRoute(o)==='collection' && bbmBooked(o),
     appears_when: 'BBM via collection — collection booked',
@@ -2510,6 +2518,8 @@ const TASK_FORM_FIELDS = {
   damage_photo_check:     ['damage_photo'],
   generate_return_label:  ['return_label_pdf', 'outbound_tracking', 'outbound_courier'],
   post_return_label:      ['proof_of_postage', 'posted_from'],
+  bbm_book:               ['return_label_pdf', 'collection_date'],
+  bbm_book_collection:    ['collection_date'],
   get_collection_date:    ['collection_date'],
   hand_over_collection:   ['collection_handover'],
   contact_retailer_investigation: ['investigation_deadline'],
@@ -3758,23 +3768,33 @@ function isCollectionPath(o, flags) {
 // BBM route resolution: manual force wins; else inferred from whichever booking
 // artifact exists (collection_date → collection, return_label_pdf → label).
 // Returns 'collection' | 'label' | '' (unknown / not yet booked).
+// A BBM item is "large" when weight > 20kg OR volume > 500L — collection is then
+// guaranteed (a parcel-shop label was never realistic), so skip the ask-for-label step.
+const BBM_LARGE_WEIGHT_KG = 20;
+const BBM_LARGE_VOLUME_L = 500;
+function bbmLargeItem(o){
+  const w = parseFloat(o.total_weight_kg) || 0;
+  const v = parseFloat(o.total_volume_l) || 0;
+  return w > BBM_LARGE_WEIGHT_KG || v > BBM_LARGE_VOLUME_L;
+}
 function bbmRoute(o){
   if(!o || o.bought_by_mistake!=='yes') return '';
   if(o.bbm_route==='collection' || o.bbm_route==='label') return o.bbm_route;
   if(fieldFilled(o,'collection_date')) return 'collection';
   if(fieldFilled(o,'return_label_pdf') || o.return_label_pdf_file) return 'label';
+  // large items are collection-guaranteed even before a date is booked
+  if(bbmLargeItem(o)) return 'collection';
   return '';
 }
 function bbmBooked(o){
-  // the first BBM task is done once we have a route AND its booking datum (or a manual force)
+  // "Booked" means the actual datum exists: a collection date (collection route) or a
+  // return label (label route). A route being known (manual force, or large-item
+  // auto-collection) is NOT enough — the booking task stays open until the datum arrives.
   const r = bbmRoute(o);
   if(!r) return false;
-  if(o.bbm_route && !fieldFilled(o,'collection_date') && !fieldFilled(o,'return_label_pdf') && !o.return_label_pdf_file){
-    // route manually forced but no date/label yet → still "booked enough" to route,
-    // but the booking task stays open until the datum arrives
-    return false;
-  }
-  return true;
+  if(r==='collection') return fieldFilled(o,'collection_date');
+  if(r==='label') return fieldFilled(o,'return_label_pdf') || !!o.return_label_pdf_file;
+  return false;
 }
 // Manually force a BBM order down a known route (collection/label) without the date.
 function forceBBMRoute(orderId, route){
