@@ -2072,11 +2072,44 @@ function getAllTasksWithPriority() {
   const out = [];
   DATA.orders.forEach(order => {
     getTasksForOrder(order).forEach(task => {
+      // choose_method is pure admin (decided in the Method Choice tab) — never a delegable queue task.
+      if(task.type && task.type.code === 'choose_method') return;
       const p = computePriority(task, order);
       out.push({ task, order, ...p });
     });
   });
   return out;
+}
+
+// Codes of the order's currently-active delegable tasks (not completed, prereqs met, not admin-only).
+// A field whose task is in this set is "completion evidence" for an active queue task and must NOT
+// appear in that order's Missing Info form (the two are separate; see classifyForMissingInfo).
+function activeTaskCodes(order){
+  const codes = {};
+  (getTasksForOrder(order)||[]).forEach(t=>{
+    if(t.type && t.type.code === 'choose_method') return;     // admin-only, not a queue task
+    codes[t.type.code] = true;
+  });
+  return codes;
+}
+// Missing-Info classification = the normal classifier, MINUS any field that is the completion
+// evidence for one of this order's currently-active queue tasks. Those live ONLY in the queue's
+// completion form. Per-order dynamic (reading B): once the order passes that task, the field can
+// resurface here as backfill.
+function classifyForMissingInfo(order){
+  const c = classifyFields(order);
+  const active = activeTaskCodes(order);
+  const isActiveCompletion = (f)=>{
+    const def = FIELD_MODEL[f]; if(!def) return false;
+    const mk = methodKey(order);
+    const t = (typeof fieldTaskForMethod==='function') ? fieldTaskForMethod(f, mk) : def.task;
+    return t && active[t];     // belongs to a currently-active queue task
+  };
+  return {
+    priority: c.priority.filter(f=>!isActiveCompletion(f)),
+    optional: c.optional.filter(f=>!isActiveCompletion(f)),
+    excluded: c.excluded,
+  };
 }
 
 // Field-level value check
@@ -3516,7 +3549,7 @@ function renderMissingInfo() {
     const stage = computeStage(o);
     if (stage === 'done') return;
     const blockers = [];
-    const cls = classifyFields(o);                   // priority = currently-needed (guaranteed-chain) fields
+    const cls = classifyForMissingInfo(o);           // excludes evidence for active queue tasks
     cls.priority.forEach(field => {
       if (!FIELD_DEFS[field]) return;
       const ip = infoPriorityFor(o, field, stage);    // reuse score/days for ranking
@@ -3611,7 +3644,7 @@ function renderBlockingMatrix() {
 // ============================================================
 // Build the "send-out forms, split by who has access" panel for an order.
 function renderAccessForms(order){
-  const cls = classifyFields(order);                 // {priority, optional, excluded}
+  const cls = classifyForMissingInfo(order);         // excludes evidence for active queue tasks
   const mk = methodKey(order);
   const curStage = (computeStage(order)==='done')?8:computeStage(order);
   if(!cls.priority.length && !cls.optional.length) return '<div class="staged-form-explainer" style="background:#ebfbee;border-color:#b2f2bb"><strong>No information needed right now.</strong></div>';
