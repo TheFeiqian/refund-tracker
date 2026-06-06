@@ -1366,8 +1366,8 @@ const FIELD_ACCESS = {
   // admin
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
-  collection_date:'admin', collection_handover:'admin', investigation_deadline:'admin', refund_narrative:'admin',
-  refund_refused_date:'admin', invoice:'admin',
+  collection_date:'admin', collection_handover:'admin', investigation_deadline:'email_holder', refund_narrative:'admin',
+  refund_refused_date:'admin', invoice:'email_holder',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
 
@@ -1398,7 +1398,7 @@ const FIELD_MODEL = {
   delivery_date_text:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
   delivery_photo:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
   delivery_photo_shows_person:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
-  item_damaged:{avail:3, methods:'ALL', inForm:true, task:'choose_method'},   // admin decides (drives method)
+  item_damaged:{avail:3, methods:['LITPIC'], inForm:true, task:'choose_method'},   // store-policy flag; only relevant on LITPIC orders
   damage_photo:{avail:3, methods:['LITPIC'], inForm:true, task:'damage_photo_check'},  // email holder takes the photo
   bought_by_mistake:{avail:3, methods:'ALL', inForm:true, task:'choose_method'}, // assessed for all; drives BBM
   method:{avail:3, methods:'ALL', inForm:true, task:'choose_method'},
@@ -1414,8 +1414,10 @@ const FIELD_MODEL = {
   collection_date:{avail:4, methods:['BBMC'], inForm:true, task:'contact_retailer_investigation'},
   collection_handover:{avail:4, methods:['BBMC'], inForm:true, task:'hand_over_collection'},
   // stage 5-6 — investigation / refused (escalating methods only; BBM ends after contact)
+  // investigation_deadline: reported via the investigation task's completion form (email holder).
+  // Only resurfaces as Missing-Info backfill if the order has passed the investigation step.
   investigation_deadline:{avail:5, methods:M_ESCALATE, inForm:true, task:'contact_retailer_investigation'},
-  refund_narrative:{avail:5, methods:M_ESCALATE, inForm:true, task:'contact_retailer_investigation'},
+  refund_narrative:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},  // chargeback evidence only
   refund_refused_date:{avail:6, methods:M_ESCALATE, inForm:true, task:'chase_investigation'},
   retailer_rebuttal_received:{avail:6, methods:M_ESCALATE, inForm:true, task:'chase_investigation'},
   // stage 7 — chargeback (escalating only; contingent — not guaranteed)
@@ -1425,7 +1427,7 @@ const FIELD_MODEL = {
   chargeback_date:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
   chargeback_type:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
   chargeback_reference:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
-  invoice:{avail:1, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
+  invoice:{avail:1, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},  // available early; required only at chargeback
   // outcome-recording — never auto-requested
   refund_received_date:{avail:8, methods:'ALL', inForm:false, task:null},
   refund_received_amount:{avail:8, methods:'ALL', inForm:false, task:null},
@@ -1513,6 +1515,8 @@ function classifyFields(order, candidateKeys){
     if(def.aiDerived){ out.excluded.push(k); return; }   // populated by AI parse of the upload — never on forms
     if(def.avail > curStage){ out.excluded.push(k); return; }
     if(mk && !fieldAppliesToMethod(k, mk)){ out.excluded.push(k); return; }
+    // No method chosen yet: a field tied to specific methods (not ALL) can't be needed yet.
+    if(!mk && def.methods !== 'ALL'){ out.excluded.push(k); return; }
     // If no method chosen yet: only choose_method-task fields are priority; rest optional.
     if(!mk || !chain){
       const t = fieldTaskForMethod(k, mk);
@@ -1522,10 +1526,16 @@ function classifyFields(order, candidateKeys){
     }
     // Method chosen: 1b rule. Guaranteed-chain field is PRIORITY only if its task is at the
     // current stage OR the next not-yet-done guaranteed step. Past-stage guaranteed fields drop
-    // to OPTIONAL. Contingent tasks (chargeback/court) are never auto-priority.
+    // to OPTIONAL. Contingent tasks (chargeback/court) become priority once the order has
+    // actually REACHED that stage (e.g. invoice/refund_narrative required at chargeback).
     const t = fieldTaskForMethod(k, mk);
-    if(!t || chain.indexOf(t) < 0 || CONTINGENT_TASKS.indexOf(t) >= 0){ out.optional.push(k); return; }
-    const ts = TASK_STAGE[t] || 99;
+    const ts0 = TASK_STAGE[t] || 99;
+    if(CONTINGENT_TASKS.indexOf(t) >= 0){
+      if(ts0 === curStage) out.priority.push(k); else out.optional.push(k);
+      return;
+    }
+    if(!t || chain.indexOf(t) < 0){ out.optional.push(k); return; }
+    const ts = ts0;
     let nextStage = 99;
     for(const ct of chain){ if(CONTINGENT_TASKS.indexOf(ct)>=0) continue; const s=TASK_STAGE[ct]||99; if(s>=curStage){ nextStage=s; break; } }
     if(ts === curStage || ts === nextStage) out.priority.push(k);
@@ -2855,7 +2865,14 @@ function renderInProgress(){
   if(!recs.length){ body.innerHTML = '<tr><td colspan="7" class="empty-state">Nothing in progress — sent completion forms will appear here with a timer.</td></tr>'; return; }
   body.innerHTML = recs.map(r=>{
     const o = DATA.orders.find(x=>x.order_id===r.order_id);
-    const task = TASK_CATALOG.find(t=>t.code===r.task);
+    let taskName;
+    if((r.task||'').indexOf('info:')===0){
+      const cls = r.task.split(':')[1];
+      taskName = 'Info request (' + (cls==='card_owner'?'card owner':cls==='email_holder'?'email holder':cls) + ')';
+    } else {
+      const task = TASK_CATALOG.find(t=>t.code===r.task);
+      taskName = task ? task.name : r.task;
+    }
     const ev = (r.evidence||[]).join(', ') || '—';
     const elapsed = fmtDuration(formTrackElapsed(r));
     const done = !!r.completed_at;
@@ -2864,7 +2881,7 @@ function renderInProgress(){
       : '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">outstanding</span>';
     return '<tr'+(done?' style="opacity:.6"':'')+'>'
       + '<td><div class="ostore">'+escapeHtml(o?o.store:'?')+'</div><div class="oid">'+escapeHtml(r.order_id)+'</div></td>'
-      + '<td>'+escapeHtml(task?task.name:r.task)+'</td>'
+      + '<td>'+escapeHtml(taskName)+'</td>'
       + '<td>'+escapeHtml(r.person||'—')+'</td>'
       + '<td style="font-size:12px">'+escapeHtml(ev)+'</td>'
       + '<td style="font-family:var(--mono);font-weight:600">'+ (done?'—':elapsed) +'</td>'
@@ -3473,8 +3490,16 @@ function markSentFromQueue(rowKey, taskId, ownerOnly, suggestedPerson){
   if(ownerOnly){ recipient = suggestedPerson; }
   else { const sel=document.getElementById('assign_'+rowKey); recipient = sel?sel.value:suggestedPerson; }
   markTaskSent(taskId, recipient, 'telegram');
+  // Move the task into the In Progress tab (timer starts now).
+  const tasks = getAllTasksWithPriority();
+  const t = tasks.find(x=>x.task.task_id===taskId);
+  if(t){
+    const code = t.task.type.code;
+    const evidence = ((TASK_FORM_FIELDS[code]||[]).filter(f=>{ const d=FIELD_MODEL[f]; return !(d&&d.aiDerived) && !(d&&d.inForm===false); })).map(f=>fieldLabel(f));
+    markFormSent(t.order.order_id, code, recipient, evidence);
+  }
   renderAll();
-  showToast('Marked sent to '+(recipient||'?')+' — now tracked as outstanding', 'success');
+  showToast('Marked sent to '+(recipient||'?')+' — moved to In Progress', 'success');
 }
 
 ['priorityTaskFilter', 'priorityPersonFilter', 'prioritySearch', 'priorityGroupBy'].forEach(id => {
@@ -3632,6 +3657,7 @@ function renderAccessForms(order){
          + '<input type="text" readonly value="'+escAttr(link)+'" style="flex:1;min-width:180px;font-size:11px" onclick="this.select()">'
          + '<button class="small" onclick="copyText(\''+escAttr(link)+'\')">📋 Copy link</button>'
          + '<button class="small" onclick="copyFormSendMessage(\''+escAttr(order.order_id)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(link)+'\')">📋 Copy message</button>'
+         + '<button class="primary small" onclick="sendInfoForm(\''+escAttr(order.order_id)+'\',\''+escAttr(g.cls)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(link)+'\')">✓ Sent — track in progress</button>'
          + '</div>';
     }
     h += '</div>';
@@ -3676,6 +3702,22 @@ function copyFormSendMessage(orderId, person, link){
   const handle = p && typeof tgDisplay==='function' ? tgDisplay(p) : '';
   const msg = (handle?handle+' ':'')+'— please fill in this short form for '+(o?o.store:'an')+' order #'+orderId+':\n'+link+'\n\nIt only asks for the few details you can access. Thank you!';
   copyText(msg);
+}
+// Send a Missing-Info form to the access holder and track it in In Progress (with a timer).
+function sendInfoForm(orderId, cls, person, link){
+  const o = DATA.orders.find(x=>x.order_id===orderId);
+  const c = (typeof classifyFields==='function') ? classifyFields(o) : {priority:[],optional:[]};
+  // the fields this holder is being asked for (their access class, currently needed)
+  const fields = c.priority.concat(c.optional).filter(f=>fieldAccessClass(f)===cls);
+  const evidence = fields.map(f=>fieldLabel(f));
+  const p = (typeof personByName==='function')?personByName(person):null;
+  const handle = p && typeof tgDisplay==='function' ? tgDisplay(p) : '';
+  const msg = (handle?handle+' ':'')+'— please complete this short form for '+(o?o.store:'this')+' order #'+orderId+':\n'+link
+            + '\n\nWhat we need: '+(evidence.join(', ')||'the details requested')+'.\nThank you!';
+  copyText(msg);
+  markFormSent(orderId, 'info:'+cls, person, evidence);
+  renderAll();
+  showToast('Message copied + form marked sent to '+person+' — tracking in In Progress.', 'success');
 }
 // Send a completion form: copy a message that says a link is being sent for them to UPLOAD
 // the evidence after the work is done + WHAT evidence completes the task, then start the
