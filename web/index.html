@@ -295,6 +295,9 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
 .form-grid.full { grid-template-columns: 1fr; }
 .form-field { display: flex; flex-direction: column; }
+.form-field.field-needs-input { background: var(--amber-soft); border-radius: 8px; padding: 6px 8px; margin: -6px -8px; box-shadow: 0 0 0 2px var(--amber); }
+.form-field.field-needs-input input, .form-field.field-needs-input select { border-color: var(--amber); }
+.needs-badge { font-family: var(--mono); font-size: 9px; color: var(--amber); text-transform: uppercase; letter-spacing: .4px; margin-left: 6px; }
 .form-field.full { grid-column: 1 / -1; }
 .form-field label { font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--ink-faded); margin-bottom: 5px; }
 .form-field input, .form-field textarea, .form-field select { font-family: var(--sans); font-size: 13px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 3px; background: var(--bg); color: var(--ink); width: 100%; }
@@ -1152,13 +1155,13 @@ const TASK_CATALOG = [
     info_needed: 'Access to order placer’s email or phone to find confirmation',
     instruction_template: 'Hi {person},\n\nThe order at {store} has been placed but we don’t have tracking yet. Please check {email} for the dispatch confirmation and reply with:\n\n  - Tracking number\n  - Courier (DPD / Royal Mail / etc)\n  - Estimated delivery date\n\nOrder ref: {order_id}\nItems: {items}\nValue: £{price}' },
 
-  { code: 'choose_method', name: 'Choose return method', stage: 3, sla: 24, owner_only: false, info_only: false,
-    appears_when: 'Item delivered ✓ (stage 3)',
+  { code: 'choose_method', name: 'Choose return method (admin)', stage: 3, sla: 24, owner_only: true, admin_only: true, info_only: true,
+    appears_when: 'Item delivered ✓ (stage 3) — admin decides the method',
     advances_when: 'LIT created ✓ OR RTS created ✓ → Stage 4  |  DNA email sent ✓ → Stage 5 (skips 4)',
     completed_when: (o) => fieldFilled(o, 'method'),
     completed_via: 'method is selected (LIT / LIT with pic / RTS / DNA / PEB / EB)',
-    info_needed: 'Delivery photo, item condition, retailer return policy',
-    instruction_template: 'Hi {person},\n\nItem delivered for {store} order {order_id} ({items}, £{price}).\n\nPlease check the delivery, then decide the method. Reply with one of:\n\n  LIT          - Lost In Transit (we’ll return-label and claim if it doesn’t arrive back)\n  LIT with pic - Same, but item is visibly damaged - send a photo\n  RTS          - Return To Sender (standard return)\n  DNA          - Did Not Arrive (skip return; claim immediately)\n  PEB          - Possible Empty Box (no return; we escalate)\n  EB           - Empty Box (no return; claim immediately)\n\nAlso reply with the delivery photo or a photo of the box on arrival.\n\nDelivery date on file: {delivery_date_text}' },
+    info_needed: 'Whichever decision variable is still missing — courier, delivery-photo answer, or weight',
+    instruction_template: 'ADMIN TASK — decide the return method for {store} order {order_id} ({items}, £{price}).\n\nThis decision is made in the Method Choice tab and is not delegated. If it can’t resolve yet it is blocked on one missing variable (inbound courier, whether the delivery photo shows the recipient, or the parcel weight) — delegate the fact-finding for that one field, then the method auto-resolves.\n\nDelivery date on file: {delivery_date_text}' },
 
   { code: 'damage_photo_check', name: 'Provide a picture of the damaged item', stage: 3, sla: 6, owner_only: false, info_only: false,
     applies_when: (o)=> (o.method === 'LIT with pic') || (!o.method && o.item_damaged === 'yes'),
@@ -1807,10 +1810,41 @@ function markTaskSent(taskId, to, channel){
   saveData();
 }
 function markTaskCompleted(taskId){
+  // Gated: a task can only be completed when evidence has been recorded for it.
+  const s = taskStatusStore();
+  const st = s[taskId];
+  if(!st || !st.evidence){
+    showToast('Add evidence first — a task can only be marked done with proof of completion.','error');
+    return false;
+  }
+  st.completed_at = Date.now();
+  saveData();
+  return true;
+}
+// Attach evidence (a filename/note/data ref) to a task. This is what unlocks "mark done".
+function attachTaskEvidence(taskId, evidence, note){
   const s = taskStatusStore();
   if(!s[taskId]) s[taskId]={};
-  s[taskId].completed_at = Date.now();
+  s[taskId].evidence = evidence || ('uploaded ' + new Date().toLocaleString('en-GB'));
+  if(note) s[taskId].evidence_note = note;
+  s[taskId].evidence_at = Date.now();
   saveData();
+}
+// Admin marks done by uploading evidence in one step.
+function completeTaskWithEvidence(taskId, evidence, note){
+  attachTaskEvidence(taskId, evidence, note);
+  return markTaskCompleted(taskId);
+}
+// Reverse a completion (SockSnob case): wrong/incorrect evidence uploaded.
+// Removes completion AND the evidence so the task returns to outstanding.
+function reverseTaskCompletion(taskId){
+  const s = taskStatusStore(); const st = s[taskId]; if(!st) return;
+  delete st.completed_at;
+  delete st.evidence;
+  delete st.evidence_note;
+  delete st.evidence_at;
+  saveData();
+  showToast('Reversed — task is outstanding again and needs correct evidence.','success');
 }
 function clearTaskSent(taskId){
   const s = taskStatusStore(); if(s[taskId]){ delete s[taskId].sent_at; delete s[taskId].sent_to; saveData(); }
@@ -2429,7 +2463,12 @@ function renderPriorityQueue() {
       ${otherPeople.map(p => `<option value="${escAttr(p)}">${escapeHtml(p)}</option>`).join('')}
     </select>`;
     
-    const delegateHtml = t.task.type.owner_only ?
+    const delegateHtml = t.task.type.admin_only ?
+      `<div class="locked-assign">
+        <span class="badge-mini badge-owner" style="margin-right:6px">ADMIN ONLY</span><br><br>
+        This is the admin's decision and is <strong>not delegated</strong>. Make it in the Method Choice tab. If it's blocked on missing info, delegate the fact-finding for that one field instead.
+      </div>` :
+      t.task.type.owner_only ?
       `<div class="locked-assign">
         <span class="badge-mini badge-owner" style="margin-right:6px">CARD OWNER ONLY</span><br><br>
         Must be assigned to <strong>${escapeHtml(t.order.person || '?')}</strong>. This task involves the card holder's bank or card account &mdash; no delegation allowed.
@@ -2483,7 +2522,7 @@ function renderPriorityQueue() {
                   <button class="small" onclick="copyTaskMessage('${escAttr(t.task.task_id)}','${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();">📋 Copy message</button>
                   <button class="primary small" onclick="markSentFromQueue('${rowKey}','${escAttr(t.task.task_id)}', ${t.task.type.owner_only}, '${escAttr(t.order.person || '')}'); event.stopPropagation();">✓ Mark as sent</button>
                 </div>
-                ${(function(){ const st=getTaskStatus(t.task.task_id); if(st&&st.completed_at) return '<div style="font-size:11px;color:var(--green)">✓ completed '+fmtDays((Date.now()-st.completed_at)/86400000)+' ago</div>'; if(st&&st.sent_at){ const d=daysOutstanding(t.task.task_id); return '<div style="font-size:11px;color:'+(d>=2?'var(--amber)':'var(--ink-faded)')+'">sent to '+escapeHtml(st.sent_to||'?')+' · '+fmtDays(d)+' outstanding <span style="cursor:pointer;text-decoration:underline" onclick=\'markTaskCompleted("'+escAttr(t.task.task_id)+'");renderAll()\'>mark done</span></div>'; } return ''; })()}
+                ${(function(){ const st=getTaskStatus(t.task.task_id); if(st&&st.completed_at) return '<div style="font-size:11px;color:var(--green)">✓ completed '+fmtDays((Date.now()-st.completed_at)/86400000)+' ago · <span style="cursor:pointer;text-decoration:underline" onclick=\'reverseTaskCompletion("'+escAttr(t.task.task_id)+'");renderAll()\'>reverse</span></div>'; if(st&&st.sent_at){ const d=daysOutstanding(t.task.task_id); return '<div style="font-size:11px;color:'+(d>=2?'var(--amber)':'var(--ink-faded)')+'">sent to '+escapeHtml(st.sent_to||'?')+' · '+fmtDays(d)+' outstanding <span style="cursor:pointer;text-decoration:underline" onclick=\'trackerAddEvidenceAndComplete("'+escAttr(t.task.task_id)+'")\'>add evidence &amp; mark done</span></div>'; } return ''; })()}
               </div>
               <div class="task-info-block">
                 <div class="label">Trigger flow</div>
@@ -2755,23 +2794,43 @@ function renderSentTracker(){
   outstanding.sort((a,b)=>b.days-a.days);
   completed.sort((a,b)=>b.st.completed_at-a.st.completed_at);
   let h='<details class="method-desc-card" open style="margin-bottom:14px"><summary>Sent task tracker — '+outstanding.length+' outstanding'+(completed.length?(' · '+completed.length+' completed'):'')+'</summary>';
+  h+='<p style="font-size:11.5px;color:var(--ink-faded);margin:2px 0 8px">A task can only be marked done once evidence of completion is uploaded. Use “Add evidence &amp; mark done”. If the wrong proof was uploaded, “Reverse” returns it to outstanding.</p>';
   if(outstanding.length){
-    h+='<div style="overflow-x:auto"><table class="orders-table"><thead><tr><th>Task</th><th>Order</th><th>Sent to</th><th class="r">Outstanding</th><th></th></tr></thead><tbody>';
+    h+='<div style="overflow-x:auto"><table class="orders-table"><thead><tr><th>Task</th><th>Order</th><th>Sent to</th><th class="r">Outstanding</th><th>Evidence</th><th></th></tr></thead><tbody>';
     outstanding.forEach(r=>{
       const dcol = r.days>=3?'color:var(--red)':r.days>=1?'color:var(--amber)':'color:var(--ink-faded)';
+      const hasEv = !!r.st.evidence;
+      const evCell = hasEv ? '<span style="color:var(--green);font-size:11px" title="'+escAttr(r.st.evidence)+'">✓ evidence</span>' : '<span style="color:var(--ink-faded);font-size:11px">none</span>';
       h+='<tr><td>'+escapeHtml(r.label)+'</td>'
         +'<td>'+(r.order?('<span style="cursor:pointer;text-decoration:underline" onclick="openOrderModal(\''+escAttr(r.orderId)+'\')">#'+escapeHtml(r.orderId)+'</span> '+escapeHtml(r.order.store||'')):escapeHtml(r.orderId))+'</td>'
         +'<td>'+escapeHtml(r.st.sent_to||'?')+'</td>'
         +'<td class="r" style="'+dcol+'">'+fmtDays(r.days)+'</td>'
-        +'<td class="r"><button class="small" onclick="markTaskCompleted(\''+escAttr(r.id)+'\');renderAll()">Mark done</button> <button class="small" onclick="clearTaskSent(\''+escAttr(r.id)+'\');renderAll()" title="un-send">↺</button></td></tr>';
+        +'<td>'+evCell+'</td>'
+        +'<td class="r"><button class="small" onclick="trackerAddEvidenceAndComplete(\''+escAttr(r.id)+'\')">Add evidence &amp; mark done</button> <button class="small" onclick="clearTaskSent(\''+escAttr(r.id)+'\');renderAll()" title="un-send">↺</button></td></tr>';
     });
     h+='</tbody></table></div>';
   }
   if(completed.length){
-    h+='<div style="font-size:12px;color:var(--ink-faded);margin-top:10px">Recently completed: '+completed.slice(0,8).map(r=>escapeHtml(r.label)+' (#'+escapeHtml(r.orderId)+', '+fmtDays((r.st.completed_at-r.st.sent_at)/86400000)+')').join(' · ')+'</div>';
+    h+='<div style="overflow-x:auto;margin-top:10px"><table class="orders-table"><thead><tr><th>Completed task</th><th>Order</th><th>Evidence</th><th class="r">Took</th><th></th></tr></thead><tbody>';
+    completed.slice(0,20).forEach(r=>{
+      const took = fmtDays((r.st.completed_at - r.st.sent_at)/86400000);
+      h+='<tr><td>'+escapeHtml(r.label)+'</td>'
+        +'<td>'+(r.order?('#'+escapeHtml(r.orderId)+' '+escapeHtml(r.order.store||'')):escapeHtml(r.orderId))+'</td>'
+        +'<td><span style="color:var(--green);font-size:11px" title="'+escAttr(r.st.evidence||'')+'">✓ '+escapeHtml((r.st.evidence||'').slice(0,28))+'</span></td>'
+        +'<td class="r">'+took+'</td>'
+        +'<td class="r"><button class="small" onclick="reverseTaskCompletion(\''+escAttr(r.id)+'\');renderAll()" title="wrong evidence uploaded — send back to outstanding">Reverse</button></td></tr>';
+    });
+    h+='</tbody></table></div>';
   }
   h+='</details>';
   el.innerHTML=h;
+}
+// Prompt for an evidence reference (filename / note / link), attach it, and mark done.
+function trackerAddEvidenceAndComplete(taskId){
+  const ev = window.prompt('Describe or name the evidence of completion (e.g. "proof_of_postage.jpg", a tracking number, or a note). The task can only be marked done with this.');
+  if(ev===null) return;            // cancelled
+  if(!ev.trim()){ showToast('Evidence is required to mark done.','error'); return; }
+  if(completeTaskWithEvidence(taskId, ev.trim())) { renderAll(); showToast('Marked done with evidence.','success'); }
 }
 // Deploy B: Copy the Telegram message (clipboard only — does NOT mark sent).
 function copyTaskMessage(taskId, orderId, taskCode){
@@ -3424,6 +3483,9 @@ function openOrderModal(orderId) {
   applyStageCollapsibles(computeStage(order));
   ofInitItemsList(order);
   document.getElementById('orderModal').classList.add('show');
+  // Highlight the fields that are missing/needed for this order's current stage, so
+  // opening an order from a blocked task shows exactly what to fill in.
+  setTimeout(()=>{ try{ highlightOrderFields((missingFieldsFor(order)||[]).map(m=>m.field)); }catch(e){} }, 50);
 }
 
 function applyStageCollapsibles(currentStage) {
@@ -3526,6 +3588,31 @@ function ofEmailAutofill(){
 }
 // ---- Multi-item editor (each item separate, for accurate weight/volume) ----
 let OF_ITEMS = [];
+// Visually flag the form fields an order still needs (called when opening from a task).
+function highlightOrderFields(fieldKeys){
+  // clear any previous highlights
+  document.querySelectorAll('.field-needs-input').forEach(el=>{
+    el.classList.remove('field-needs-input');
+    const b=el.querySelector('.needs-badge'); if(b) b.remove();
+  });
+  if(!fieldKeys || !fieldKeys.length) return;
+  let firstEl=null;
+  fieldKeys.forEach(f=>{
+    const input = document.getElementById('f_'+f);
+    if(!input) return;
+    const wrap = input.closest('.form-field') || input.parentElement;
+    if(wrap){
+      wrap.classList.add('field-needs-input');
+      const lbl = wrap.querySelector('label');
+      if(lbl && !lbl.querySelector('.needs-badge')){
+        const span=document.createElement('span'); span.className='needs-badge';
+        span.textContent=' needs input'; lbl.appendChild(span);
+      }
+      if(!firstEl) firstEl=wrap;
+    }
+  });
+  if(firstEl) firstEl.scrollIntoView({behavior:'smooth', block:'center'});
+}
 function ofInitItemsList(order){
   OF_ITEMS = Array.isArray(order.items_list) && order.items_list.length
     ? order.items_list.map(it=>({name:it.name||'', qty:it.qty||1, weight:it.weight||'', volume:it.volume||''}))
