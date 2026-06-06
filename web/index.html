@@ -2231,10 +2231,9 @@ function removeAttachedFile(fieldKey, ctx) {
     order = DATA.orders.find(o => o.order_id === editingOrderId);
   }
   if (!order) return;
-  // If the text value was auto-set from this file's name, clear it too — otherwise the
-  // task's completed_when still sees a value and won't revert to the previous step.
-  const fname = order[fieldKey + '_filename'];
-  if (fname && order[fieldKey] === fname) order[fieldKey] = '';
+  // Removing the attachment also clears the text value — otherwise the filename lingers
+  // and the task's completed_when still sees a value, so it won't revert to the prior step.
+  order[fieldKey] = '';
   delete order[fieldKey + '_file'];
   delete order[fieldKey + '_filename'];
   delete order[fieldKey + '_filetype'];
@@ -2596,9 +2595,9 @@ function renderPriorityQueue() {
                   <button class="small" onclick="copyTaskMessage('${escAttr(t.task.task_id)}','${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();">📋 Copy message</button>
                   ${(function(){
                     const FF = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
-                    const taskFields = (TASK_FORM_FIELDS[t.task.type.code]||[]);
-                    // download buttons for any task-relevant file the order actually has, plus a return label if present
-                    const show = FF.filter(f => hasOrderFile(t.order,f) && (taskFields.indexOf(f)>=0 || f==='return_label_pdf'));
+                    // show a download button for ANY file the order actually has uploaded,
+                    // so proof of postage, labels, photos etc. are always reachable from the task.
+                    const show = FF.filter(f => hasOrderFile(t.order,f));
                     const labelFor = {order_confirmation:'order confirmation', return_label_pdf:'label', proof_of_postage:'proof of postage', delivery_photo:'delivery photo', damage_photo:'damage photo', collection_handover:'handover proof', invoice:'invoice'};
                     return show.map(f=>'<button class="small" onclick="downloadOrderFile(\''+escAttr(t.order.order_id)+'\',\''+f+'\'); event.stopPropagation();" title="Download the uploaded file to attach to an email">📄 Download '+labelFor[f]+'</button>').join(' ');
                   })()}
