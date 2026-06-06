@@ -1356,18 +1356,21 @@ const FIELD_ACCESS = {
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
 
 // Build a base64 form definition + a shareable link to upload.html for one access-group.
-function buildFormLink(order, group, taskCode, taskLabel){
+function buildFormLink(order, group, taskCode, taskLabel, mandSet){
   const fields = (group.fields||[]).map(k=>{
     const def = FIELD_DEFS[k] || {};
     const isFile = FILE_FIELDS.indexOf(k) >= 0;
+    // required is driven by the caller's mandatory set (current-stage-essential),
+    // not the static FIELD_DEFS.required — so optional backfill fields stay optional.
+    const req = mandSet ? !!mandSet[k] : !!def.required;
     return {
       key: k,
       label: def.label || k,
       help: def.help || '',
-      required: !!def.required,
+      required: req,
       kind: isFile ? 'file' : (def.type === 'select' ? 'select' : (def.type === 'textarea' ? 'textarea' : (def.type === 'number' ? 'number' : 'text'))),
       options: def.options || undefined,
-      accept: (k === 'return_label_pdf') ? 'image/*,application/pdf' : (isFile ? 'image/*,application/pdf' : undefined),
+      accept: isFile ? 'image/*,application/pdf' : undefined,
     };
   });
   const token = order._form_token || (order._form_token = Math.random().toString(36).slice(2,10));
@@ -2716,6 +2719,7 @@ function renderPriorityQueue() {
               <div class="send-row" onclick="event.stopPropagation()" style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                   <button class="small" onclick="copyTaskMessage('${escAttr(t.task.task_id)}','${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();">📋 Copy message</button>
+                  <button class="small" onclick="showTaskFormLinks('${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}','${escAttr(t.task.type.label||'')}'); event.stopPropagation();" title="Generate a link for the assignee to fill out the fields that mark this task done (supports photo/PDF upload)">🔗 Form link</button>
                   ${(function(){
                     const FF = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
                     // show a download button for ANY file the order actually has uploaded,
@@ -2805,7 +2809,64 @@ function damageGuidanceFor(order) {
 }
 
 let _taskFormState = null;
+// Build access-split upload links whose fields are the ones that MARK THIS TASK DONE.
+// All task-completion fields are required (the task isn't done until they're provided).
+// Returns [{cls, holder, fields, link}] (+ unresolved groups flagged).
+function buildTaskFormLinks(order, taskCode, taskLabel){
+  const fields = (TASK_FORM_FIELDS[taskCode] || []).filter(f => !fieldFilled(order, f));
+  if(!fields.length) return [];
+  const groups = splitFieldsByAccess(order, fields);
+  const mandSet = {}; fields.forEach(f=>mandSet[f]=true);   // all required
+  return groups.map(g=>{
+    const out = { cls:g.cls, holder:g.holder, fields:g.fields };
+    if(g.holder.resolved) out.link = buildFormLink(order, g, taskCode, taskLabel||'', mandSet);
+    return out;
+  });
+}
 function sendAsForm(rowKey, taskCode, orderId) { openTaskForm(taskCode, orderId); }
+// Popup: show the access-split completion-form links for a task in the queue.
+function showTaskFormLinks(orderId, taskCode, taskLabel){
+  const order = DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
+  const groups = buildTaskFormLinks(order, taskCode, taskLabel);
+  let body;
+  if(!groups.length){
+    body = '<div style="font-size:13px;color:var(--ink-faded)">All fields that complete this task are already filled — nothing to request.</div>';
+  } else {
+    body = '<div style="font-size:12px;color:var(--ink-faded);margin-bottom:8px">A link for the assignee to submit what marks <strong>'+escapeHtml(taskLabel||taskCode)+'</strong> done. Photos/PDFs upload straight into the order.</div>';
+    groups.forEach(g=>{
+      const labels = g.fields.map(f=>fieldLabel(f)).join(', ');
+      if(!g.holder.resolved){
+        const which = g.holder.reason==='card_owner'?'card owner':'email-account owner';
+        body += '<div style="border:1px solid var(--amber);background:var(--amber-soft);border-radius:9px;padding:10px;margin:6px 0">'
+              + '<div style="font-weight:600;color:var(--amber);font-size:13px">⚠ Unknown '+which+'</div>'
+              + '<div style="font-size:12px;margin:3px 0">Needs: '+escapeHtml(labels)+'</div>'
+              + (g.cls==='card_owner'
+                  ? '<button class="small" onclick="promptSetCardOwner(\''+escAttr(orderId)+'\')">Set card owner…</button>'
+                  : '<button class="small" onclick="openOrderModal(\''+escAttr(orderId)+'\')">Set order email / person…</button>')
+              + '</div>';
+        return;
+      }
+      body += '<div style="border:1px solid var(--line);border-radius:9px;padding:10px;margin:6px 0">'
+            + '<div style="font-size:13px"><strong>'+escapeHtml(g.holder.person)+'</strong> '
+            + '<span class="badge-mini" style="background:var(--accent-soft);color:var(--accent-deep)">'+(g.holder.isAdmin?'ADMIN':g.cls==='card_owner'?'CARD OWNER':'EMAIL HOLDER')+'</span></div>'
+            + '<div style="font-size:12px;color:var(--ink-faded);margin:4px 0">Asks for: '+escapeHtml(labels)+'</div>'
+            + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+            + '<input type="text" readonly value="'+escAttr(g.link)+'" style="flex:1;min-width:160px;font-size:11px" onclick="this.select()">'
+            + '<button class="small" onclick="copyText(\''+escAttr(g.link)+'\')">📋 Copy link</button>'
+            + '<button class="small" onclick="copyFormSendMessage(\''+escAttr(orderId)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(g.link)+'\')">📋 Copy message</button>'
+            + '</div></div>';
+    });
+  }
+  const ov = document.createElement('div');
+  ov.id = 'taskFormOv';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(10,12,20,.45);display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.innerHTML = '<div style="background:var(--card,#fff);border-radius:12px;max-width:520px;width:100%;padding:18px;max-height:80vh;overflow:auto">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><strong style="font-size:15px">Completion form — '+escapeHtml(order.store||order.order_id)+'</strong>'
+    + '<button class="small" onclick="document.getElementById(\'taskFormOv\').remove()">✕</button></div>'
+    + body + '</div>';
+  ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
+  document.body.appendChild(ov);
+}
 function openTaskForm(taskCode, orderId) {
   const order = DATA.orders.find(o => o.order_id === orderId);
   const task = TASK_CATALOG.find(t => t.code === taskCode);
@@ -3073,7 +3134,7 @@ function renderMissingInfo() {
       if (!FIELD_DEFS[field]) return;                // matrix-only (spec-fidelity, no demo input)
       if (fieldFilled(o, field)) return;             // already filled
       const ip = infoPriorityFor(o, field, stage);
-      if (ip.bf === 0) return;                       // not blocking right now
+      if (ip.bf < 10) return;                        // only CURRENT-stage-essential fields block (pure stage rule)
       blockers.push({
         field,
         label: fieldLabel(field),
@@ -3166,27 +3227,36 @@ function renderBlockingMatrix() {
 // Build the "send-out forms, split by who has access" panel for an order.
 function renderAccessForms(order){
   const stage = computeStage(order);
-  // the fields blocking this order right now
-  const needed = [];
+  const curStage = stage === 'done' ? 8 : stage;
+  // Pure stage rule:
+  //  mandatory = empty AND essential exactly at the current stage (bf 10)
+  //  optional  = empty AND essential at some OTHER stage (earlier backfill or later) — included but not required
+  const mandatory = [], optional = [];
   Object.keys(FIELD_BLOCKING).forEach(field=>{
-    if(FIELD_BLOCKING[field]==null) return;
-    if(!FIELD_DEFS[field]) return;
-    if(fieldFilled(order, field)) return;
-    const ip = infoPriorityFor(order, field, stage);
-    if(ip.bf === 0) return;
-    needed.push(field);
+    if(FIELD_BLOCKING[field]==null) return;          // never-essential / display-only
+    if(!FIELD_DEFS[field]) return;                   // no input defined
+    if(fieldFilled(order, field)) return;            // already have it
+    const ess = FIELD_BLOCKING[field];
+    if(ess === curStage) mandatory.push(field);
+    else optional.push(field);
   });
-  if(!needed.length) return '<div class="staged-form-explainer" style="background:#ebfbee;border-color:#b2f2bb"><strong>No blocking information needed right now.</strong></div>';
-  const groups = splitFieldsByAccess(order, needed);
+  if(!mandatory.length && !optional.length) return '<div class="staged-form-explainer" style="background:#ebfbee;border-color:#b2f2bb"><strong>No information needed right now.</strong></div>';
+  // group BOTH sets by access, but remember which fields are mandatory
+  const mandSet = {}; mandatory.forEach(f=>mandSet[f]=true);
+  const allFields = mandatory.concat(optional);
+  const groups = splitFieldsByAccess(order, allFields);
   let h = '<div class="staged-form-explainer"><strong>Send-out forms — split by who has access</strong>'
-        + '<div style="font-size:11.5px;color:var(--ink-faded);margin-top:3px">Each person only gets the fields they can access. Card-account info goes to the card owner, account/delivery info to the email holder, return-process info stays with admin.</div></div>';
+        + '<div style="font-size:11.5px;color:var(--ink-faded);margin-top:3px">Each person only gets the fields they can access. <strong>Required</strong> fields are what\'s blocking this order at Stage '+curStage+'; other empty fields are included as optional backfill (useful for later stages, e.g. chargeback).</div></div>';
   groups.forEach(g=>{
-    const labels = g.fields.map(f=>fieldLabel(f)).join(', ');
+    const reqFields = g.fields.filter(f=>mandSet[f]);
+    const optFields = g.fields.filter(f=>!mandSet[f]);
+    const reqLabels = reqFields.map(f=>fieldLabel(f)).join(', ') || '—';
+    const optLabels = optFields.map(f=>fieldLabel(f)).join(', ');
     if(!g.holder.resolved){
       const which = g.holder.reason === 'card_owner' ? 'card owner' : 'email-account owner';
       h += '<div style="border:1px solid var(--amber);background:var(--amber-soft);border-radius:10px;padding:12px;margin:8px 0">'
          + '<div style="font-weight:600;color:var(--amber)">⚠ Unknown '+which+' — can\'t route this form</div>'
-         + '<div style="font-size:12px;margin:4px 0">Needs: '+escapeHtml(labels)+'</div>'
+         + '<div style="font-size:12px;margin:4px 0">Required: '+escapeHtml(reqLabels)+(optLabels?(' · optional: '+escapeHtml(optLabels)):'')+'</div>'
          + '<div style="font-size:12px;margin-bottom:6px">Set who has access so the form can be sent:</div>'
          + (g.cls==='card_owner'
              ? '<button class="small" onclick="promptSetCardOwner(\''+escAttr(order.order_id)+'\')">Set card owner…</button>'
@@ -3194,14 +3264,15 @@ function renderAccessForms(order){
          + '</div>';
       return;
     }
-    const link = buildFormLink(order, g, '', '');
+    const link = buildFormLink(order, { cls:g.cls, holder:g.holder, fields:g.fields }, '', '', mandSet);
     const isAdmin = g.holder.isAdmin;
     h += '<div style="border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0">'
        + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
        + '<div><strong>'+escapeHtml(g.holder.person)+'</strong> '
        + '<span class="badge-mini" style="background:var(--accent-soft);color:var(--accent-deep)">'+(isAdmin?'ADMIN (in-app)':g.cls==='card_owner'?'CARD OWNER':'EMAIL HOLDER')+'</span></div>'
        + '</div>'
-       + '<div style="font-size:12px;color:var(--ink-faded);margin:6px 0">Asks for: '+escapeHtml(labels)+'</div>';
+       + '<div style="font-size:12px;margin:6px 0"><strong>Required:</strong> '+escapeHtml(reqLabels)+'</div>'
+       + (optLabels ? '<div style="font-size:12px;color:var(--ink-faded);margin-bottom:4px">Optional backfill: '+escapeHtml(optLabels)+'</div>' : '');
     if(isAdmin){
       h += '<div style="font-size:12px;color:var(--ink-faded)">These stay in the app — fill them directly in the form below. (A copy of the link is available for quick entry too.)</div>'
          + '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'
