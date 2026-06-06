@@ -1402,8 +1402,8 @@ const FIELD_MODEL = {
   retailer_rebuttal_received:{avail:6, methods:M_ESCALATE, inForm:true, task:'chase_investigation'},
   // stage 7 — chargeback (escalating only; contingent — not guaranteed)
   card_used:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
-  chargeback_bank:{avail:1, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
-  chargeback_amount:{avail:3, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},  // known at method choice (full unless PEB)
+  chargeback_bank:{avail:7, methods:M_ESCALATE, inForm:false, task:'submit_chargeback'},  // = the card's bank; not requested, derived
+  chargeback_amount:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'}, // only needed at chargeback stage
   chargeback_date:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
   chargeback_type:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
   chargeback_reference:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
@@ -2872,7 +2872,7 @@ function renderPriorityQueue() {
               <div class="send-row" onclick="event.stopPropagation()" style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                   <button class="small" onclick="copyTaskMessage('${escAttr(t.task.task_id)}','${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();">📋 Copy message</button>
-                  <button class="small" onclick="showTaskFormLinks('${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}','${escAttr(t.task.type.label||'')}'); event.stopPropagation();" title="Generate a link for the assignee to fill out the fields that mark this task done (supports photo/PDF upload)">🔗 Form link</button>
+                  <button class="small" style="background:var(--accent-soft);color:var(--accent-deep);font-weight:600" onclick="showTaskFormLinks('${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}','${escAttr(t.task.type.label||'')}'); event.stopPropagation();" title="Generate a link to send the assignee — they upload the photo/PDF/details that mark this task complete, and it lands back on the order automatically">🔗 Send completion form</button>
                   ${(function(){
                     const FF = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
                     // show a download button for ANY file the order actually has uploaded,
