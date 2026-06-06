@@ -1188,23 +1188,32 @@ const TASK_CATALOG = [
     instruction_template: 'Hi {person},\n\nReady to post: return for {store} order {order_id} ({items}).\n\n  Method: {method}\n  Courier: {outbound_courier}\n  Label: {return_label_pdf}\n\nPlease pack and drop off at any {outbound_courier} point. Reply with a clear photo of the proof-of-postage receipt (we need this if we have to chargeback).' },
 
   { code: 'bbm_book', name: 'Call to book return — ask for a label first', stage: 4, sla: 6, owner_only: false, info_only: false,
-    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && !bbmLargeItem(o) && o.bbm_route!=='collection',
-    appears_when: 'BBM order (normal size) at stage 4 — route/date not yet obtained',
+    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && bbmRoute(o)==='',
+    appears_when: 'BBM order at stage 4 — size unknown, route undecided',
     advances_when: 'A return label OR collection date is obtained → next BBM task',
     completed_when: (o) => bbmBooked(o),
     completed_via: 'return_label_pdf filled (→ label) OR collection_date filled (→ collection)',
     info_needed: 'Retailer returns contact, order ref, customer identification',
     instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and needs to go back.\n\nPlease call/contact {store} and arrange the return — in this order:\n  1. FIRST ask if they can issue a RETURN LABEL for this item (the easier, free drop-off route). If yes, reply with the return label.\n  2. If they will NOT provide a label for this item, ask them to book a home COLLECTION instead, and reply with the confirmed collection date.\n\nIdentification: {person}, {email}, order no. {store_order_number}, address {address}.\n\nReply with whichever you obtain so we can book the next step.' },
 
-  { code: 'bbm_book_collection', name: 'Call to book a collection (large item)', stage: 4, sla: 6, owner_only: false, info_only: false,
-    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && (bbmLargeItem(o) || o.bbm_route==='collection'),
-    appears_when: 'BBM order — large item (>20kg or >500L) or route forced to collection',
+  { code: 'bbm_book_collection', name: 'Call to book a collection', stage: 4, sla: 6, owner_only: false, info_only: false,
+    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && bbmRoute(o)==='collection',
+    appears_when: 'BBM order — route is collection (large item, or forced)',
     advances_when: 'A collection date is obtained → hand-over task',
     completed_when: (o) => bbmBooked(o),
     completed_via: 'collection_date filled',
     info_needed: 'Retailer returns contact, collection address, available dates',
     instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake. This item is large, so it goes back by home COLLECTION (a parcel-shop label isn’t practical).\n\nPlease contact {store}, book a home collection, and reply with the confirmed collection date.\n\nIdentification: {person}, {email}, order no. {store_order_number}\nCollection address: {address}' },
-  { code: 'hand_over_collection', name: 'Hand over items on the collection date', stage: 4, sla: 48, owner_only: false, info_only: false,
+
+
+  { code: 'bbm_book_label', name: 'Get a return label and post it', stage: 4, sla: 6, owner_only: false, info_only: false,
+    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && bbmRoute(o)==='label',
+    appears_when: 'BBM order — route is return label (small item, or forced)',
+    advances_when: 'A return label is obtained → post task',
+    completed_when: (o) => bbmBooked(o),
+    completed_via: 'return_label_pdf filled',
+    info_needed: 'Retailer returns contact, order ref, customer identification',
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and goes back by RETURN LABEL.\n\nPlease contact {store} and request a return label for this order, then reply with the label.\n\nIdentification: {person}, {email}, order no. {store_order_number}, address {address}.' },  { code: 'hand_over_collection', name: 'Hand over items on the collection date', stage: 4, sla: 48, owner_only: false, info_only: false,
     applies_when: (o)=> o.bought_by_mistake==='yes' && bbmRoute(o)==='collection' && bbmBooked(o),
     appears_when: 'BBM via collection — collection booked',
     advances_when: 'LIT/RTS sent ✓ → Stage 5',
@@ -2528,6 +2537,7 @@ const TASK_FORM_FIELDS = {
   generate_return_label:  ['return_label_pdf', 'outbound_tracking', 'outbound_courier'],
   post_return_label:      ['proof_of_postage', 'posted_from'],
   bbm_book:               ['return_label_pdf', 'collection_date'],
+  bbm_book_label:         ['return_label_pdf'],
   bbm_book_collection:    ['collection_date'],
   get_collection_date:    ['collection_date'],
   hand_over_collection:   ['collection_handover'],
@@ -3524,12 +3534,14 @@ function ofInitItemsList(order){
 }
 function ofRenderItems(){
   const box=document.getElementById('f_items_list'); if(!box) return;
-  box.innerHTML = OF_ITEMS.map((it,i)=>
+  const header = '<div style="display:flex;gap:6px;margin-bottom:4px;font-size:10px;color:var(--ink-faded);text-transform:uppercase;letter-spacing:.4px">'
+    + '<span style="flex:1;min-width:120px">Item</span><span style="width:62px">Qty</span><span style="min-width:92px">Weight · volume</span><span style="width:24px"></span></div>';
+  box.innerHTML = header + OF_ITEMS.map((it,i)=>
     '<div style="display:flex;gap:6px;margin-bottom:5px;align-items:center">'
     + '<input type="text" placeholder="item name" value="'+escAttr(it.name)+'" oninput="ofItemField('+i+',\'name\',this.value)" style="flex:1;min-width:120px">'
-    + '<input type="number" min="1" placeholder="qty" value="'+(it.qty||1)+'" oninput="ofItemField('+i+',\'qty\',this.value)" style="width:62px" title="quantity">'
+    + '<input type="number" min="1" placeholder="qty" value="'+(it.qty||1)+'" oninput="ofItemField('+i+',\'qty\',this.value)" style="width:62px" title="quantity of this item">'
     + '<span style="font-size:10px;color:var(--ink-faded);min-width:92px">'+(it.weight?(it.weight+'kg'):'?kg')+' · '+(it.volume?(it.volume+'L'):'?L')+'</span>'
-    + (OF_ITEMS.length>1?'<button type="button" class="small" onclick="ofRemoveItem('+i+')" title="remove">×</button>':'')
+    + (OF_ITEMS.length>1?'<button type="button" class="small" onclick="ofRemoveItem('+i+')" title="remove">×</button>':'<span style="width:24px"></span>')
     + '</div>'
   ).join('');
 }
@@ -3865,14 +3877,19 @@ function bbmLargeItem(o){
   const v = parseFloat(o.total_volume_l) || 0;
   return w > BBM_LARGE_WEIGHT_KG || v > BBM_LARGE_VOLUME_L;
 }
+// Size is "known" once a weight or volume has been entered/estimated.
+function bbmSizeKnown(o){
+  return (parseFloat(o.total_weight_kg)||0) > 0 || (parseFloat(o.total_volume_l)||0) > 0;
+}
 function bbmRoute(o){
   if(!o || o.bought_by_mistake!=='yes') return '';
-  if(o.bbm_route==='collection' || o.bbm_route==='label') return o.bbm_route;
+  if(o.bbm_route==='collection' || o.bbm_route==='label') return o.bbm_route;  // manual force wins
   if(fieldFilled(o,'collection_date')) return 'collection';
   if(fieldFilled(o,'return_label_pdf') || o.return_label_pdf_file) return 'label';
-  // large items are collection-guaranteed even before a date is booked
+  // Size-derived routing (rule A): large → collection; small & known → label.
   if(bbmLargeItem(o)) return 'collection';
-  return '';
+  if(bbmSizeKnown(o)) return 'label';
+  return '';  // size unknown → route undecided → both-options task
 }
 function bbmBooked(o){
   // "Booked" means the actual datum exists: a collection date (collection route) or a
