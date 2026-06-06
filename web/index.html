@@ -904,12 +904,9 @@ document.addEventListener('DOMContentLoaded', bootHosted);
     </div>
     <div class="queue-toolbar">
       <div class="filter-group">
-        <label>Stage</label>
-        <select id="priorityStageFilter">
-          <option value="all">All stages</option>
-          <option value="1">Stage 1</option><option value="2">Stage 2</option><option value="3">Stage 3</option>
-          <option value="4">Stage 4</option><option value="5">Stage 5</option><option value="6">Stage 6</option>
-          <option value="7">Stage 7</option><option value="8">Stage 8</option>
+        <label>Task</label>
+        <select id="priorityTaskFilter">
+          <option value="all">All tasks</option>
         </select>
         <label>Person</label><select id="priorityPersonFilter"><option value="all">All</option></select>
         <label>Search</label><input type="text" id="prioritySearch" placeholder="Order ID, store, item...">
@@ -1672,6 +1669,9 @@ function computeStage(order) {
   if (t.refund_unsuccessful) return 7;
   if (t.lit_rts_sent || t.dna_email_sent) return 5;
   if (t.lit_created || t.rts_created) return 4;
+  // A BBM order that's been delivered is in the return-execution stage (4) regardless
+  // of how it was flagged — so its "call to book" task always surfaces.
+  if (order.bought_by_mistake === 'yes' && t.item_delivered) return 4;
   if (t.item_delivered) return 3;
   if (t.item_ordered) return 2;
   return 1;
@@ -2338,7 +2338,7 @@ function renderDashboard() {
 // PRIORITY QUEUE WITH EXPANDABLE INSTRUCTIONS
 // ============================================================
 function renderPriorityQueue() {
-  const stageFilter = document.getElementById('priorityStageFilter').value;
+  const taskFilter = (document.getElementById('priorityTaskFilter')||{}).value || 'all';
   const personFilter = document.getElementById('priorityPersonFilter').value;
   const search = document.getElementById('prioritySearch').value.toLowerCase().trim();
   const groupBy = (document.getElementById('priorityGroupBy')||{}).value || 'type';
@@ -2348,9 +2348,18 @@ function renderPriorityQueue() {
   if (personSel.options.length <= 1) {
     getAllPeople().forEach(p => { const opt = document.createElement('option'); opt.value = p; opt.textContent = p; personSel.appendChild(opt); });
   }
+  // Populate task filter from task types currently present
+  const taskSel = document.getElementById('priorityTaskFilter');
+  if (taskSel && taskSel.options.length <= 1) {
+    const seen = {};
+    getAllTasksWithPriority().forEach(t=>{ if(!seen[t.task.type.code]){ seen[t.task.type.code]=t.task.type.name; } });
+    Object.keys(seen).sort((a,b)=>seen[a].localeCompare(seen[b])).forEach(code=>{
+      const opt=document.createElement('option'); opt.value=code; opt.textContent=seen[code]; taskSel.appendChild(opt);
+    });
+  }
   
   let tasks = getAllTasksWithPriority();
-  if (stageFilter !== 'all') tasks = tasks.filter(t => String(t.task.type.stage) === stageFilter);
+  if (taskFilter !== 'all') tasks = tasks.filter(t => t.task.type.code === taskFilter);
   if (personFilter !== 'all') tasks = tasks.filter(t => t.order.person === personFilter);
   if (search) tasks = tasks.filter(t =>
     (t.order.order_id || '').toLowerCase().includes(search) ||
@@ -2772,7 +2781,7 @@ function markSentFromQueue(rowKey, taskId, ownerOnly, suggestedPerson){
   showToast('Marked sent to '+(recipient||'?')+' — now tracked as outstanding', 'success');
 }
 
-['priorityStageFilter', 'priorityPersonFilter', 'prioritySearch', 'priorityGroupBy'].forEach(id => {
+['priorityTaskFilter', 'priorityPersonFilter', 'prioritySearch', 'priorityGroupBy'].forEach(id => {
   document.addEventListener('input', e => { if (e.target.id === id) renderPriorityQueue(); });
   document.addEventListener('change', e => { if (e.target.id === id) renderPriorityQueue(); });
 });
@@ -3280,7 +3289,14 @@ function openOrderModal(orderId) {
     <div class="form-grid">
       <div class="form-field"><label>Order ID *</label><input type="text" id="f_order_id" value="${escAttr(order.order_id)}" ${isNew ? '' : 'readonly'}></div>
       <div class="form-field"><label>Store</label><input type="text" id="f_store" value="${escAttr(order.store)}"></div>
-      <div class="form-field full"><label>Items</label><input type="text" id="f_items" value="${escAttr(order.items)}"></div>
+      <div class="form-field full"><label>Items <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">add each item separately for accurate weight/volume</span></label>
+        <div id="f_items_list"></div>
+        <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+          <button type="button" class="small" onclick="ofAddItemRow()">+ Add item</button>
+          <button type="button" class="small" onclick="ofEstimateWV()" title="Use AI to estimate total weight & volume from the item names and quantities">✨ Calculate weight &amp; volume</button>
+        </div>
+        <input type="hidden" id="f_items" value="${escAttr(order.items)}">
+      </div>
       <div class="form-field"><label>Store order number</label><input type="text" id="f_store_order_number" value="${escAttr(order.store_order_number)}" onchange="onEvidenceProvided('store_order_number')"></div>
       <div class="form-field full">
         <label>Order confirmation <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">file or text · ticks Item ordered</span></label>
@@ -3396,6 +3412,7 @@ function openOrderModal(orderId) {
     cb.addEventListener('change', () => { cb.closest('.trigger-toggle').classList.toggle('on', cb.checked); updateModalStageHint(); });
   });
   applyStageCollapsibles(computeStage(order));
+  ofInitItemsList(order);
   document.getElementById('orderModal').classList.add('show');
 }
 
@@ -3497,6 +3514,63 @@ function ofEmailAutofill(){
     if(hint) hint.innerHTML='<span style="color:var(--amber)">⚠ email not recognised — set person manually, or it\'ll be saved as a new contact for that person.</span>';
   }
 }
+// ---- Multi-item editor (each item separate, for accurate weight/volume) ----
+let OF_ITEMS = [];
+function ofInitItemsList(order){
+  OF_ITEMS = Array.isArray(order.items_list) && order.items_list.length
+    ? order.items_list.map(it=>({name:it.name||'', qty:it.qty||1, weight:it.weight||'', volume:it.volume||''}))
+    : (order.items ? [{name:order.items, qty:parseInt(order.item_quantity)||1, weight:'', volume:''}] : [{name:'',qty:1,weight:'',volume:''}]);
+  ofRenderItems();
+}
+function ofRenderItems(){
+  const box=document.getElementById('f_items_list'); if(!box) return;
+  box.innerHTML = OF_ITEMS.map((it,i)=>
+    '<div style="display:flex;gap:6px;margin-bottom:5px;align-items:center">'
+    + '<input type="text" placeholder="item name" value="'+escAttr(it.name)+'" oninput="ofItemField('+i+',\'name\',this.value)" style="flex:1;min-width:120px">'
+    + '<input type="number" min="1" placeholder="qty" value="'+(it.qty||1)+'" oninput="ofItemField('+i+',\'qty\',this.value)" style="width:62px" title="quantity">'
+    + '<span style="font-size:10px;color:var(--ink-faded);min-width:92px">'+(it.weight?(it.weight+'kg'):'?kg')+' · '+(it.volume?(it.volume+'L'):'?L')+'</span>'
+    + (OF_ITEMS.length>1?'<button type="button" class="small" onclick="ofRemoveItem('+i+')" title="remove">×</button>':'')
+    + '</div>'
+  ).join('');
+}
+function ofItemField(i,k,v){ if(OF_ITEMS[i]){ OF_ITEMS[i][k]= (k==='qty'? (parseInt(v)||1) : v); } }
+function ofAddItemRow(){ OF_ITEMS.push({name:'',qty:1,weight:'',volume:''}); ofRenderItems(); }
+function ofRemoveItem(i){ OF_ITEMS.splice(i,1); if(!OF_ITEMS.length) OF_ITEMS=[{name:'',qty:1,weight:'',volume:''}]; ofRenderItems(); }
+function ofItemsSummary(){ return OF_ITEMS.filter(it=>it.name).map(it=>(it.qty>1?it.qty+'× ':'')+it.name).join(', '); }
+function ofSumWV(){
+  let w=0,v=0,haveAny=false;
+  OF_ITEMS.forEach(it=>{ const q=it.qty||1; if(it.weight){w+=parseFloat(it.weight)*q;haveAny=true;} if(it.volume){v+=parseFloat(it.volume)*q;haveAny=true;} });
+  return {w:Math.round(w*100)/100, v:Math.round(v), haveAny};
+}
+// AI estimate: fills per-item weight/volume from name+qty, then sums into the totals.
+// Activates when the Anthropic API key is configured (same endpoint as other AI features).
+async function ofEstimateWV(){
+  const items = OF_ITEMS.filter(it=>it.name);
+  if(!items.length){ showToast('Add at least one item name first','error'); return; }
+  showToast('Estimating weight & volume…','success');
+  try{
+    const prompt = 'For each item, estimate a realistic single-unit weight in kg and packed volume in litres. '
+      + 'Return ONLY a JSON array, one object per item in order, like [{"weight":1.2,"volume":8}]. Items:\n'
+      + items.map((it,i)=>(i+1)+'. '+it.name+(it.qty>1?(' (qty '+it.qty+', give PER-UNIT values)'):'')).join('\n');
+    const res = await fetch((window.APP_CONFIG&&window.APP_CONFIG.aiProxyUrl)||'/api/ai', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ task:'estimate_wv', prompt })
+    });
+    if(!res.ok) throw new Error('AI endpoint returned '+res.status);
+    const data = await res.json();
+    let arr = data.result || data.items || data;
+    if(typeof arr==='string') arr = JSON.parse(arr.replace(/```json|```/g,'').trim());
+    if(!Array.isArray(arr)) throw new Error('unexpected AI response');
+    items.forEach((it,i)=>{ if(arr[i]){ it.weight = arr[i].weight!=null?arr[i].weight:it.weight; it.volume = arr[i].volume!=null?arr[i].volume:it.volume; } });
+    ofRenderItems();
+    const s=ofSumWV();
+    const wEl=document.getElementById('f_total_weight_kg'), vEl=document.getElementById('f_total_volume_l');
+    if(wEl) wEl.value=s.w; if(vEl) vEl.value=s.v;
+    showToast('Estimated: '+s.w+'kg · '+s.v+'L','success');
+  }catch(e){
+    showToast('AI estimate unavailable — set the Anthropic API key, or enter weight/volume manually. ('+e.message+')','error');
+  }
+}
 function saveOrderEdit() {
   const id = document.getElementById('f_order_id').value.trim();
   if (!id) { alert('Order ID is required'); return; }
@@ -3509,6 +3583,20 @@ function saveOrderEdit() {
   else { order = DATA.orders.find(o => o.order_id === editingOrderId); }
   fields.forEach(f => { const el = document.getElementById('f_' + f); if (el) order[f] = el.value.trim(); });
   order.price = parseFloat(document.getElementById('f_price').value) || 0;
+  // Persist multi-item list; derive the summary + quantity; sum weight/volume if present.
+  if (Array.isArray(OF_ITEMS)) {
+    const clean = OF_ITEMS.filter(it=>it.name && it.name.trim());
+    if (clean.length) {
+      order.items_list = clean.map(it=>({name:it.name.trim(), qty:it.qty||1, weight:it.weight||'', volume:it.volume||''}));
+      order.items = clean.map(it=>(it.qty>1?it.qty+'× ':'')+it.name.trim()).join(', ');
+      order.item_quantity = clean.reduce((s,it)=>s+(it.qty||1),0);
+      const sumW = clean.reduce((s,it)=> s + ((parseFloat(it.weight)||0)*(it.qty||1)), 0);
+      const sumV = clean.reduce((s,it)=> s + ((parseFloat(it.volume)||0)*(it.qty||1)), 0);
+      // only auto-fill totals the user hasn't set on the form
+      if (sumW>0 && !document.getElementById('f_total_weight_kg').value.trim()) order.total_weight_kg = String(Math.round(sumW*100)/100);
+      if (sumV>0 && !document.getElementById('f_total_volume_l').value.trim()) order.total_volume_l = String(Math.round(sumV));
+    }
+  }
   
   // Manual stage override
   const manualStageEl = document.getElementById('f_manual_stage');
@@ -4242,25 +4330,60 @@ function renderMethodLogic(){
 function mcBBMCard(o){
   const route = bbmRoute(o);
   const booked = bbmBooked(o);
+  const large = bbmLargeItem(o);
+  const hasWV = (parseFloat(o.total_weight_kg)||0)>0 || (parseFloat(o.total_volume_l)||0)>0;
   const tasks = (typeof getTasksForOrder==='function') ? getTasksForOrder(o) : [];
   const open = tasks[0];
   const routeBadge = route
     ? '<span class="badge-mini" style="background:var(--accent-soft);color:var(--accent-deep)">via '+(route==='collection'?'collection':'return label')+'</span>'
-    : '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">route not set</span>';
+    : '<span class="badge-mini" style="background:var(--blue-soft);color:var(--blue)">label-or-collection</span>';
   let taskLine;
-  if(open){ taskLine = 'Next task: <strong>'+escapeHtml(open.type.name)+'</strong>'+(booked?'':' — outstanding until a collection date or label is obtained'); }
-  else { taskLine = 'No open task (may be awaiting handover/postage proof or resolved).'; }
-  return '<div class="order-card" style="border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px">'
+  if(open){
+    taskLine = 'Task due: <strong>'+escapeHtml(open.type.name)+'</strong>'
+      + (booked?'':' — outstanding until a return label or collection date is obtained')
+      + ' <span style="opacity:.75">(tap to open in Priority Queue)</span>';
+  } else {
+    taskLine = 'No open task (awaiting handover / postage proof, or resolved).';
+  }
+  const wvNote = (!large && !hasWV)
+    ? '<div style="margin-top:6px;font-size:11.5px;color:var(--ink-faded)">Item weight/volume not yet calculated — the task covers <strong>both</strong> routes (ask for a label first, else book a collection). Calculating size would let the system pick collection-only for large items, but it does <strong>not</strong> block this task.</div>'
+    : '';
+  const openTaskBtn = open
+    ? '<button class="primary small" onclick="event.stopPropagation();goToTaskInQueue(\''+escAttr(open.type.code)+'\',\''+escAttr(o.order_id)+'\')">Open task in queue ›</button>'
+    : '';
+  return '<div class="order-card" style="border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px;cursor:'+(open?'pointer':'default')+'"'
+    + (open?(' onclick="goToTaskInQueue(\''+escAttr(open.type.code)+'\',\''+escAttr(o.order_id)+'\')"'):'')+'>'
     + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
     + '<div><strong>'+escapeHtml(o.store)+'</strong> <span style="color:var(--ink-faded);font-size:12px">#'+escapeHtml(o.order_id)+' · '+escapeHtml(o.items||'')+'</span></div>'
     + '<div style="display:flex;gap:6px;align-items:center">'+routeBadge+'<span style="font-size:12px;color:var(--ink-faded)">'+fmtMoney(o.price||0)+'</span></div></div>'
     + '<div style="margin-top:8px;padding:8px 10px;background:var(--accent-soft);border-radius:6px;font-size:13px;color:var(--accent-deep)">'+taskLine+'</div>'
-    + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">'
+    + wvNote
+    + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center" onclick="event.stopPropagation()">'
+    + openTaskBtn
     + '<span style="font-size:11px;color:var(--ink-faded)">Force route:</span>'
-    + '<button class="small" onclick="forceBBMRoute(\''+escAttr(o.order_id)+'\',\'collection\')"'+(route==='collection'?' style="background:var(--ink);color:var(--bg-card)"':'')+'>Collection</button>'
-    + '<button class="small" onclick="forceBBMRoute(\''+escAttr(o.order_id)+'\',\'label\')"'+(route==='label'?' style="background:var(--ink);color:var(--bg-card)"':'')+'>Return label</button>'
-    + '<button class="small" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">Open order</button>'
+    + '<button class="small" onclick="event.stopPropagation();forceBBMRoute(\''+escAttr(o.order_id)+'\',\'collection\')"'+(route==='collection'?' style="background:var(--ink);color:var(--bg-card)"':'')+'>Collection</button>'
+    + '<button class="small" onclick="event.stopPropagation();forceBBMRoute(\''+escAttr(o.order_id)+'\',\'label\')"'+(route==='label'?' style="background:var(--ink);color:var(--bg-card)"':'')+'>Return label</button>'
+    + '<button class="small" onclick="event.stopPropagation();openOrderModal(\''+escAttr(o.order_id)+'\')">Open order</button>'
     + '</div></div>';
+}
+// Deep-link from a Method Choice card into the Priority Queue, filtered+expanded on the task.
+function goToTaskInQueue(taskCode, orderId){
+  goToTab('priority');
+  setTimeout(()=>{
+    const tf = document.getElementById('priorityTaskFilter');
+    if(tf){ tf.value = taskCode; }
+    renderPriorityQueue();
+    setTimeout(()=>{
+      // expand the matching row
+      const tasks = getAllTasksWithPriority().filter(t=> (tf&&tf.value!=='all')? t.task.type.code===tf.value : true);
+      const idx = tasks.findIndex(t=>t.order.order_id===orderId && t.task.type.code===taskCode);
+      if(idx>=0){
+        const rowKey = 'task_'+idx+'_'+(tasks[idx].task.task_id||'').replace(/[^a-z0-9]/gi,'_');
+        const exp = document.getElementById('exp_'+rowKey); const row=document.getElementById('row_'+rowKey);
+        if(exp){ exp.classList.add('open'); if(row) row.classList.add('open'); exp.scrollIntoView({behavior:'smooth',block:'center'}); }
+      }
+    }, 60);
+  }, 40);
 }
 
 // ---- The top flowchart (sample OR a loaded order); interactive + drop target ----
