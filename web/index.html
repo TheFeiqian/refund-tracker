@@ -1188,7 +1188,7 @@ const TASK_CATALOG = [
     completed_when: (o) => fieldFilled(o, 'proof_of_postage') || !!o.proof_of_postage_file,
     completed_via: 'proof_of_postage filled OR a postage receipt file is attached',
     info_needed: 'Printed label, parcel ready, drop-off options',
-    instruction_template: 'Hi {person},\n\nReady to post: return for {store} order {order_id} ({items}).\n\n  Method: {method}\n  Courier: {outbound_courier}\n  Label: {return_label_pdf}\n\nPlease pack and drop off at any {outbound_courier} point. Reply with a clear photo of the proof-of-postage receipt (we need this if we have to chargeback).' },
+    instruction_template: 'Hi {person},\n\nReady to post: return for {store} order {order_id} ({items}).\n\n  Method: {method}\n  Courier: {outbound_courier}\n\nThe return label PDF is attached (downloaded from this task and sent with this message). Please print it, pack the parcel, and drop off at any {outbound_courier} point. Reply with a clear photo of the proof-of-postage receipt (we need this if we have to chargeback).' },
 
   { code: 'bbm_book', name: 'Call to book return — ask for a label first', stage: 4, sla: 6, owner_only: false, info_only: false,
     applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && bbmRoute(o)==='',
@@ -1804,6 +1804,16 @@ function getAllPeople() {
 // ============================================================
 function taskStatusStore(){ if(!DATA._taskStatus) DATA._taskStatus={}; return DATA._taskStatus; }
 function getTaskStatus(taskId){ return taskStatusStore()[taskId] || null; }
+// Hook for the future Telegram auto-send: returns the files that should be attached
+// to a task's outgoing message. When the bot is wired, "Send" attaches these. Today the
+// admin downloads them (Download label button) and attaches manually.
+function taskAttachments(order, taskCode){
+  const out = [];
+  if(!order) return out;
+  const add = (field)=>{ if(order[field+'_file']) out.push({ field, name: order[field+'_filename']||field, type: order[field+'_filetype']||'', data: order[field+'_file'] }); };
+  if(taskCode==='post_return_label' || taskCode==='bbm_book_label' || taskCode==='generate_return_label') add('return_label_pdf');
+  return out;
+}
 function markTaskSent(taskId, to, channel){
   const s = taskStatusStore();
   s[taskId] = Object.assign({}, s[taskId], { sent_at: Date.now(), sent_to: to||'', channel: channel||'telegram' });
@@ -1989,6 +1999,7 @@ function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType
             <div class="file-meta-line">${escapeHtml(fileType || '')}</div>
             <div style="display:flex;gap:6px;margin-top:6px">
               <button type="button" class="tiny" onclick="viewAttachedFile('${escAttr(fieldKey)}', 'form'); event.preventDefault();">View</button>
+              <button type="button" class="tiny" onclick="downloadAttachedFile('${escAttr(fieldKey)}', 'form'); event.preventDefault();">Download</button>
               <button type="button" class="tiny danger" onclick="removeAttachedFile('${escAttr(fieldKey)}', 'form'); event.preventDefault();">Remove</button>
             </div>
           </div>
@@ -2152,6 +2163,65 @@ function viewAttachedFile(fieldKey, ctx) {
   }
 }
 
+// True if an actual uploaded file exists for this field (not just a typed filename).
+function hasOrderFile(order, fieldKey){
+  return !!(order && order[fieldKey + '_file']);
+}
+// Context wrapper: resolve the order from whichever of the form/modal is open, then download.
+function downloadAttachedFile(fieldKey, ctx){
+  let order = null;
+  if(typeof formOrderId !== 'undefined' && formOrderId) order = DATA.orders.find(o => o.order_id === formOrderId);
+  if(!order && typeof editingOrderId !== 'undefined' && editingOrderId) order = DATA.orders.find(o => o.order_id === editingOrderId);
+  // a not-yet-saved upload may live only in the buffer
+  if((!order || !order[fieldKey+'_file']) && window._fileBuffer && window._fileBuffer[fieldKey]){
+    const buf = window._fileBuffer[fieldKey];
+    try{
+      const a=document.createElement('a'); a.href=buf.data; a.download=buf.name||(fieldKey+'.pdf');
+      document.body.appendChild(a); a.click(); a.remove(); showToast('Downloading '+(buf.name||'file'),'success');
+    }catch(e){ showToast('Download failed: '+e.message,'error'); }
+    return;
+  }
+  if(!order){ showToast('Order not found','error'); return; }
+  downloadOrderFile(order.order_id, fieldKey);
+}
+// Download an uploaded file (stored as a base64 data URL) by order id — works from
+// the order modal OR the task queue. Converts to a Blob so the browser downloads it
+// reliably (so you can then attach the PDF to an email / Telegram yourself).
+function downloadOrderFile(orderId, fieldKey){
+  const order = DATA.orders.find(o => o.order_id === orderId);
+  if(!order){ showToast('Order not found', 'error'); return; }
+  const data = order[fieldKey + '_file'];
+  if(!data){ showToast('No file uploaded for this yet', 'error'); return; }
+  const name = order[fieldKey + '_filename'] || (fieldKey + '.pdf');
+  try{
+    let href = data;
+    // data URL → Blob URL for a clean download
+    if(typeof data === 'string' && data.indexOf('data:') === 0){
+      const comma = data.indexOf(',');
+      const meta = data.slice(5, comma);            // e.g. application/pdf;base64
+      const isB64 = /;base64/i.test(meta);
+      const mime = meta.split(';')[0] || (order[fieldKey + '_filetype'] || 'application/octet-stream');
+      const body = data.slice(comma + 1);
+      let blob;
+      if(isB64){
+        const bin = atob(body);
+        const arr = new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
+        blob = new Blob([arr], { type: mime });
+      } else {
+        blob = new Blob([decodeURIComponent(body)], { type: mime });
+      }
+      href = URL.createObjectURL(blob);
+    }
+    const a = document.createElement('a');
+    a.href = href; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    if(href !== data) setTimeout(()=>URL.revokeObjectURL(href), 4000);
+    showToast('Downloading ' + name, 'success');
+  }catch(e){
+    showToast('Download failed: ' + e.message, 'error');
+  }
+}
 function removeAttachedFile(fieldKey, ctx) {
   if (!confirm('Remove this attachment?')) return;
   let order;
@@ -2520,6 +2590,7 @@ function renderPriorityQueue() {
               <div class="send-row" onclick="event.stopPropagation()" style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                   <button class="small" onclick="copyTaskMessage('${escAttr(t.task.task_id)}','${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();">📋 Copy message</button>
+                  ${hasOrderFile(t.order,'return_label_pdf') ? `<button class="small" onclick="downloadOrderFile('${escAttr(t.order.order_id)}','return_label_pdf'); event.stopPropagation();" title="Download the uploaded return-label PDF to attach to an email">📄 Download label</button>` : ''}
                   <button class="primary small" onclick="markSentFromQueue('${rowKey}','${escAttr(t.task.task_id)}', ${t.task.type.owner_only}, '${escAttr(t.order.person || '')}'); event.stopPropagation();">✓ Mark as sent</button>
                 </div>
                 ${(function(){ const st=getTaskStatus(t.task.task_id); if(st&&st.completed_at) return '<div style="font-size:11px;color:var(--green)">✓ completed '+fmtDays((Date.now()-st.completed_at)/86400000)+' ago · <span style="cursor:pointer;text-decoration:underline" onclick=\'reverseTaskCompletion("'+escAttr(t.task.task_id)+'");renderAll()\'>reverse</span></div>'; if(st&&st.sent_at){ const d=daysOutstanding(t.task.task_id); return '<div style="font-size:11px;color:'+(d>=2?'var(--amber)':'var(--ink-faded)')+'">sent to '+escapeHtml(st.sent_to||'?')+' · '+fmtDays(d)+' outstanding <span style="cursor:pointer;text-decoration:underline" onclick=\'trackerAddEvidenceAndComplete("'+escAttr(t.task.task_id)+'")\'>add evidence &amp; mark done</span></div>'; } return ''; })()}
