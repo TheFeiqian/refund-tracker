@@ -852,6 +852,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
     <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
     <button class="tab-btn" data-tab="priority">Priority Queue <span class="count" id="priorityCount">0</span></button>
     <button class="tab-btn" data-tab="missing">Missing Info <span class="count" id="missingCount">0</span></button>
+    <button class="tab-btn" data-tab="inprogress">In Progress <span class="count" id="inProgressCount">0</span></button>
     <button class="tab-btn" data-tab="orders">Orders Database <span class="count" id="ordersCount">0</span></button>
     <button class="tab-btn" data-tab="method">Method Choice</button>
     <button class="tab-btn" data-tab="delivery">Delivery <span class="count" id="deliveryCount">0</span></button>
@@ -1004,6 +1005,21 @@ document.addEventListener('DOMContentLoaded', bootHosted);
           </tr>
         </thead>
         <tbody id="missingTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="tab-section" data-tab="inprogress">
+    <div class="section-intro">
+      <h2>In Progress</h2>
+      <p>Tasks delegated via a sent form. Each shows who it went to, what evidence completes it, and how long it has been outstanding since you sent it. When the person uploads via their link, the task auto-completes, the order advances, and it clears from here.</p>
+    </div>
+    <div style="overflow:auto">
+      <table class="data-table">
+        <thead><tr>
+          <th>Order</th><th>Task</th><th>Sent to</th><th>Awaiting (evidence)</th><th>Time outstanding</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody id="inProgressBody"></tbody>
       </table>
     </div>
   </section>
@@ -1342,13 +1358,13 @@ const FIELD_ACCESS = {
   // email holder
   store_order_number:'email_holder', order_confirmation:'email_holder', order_date:'email_holder',
   delivery_date_text:'email_holder', delivery_photo:'email_holder', delivery_photo_shows_person:'email_holder',
-  item_damaged:'email_holder', damage_photo:'email_holder', inbound_tracking:'email_holder', inbound_courier:'email_holder',
-  price:'email_holder', item_quantity:'email_holder', total_weight_kg:'email_holder', total_volume_l:'email_holder',
+  damage_photo:'email_holder', inbound_tracking:'email_holder', inbound_courier:'email_holder',
+  price:'email_holder', item_quantity:'email_holder', total_weight_kg:'email_holder', total_volume_l:'email_holder', items:'email_holder',
   // card owner
   card_used:'card_owner', chargeback_bank:'card_owner', chargeback_amount:'card_owner', chargeback_date:'card_owner',
   chargeback_reference:'card_owner', chargeback_type:'card_owner', refund_received_amount:'card_owner', refund_received_date:'card_owner',
   // admin
-  method:'admin', bbm_route:'admin', bought_by_mistake:'admin', return_label_pdf:'admin', return_label_date:'admin',
+  method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
   collection_date:'admin', collection_handover:'admin', investigation_deadline:'admin', refund_narrative:'admin',
   refund_refused_date:'admin', invoice:'admin',
@@ -1372,27 +1388,29 @@ const FIELD_MODEL = {
   order_confirmation:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
   price:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
   order_date:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
-  item_quantity:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
-  total_weight_kg:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
-  total_volume_l:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  item_quantity:{avail:1, methods:'ALL', inForm:true, aiDerived:true, task:'place_order'},   // captured via the items list
+  total_weight_kg:{avail:1, methods:'ALL', inForm:true, aiDerived:true, task:'place_order'}, // AI-estimated from items
+  total_volume_l:{avail:1, methods:'ALL', inForm:true, aiDerived:true, task:'place_order'},  // AI-estimated from items
+  items:{avail:1, methods:'ALL', inForm:true, task:'place_order'},                            // per-item list (name+qty) → drives AI weight/volume
   inbound_tracking:{avail:2, methods:'ALL', inForm:true, task:'upload_tracking'},
   inbound_courier:{avail:2, methods:'ALL', inForm:true, task:'upload_tracking'},
   // stage 3 — delivery/assessment (captured at the delivery/upload step; decide the method)
   delivery_date_text:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
   delivery_photo:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
   delivery_photo_shows_person:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
-  item_damaged:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},   // assessed for all; drives LIT-pic
-  damage_photo:{avail:3, methods:['LITPIC'], inForm:true, task:'damage_photo_check'},
+  item_damaged:{avail:3, methods:'ALL', inForm:true, task:'choose_method'},   // admin decides (drives method)
+  damage_photo:{avail:3, methods:['LITPIC'], inForm:true, task:'damage_photo_check'},  // email holder takes the photo
   bought_by_mistake:{avail:3, methods:'ALL', inForm:true, task:'choose_method'}, // assessed for all; drives BBM
   method:{avail:3, methods:'ALL', inForm:true, task:'choose_method'},
   // stage 4 — return (LIT family posts; BBM gets the label/date at contact_retailer)
+  // NOTE: fields marked aiDerived are EXTRACTED by AI from the uploaded file → never on forms.
   return_label_pdf:{avail:4, methods:M_POST, inForm:true, taskByMethod:{LIT:'generate_return_label', LITPIC:'generate_return_label', BBML:'contact_retailer_investigation'}},
-  return_label_date:{avail:4, methods:M_POST, inForm:true, task:'generate_return_label'},
-  outbound_tracking:{avail:4, methods:['LIT','LITPIC'], inForm:true, task:'generate_return_label'},
-  outbound_courier:{avail:4, methods:['LIT','LITPIC'], inForm:true, task:'generate_return_label'},
+  return_label_date:{avail:4, methods:M_POST, inForm:true, aiDerived:true, task:'generate_return_label'},
+  outbound_tracking:{avail:4, methods:['LIT','LITPIC'], inForm:true, aiDerived:true, task:'generate_return_label'},
+  outbound_courier:{avail:4, methods:['LIT','LITPIC'], inForm:true, aiDerived:true, task:'generate_return_label'},
   proof_of_postage:{avail:4, methods:M_POST, inForm:true, task:'post_return_label'},
-  postage_date:{avail:4, methods:M_POST, inForm:true, task:'post_return_label'},
-  posted_from:{avail:4, methods:M_POST, inForm:true, task:'post_return_label'},
+  postage_date:{avail:4, methods:M_POST, inForm:true, aiDerived:true, task:'post_return_label'},
+  posted_from:{avail:4, methods:M_POST, inForm:true, aiDerived:true, task:'post_return_label'},
   collection_date:{avail:4, methods:['BBMC'], inForm:true, task:'contact_retailer_investigation'},
   collection_handover:{avail:4, methods:['BBMC'], inForm:true, task:'hand_over_collection'},
   // stage 5-6 — investigation / refused (escalating methods only; BBM ends after contact)
@@ -1433,6 +1451,13 @@ const METHOD_CHAINS = {
   BBMC:  ['place_order','upload_tracking','choose_method','contact_retailer_investigation','hand_over_collection'],
 };
 const CONTINGENT_TASKS = ['submit_chargeback','submit_small_claims_court'];
+// UK banks (high-street + app-based + main card issuers) for the structured card_used input.
+const UK_BANKS = ['Atom Bank','American Express','Bank of Scotland','Barclays','Capital One','Chase','Chip','Co-operative Bank','Coutts','Danske Bank','First Direct','Halifax','HSBC','Kroo','Lloyds','MBNA','Metro Bank','Monzo','Nationwide','NatWest','NewDay','RBS','Revolut','Santander','Starling Bank','Tide','TSB','Ulster Bank','Vanquis','Virgin Money','Yorkshire Bank','Zopa','Other'];
+// card_used is stored as "Bank — Type" (e.g. "Monzo — Debit"). These compose/parse it.
+function composeCardUsed(bank, type){ bank=(bank||'').trim(); type=(type||'').trim(); if(!bank) return ''; return type ? (bank+' — '+type) : bank; }
+function parseCardUsed(v){ v=(v||'').trim(); if(!v) return {bank:'',type:''}; const m=v.split('—'); return {bank:(m[0]||'').trim(), type:(m[1]||'').trim()}; }
+// chargeback_bank is the card's bank — always derived from card_used, never asked.
+function deriveChargebackBank(order){ const {bank}=parseCardUsed(order.card_used); if(bank && bank!=='Other') order.chargeback_bank = bank; return order.chargeback_bank||''; }
 // Which stage each task executes at — used for the 1b rule (priority = current stage or next step).
 const TASK_STAGE = {
   place_order:1, upload_tracking:2, choose_method:3, damage_photo_check:3,
@@ -1483,8 +1508,9 @@ function classifyFields(order, candidateKeys){
     const def = FIELD_MODEL[k];
     if(!def){ out.excluded.push(k); return; }
     if(typeof fieldFilled === 'function' && fieldFilled(order, k)) return;  // already have it
-    // EXCLUDED: outcome-only, future-unavailable, or off-method
+    // EXCLUDED: outcome-only, AI-derived (extracted from an upload), future-unavailable, or off-method
     if(!def.inForm){ out.excluded.push(k); return; }
+    if(def.aiDerived){ out.excluded.push(k); return; }   // populated by AI parse of the upload — never on forms
     if(def.avail > curStage){ out.excluded.push(k); return; }
     if(mk && !fieldAppliesToMethod(k, mk)){ out.excluded.push(k); return; }
     // If no method chosen yet: only choose_method-task fields are priority; rest optional.
@@ -1516,13 +1542,17 @@ function buildFormLink(order, group, taskCode, taskLabel, mandSet){
     // required is driven by the caller's mandatory set (current-stage-essential),
     // not the static FIELD_DEFS.required — so optional backfill fields stay optional.
     const req = mandSet ? !!mandSet[k] : !!def.required;
+    let kind = isFile ? 'file' : (def.type === 'select' ? 'select' : (def.type === 'textarea' ? 'textarea' : (def.type === 'number' ? 'number' : 'text')));
+    let options = def.options || undefined;
+    if(k === 'card_used'){ kind = 'card'; options = UK_BANKS; }
+    if(k === 'items'){ kind = 'items'; }
     return {
       key: k,
       label: def.label || k,
       help: def.help || '',
       required: req,
-      kind: isFile ? 'file' : (def.type === 'select' ? 'select' : (def.type === 'textarea' ? 'textarea' : (def.type === 'number' ? 'number' : 'text'))),
-      options: def.options || undefined,
+      kind: kind,
+      options: options,
       accept: isFile ? 'image/*,application/pdf' : undefined,
     };
   });
@@ -1555,14 +1585,25 @@ async function syncSubmissions(){
   for(const sub of rows){
     const o = DATA.orders.find(x=>x.order_id === sub.order_id);
     if(!o){ continue; }
+    const touched = [];
     // text answers
-    if(sub.answers){ Object.keys(sub.answers).forEach(k=>{ if(sub.answers[k]!=='' && sub.answers[k]!=null) o[k] = sub.answers[k]; }); }
+    if(sub.answers){ Object.keys(sub.answers).forEach(k=>{ if(sub.answers[k]!=='' && sub.answers[k]!=null){ o[k] = sub.answers[k]; touched.push(k); } }); }
     // files → set the durable _path + metadata so the loader shows them
-    if(sub.files){ Object.keys(sub.files).forEach(k=>{ const f=sub.files[k]; if(f && f.path){ o[k+'_path']=f.path; o[k+'_filename']=f.filename||''; o[k+'_filetype']=f.filetype||''; if(!o[k]) o[k]=f.filename||k; } }); }
+    if(sub.files){ Object.keys(sub.files).forEach(k=>{ const f=sub.files[k]; if(f && f.path){ o[k+'_path']=f.path; o[k+'_filename']=f.filename||''; o[k+'_filetype']=f.filetype||''; if(!o[k]) o[k]=f.filename||k; touched.push(k); } }); }
+    // derive chargeback_bank from card_used (never asked directly)
+    if(o.card_used) deriveChargebackBank(o);
+    // advance the order: flip the trigger each provided field maps to (same as in-app completion)
+    o.triggers = o.triggers || {};
+    touched.forEach(f=>{ const tk = (typeof evidenceTriggerFor==='function') ? evidenceTriggerFor(f, o.method||'') : null; if(tk) o.triggers[tk]=true; });
+    // a posting task completes on the proof-of-postage UPLOAD even before AI parses the date/tracking
+    if((sub.files && sub.files.proof_of_postage) || o.proof_of_postage_path){ o.triggers.lit_rts_sent = true; }
+    if(o.delivery_date_text && typeof deliveryDatePassed==='function' && deliveryDatePassed(o)) o.triggers.item_delivered = true;
+    // record completion time for the In-Progress tracker (task this submission was for)
+    if(sub.task){ markSubmissionComplete(sub.order_id, sub.task); }
     applied++;
     try { await sb.from('submissions').update({ processed:true }).eq('id', sub.id); } catch(e){}
   }
-  if(applied){ saveData(); renderAll(); showToast(applied+' external submission'+(applied>1?'s':'')+' received', 'success'); }
+  if(applied){ if(typeof stampRequiredFields==='function') DATA.orders.forEach(o=>stampRequiredFields(o)); saveData(); renderAll(); showToast(applied+' external submission'+(applied>1?'s':'')+' received — order updated', 'success'); }
   return applied;
 }
 
@@ -2138,17 +2179,78 @@ function reverseTaskCompletion(taskId){
 function clearTaskSent(taskId){
   const s = taskStatusStore(); if(s[taskId]){ delete s[taskId].sent_at; delete s[taskId].sent_to; saveData(); }
 }
+// ============================================================
+// IN-PROGRESS / FORMS-SENT TRACKING (keyed by order_id::taskCode)
+// Records when a completion form / task is delegated (sent_at) and when the
+// submission completes it (completed_at), so we can measure time-to-complete.
+// ============================================================
+function formTrackStore(){ if(!DATA._formTrack) DATA._formTrack={}; return DATA._formTrack; }
+function formTrackKey(orderId, taskCode){ return orderId + '::' + (taskCode||''); }
+function markFormSent(orderId, taskCode, person, evidenceList){
+  const s = formTrackStore();
+  const k = formTrackKey(orderId, taskCode);
+  s[k] = Object.assign({}, s[k], { order_id:orderId, task:taskCode||'', person:person||'', evidence:(evidenceList||[]), sent_at: Date.now(), completed_at: null });
+  saveData();
+}
+function markSubmissionComplete(orderId, taskCode){
+  const s = formTrackStore();
+  const k = formTrackKey(orderId, taskCode);
+  if(s[k] && !s[k].completed_at){ s[k].completed_at = Date.now(); }
+  else if(!s[k]){ s[k] = { order_id:orderId, task:taskCode||'', person:'', sent_at: Date.now(), completed_at: Date.now() }; }
+}
+function formTrackElapsed(rec){
+  if(!rec || !rec.sent_at) return 0;
+  const end = rec.completed_at || Date.now();
+  return Math.max(0, end - rec.sent_at);
+}
+function fmtDuration(ms){
+  const m = Math.floor(ms/60000), h=Math.floor(m/60), d=Math.floor(h/24);
+  if(d>0) return d+'d '+(h%24)+'h';
+  if(h>0) return h+'h '+(m%60)+'m';
+  return m+'m';
+}
 function daysOutstanding(taskId){
   const st = getTaskStatus(taskId); if(!st || !st.sent_at) return null;
   const end = st.completed_at || Date.now();
   return Math.max(0, (end - st.sent_at)/86400000);
 }
+// Resolve 7-day signed URLs for every uploaded file on the order (for inclusion in the
+// outgoing message). Returns { field: {url, name} }. Gracefully skips files not yet uploaded.
+async function resolveFileLinks(order){
+  const out = {};
+  if(typeof sb === 'undefined' || !sb) return out;
+  for(const f of FILE_FIELDS){
+    const path = order[f+'_path'];
+    if(path){
+      try{
+        const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, 604800); // 7 days
+        if(signed) out[f] = { url: signed.signedUrl, name: order[f+'_filename'] || (f+'.file') };
+      }catch(e){}
+    }
+  }
+  return out;
+}
 // Build the copy-paste Telegram message for a task.
-function buildTaskMessage(task, order){
+// fileLinks (optional) = { field: {url, name} } to embed inline next to file references.
+// completionLink (optional) = a form link the person uses to mark the task complete.
+function buildTaskMessage(task, order, fileLinks, completionLink){
   const who = (order.person||'').trim();
   const p = personByName(who);
   const handle = p ? tgDisplay(p) : '';
-  const instr = generateInstruction(task, order);
+  let instr = generateInstruction(task, order);
+  // Embed signed URLs next to any file reference in the instruction (e.g. proof of postage).
+  if(fileLinks){
+    Object.keys(fileLinks).forEach(f=>{
+      const link = fileLinks[f];
+      if(!link) return;
+      // append the URL after the filename wherever it appears; else add a line
+      if(link.name && instr.indexOf(link.name) >= 0){
+        instr = instr.split(link.name).join(link.name + ' ' + link.url);
+      } else {
+        instr += '\n  - ' + (FIELD_DEFS[f] ? FIELD_DEFS[f].label : f) + ': ' + link.name + ' ' + link.url;
+      }
+    });
+  }
   const lines = [];
   lines.push((handle?handle+' ':'')+'— task for order #'+(order.order_id||'')+' ('+(order.store||'')+')');
   if(order.items) lines.push('Item: '+order.items);
@@ -2157,7 +2259,12 @@ function buildTaskMessage(task, order){
   lines.push('');
   lines.push(instr);
   lines.push('');
-  lines.push('Once done, reply here or update the tracker.');
+  if(completionLink){
+    lines.push('Below is the link to a form you need to complete to mark the task as complete:');
+    lines.push(completionLink);
+  } else {
+    lines.push('Once done, reply here or update the tracker.');
+  }
   return lines.join('\n');
 }
 // Build the info-request message for a Method-Choice missing-info field.
@@ -2732,6 +2839,44 @@ function renderDashboard() {
 // ============================================================
 // PRIORITY QUEUE WITH EXPANDABLE INSTRUCTIONS
 // ============================================================
+// In Progress tab: every delegated (form-sent) task with its outstanding timer.
+function renderInProgress(){
+  const body = document.getElementById('inProgressBody'); if(!body) return;
+  const ft = (typeof formTrackStore==='function') ? formTrackStore() : {};
+  const recs = Object.keys(ft).map(k=>ft[k]).filter(r=>r && r.sent_at);
+  // sort: open (not completed) first, longest outstanding at top
+  recs.sort((a,b)=>{
+    const ao=a.completed_at?1:0, bo=b.completed_at?1:0;
+    if(ao!==bo) return ao-bo;
+    return formTrackElapsed(b)-formTrackElapsed(a);
+  });
+  const openCount = recs.filter(r=>!r.completed_at).length;
+  const cEl = document.getElementById('inProgressCount'); if(cEl) cEl.textContent = openCount;
+  if(!recs.length){ body.innerHTML = '<tr><td colspan="7" class="empty-state">Nothing in progress — sent completion forms will appear here with a timer.</td></tr>'; return; }
+  body.innerHTML = recs.map(r=>{
+    const o = DATA.orders.find(x=>x.order_id===r.order_id);
+    const task = TASK_CATALOG.find(t=>t.code===r.task);
+    const ev = (r.evidence||[]).join(', ') || '—';
+    const elapsed = fmtDuration(formTrackElapsed(r));
+    const done = !!r.completed_at;
+    const statusBadge = done
+      ? '<span class="badge-mini" style="background:#ebfbee;color:var(--green)">✓ completed in '+elapsed+'</span>'
+      : '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">outstanding</span>';
+    return '<tr'+(done?' style="opacity:.6"':'')+'>'
+      + '<td><div class="ostore">'+escapeHtml(o?o.store:'?')+'</div><div class="oid">'+escapeHtml(r.order_id)+'</div></td>'
+      + '<td>'+escapeHtml(task?task.name:r.task)+'</td>'
+      + '<td>'+escapeHtml(r.person||'—')+'</td>'
+      + '<td style="font-size:12px">'+escapeHtml(ev)+'</td>'
+      + '<td style="font-family:var(--mono);font-weight:600">'+ (done?'—':elapsed) +'</td>'
+      + '<td>'+statusBadge+'</td>'
+      + '<td>'+ (done ? '' : '<button class="small" onclick="cancelInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\')">Cancel</button>') +'</td>'
+      + '</tr>';
+  }).join('');
+}
+function cancelInProgress(orderId, taskCode){
+  const s = formTrackStore(); const k = formTrackKey(orderId, taskCode);
+  if(s[k]){ delete s[k]; saveData(); renderAll(); showToast('Removed from In Progress — task returns to the queue.', 'success'); }
+}
 function renderPriorityQueue() {
   const taskFilter = (document.getElementById('priorityTaskFilter')||{}).value || 'all';
   const personFilter = document.getElementById('priorityPersonFilter').value;
@@ -2754,6 +2899,9 @@ function renderPriorityQueue() {
   }
   
   let tasks = getAllTasksWithPriority();
+  // Tasks whose completion form has been sent (and not yet completed) move to the In Progress tab.
+  const ft = (typeof formTrackStore==='function') ? formTrackStore() : {};
+  tasks = tasks.filter(t => { const k = t.order.order_id + '::' + t.task.type.code; const rec = ft[k]; return !(rec && rec.sent_at && !rec.completed_at); });
   if (taskFilter !== 'all') tasks = tasks.filter(t => t.task.type.code === taskFilter);
   if (personFilter !== 'all') tasks = tasks.filter(t => t.order.person === personFilter);
   if (search) tasks = tasks.filter(t =>
@@ -2966,7 +3114,14 @@ let _taskFormState = null;
 // All task-completion fields are required (the task isn't done until they're provided).
 // Returns [{cls, holder, fields, link}] (+ unresolved groups flagged).
 function buildTaskFormLinks(order, taskCode, taskLabel){
-  const fields = (TASK_FORM_FIELDS[taskCode] || []).filter(f => !fieldFilled(order, f));
+  // completion fields for this task, minus already-filled, minus AI-derived (extracted from the upload)
+  const fields = (TASK_FORM_FIELDS[taskCode] || []).filter(f => {
+    if(fieldFilled(order, f)) return false;
+    const def = FIELD_MODEL[f];
+    if(def && def.aiDerived) return false;     // AI extracts these from the upload — not on the form
+    if(def && def.inForm === false) return false;
+    return true;
+  });
   if(!fields.length) return [];
   const groups = splitFieldsByAccess(order, fields);
   const mandSet = {}; fields.forEach(f=>mandSet[f]=true);   // all required
@@ -3007,6 +3162,7 @@ function showTaskFormLinks(orderId, taskCode, taskLabel){
             + '<input type="text" readonly value="'+escAttr(g.link)+'" style="flex:1;min-width:160px;font-size:11px" onclick="this.select()">'
             + '<button class="small" onclick="copyText(\''+escAttr(g.link)+'\')">📋 Copy link</button>'
             + '<button class="small" onclick="copyFormSendMessage(\''+escAttr(orderId)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(g.link)+'\')">📋 Copy message</button>'
+            + '<button class="primary small" onclick="sendCompletionForm(\''+escAttr(orderId)+'\',\''+escAttr(taskCode)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(g.link)+'\')">✓ Sent — track in progress</button>'
             + '</div></div>';
     });
   }
@@ -3292,13 +3448,24 @@ function trackerAddEvidenceAndComplete(taskId){
   if(!ev.trim()){ showToast('Evidence is required to mark done.','error'); return; }
   if(completeTaskWithEvidence(taskId, ev.trim())) { renderAll(); showToast('Marked done with evidence.','success'); }
 }
-// Deploy B: Copy the Telegram message (clipboard only — does NOT mark sent).
-function copyTaskMessage(taskId, orderId, taskCode){
+// Copy the Telegram message (clipboard only — does NOT mark sent).
+// Resolves 7-day signed URLs for the order's files and a completion-form link.
+async function copyTaskMessage(taskId, orderId, taskCode){
   const order = DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
   const tasks = getAllTasksWithPriority();
   const t = tasks.find(x=>x.task.task_id===taskId);
   const task = t ? t.task : {type:{code:taskCode,name:taskCode}};
-  copyToClipboard(buildTaskMessage(task, order), 'Message copied — paste into Telegram');
+  const code = task.type ? task.type.code : taskCode;
+  let fileLinks = {};
+  try { fileLinks = await resolveFileLinks(order); } catch(e){}
+  // build a completion-form link for this task (admin/email/card split → take the first resolved)
+  let completionLink = '';
+  try {
+    const groups = buildTaskFormLinks(order, code, task.type?task.type.name:'');
+    const g = (groups||[]).find(x=>x.link);
+    if(g) completionLink = g.link;
+  } catch(e){}
+  copyToClipboard(buildTaskMessage(task, order, fileLinks, completionLink), 'Message copied — paste into Telegram');
 }
 // Deploy B: Mark sent (records sent_at + recipient — separate from copy).
 function markSentFromQueue(rowKey, taskId, ownerOnly, suggestedPerson){
@@ -3509,6 +3676,26 @@ function copyFormSendMessage(orderId, person, link){
   const handle = p && typeof tgDisplay==='function' ? tgDisplay(p) : '';
   const msg = (handle?handle+' ':'')+'— please fill in this short form for '+(o?o.store:'an')+' order #'+orderId+':\n'+link+'\n\nIt only asks for the few details you can access. Thank you!';
   copyText(msg);
+}
+// Send a completion form: copy a message that says a link is being sent for them to UPLOAD
+// the evidence after the work is done + WHAT evidence completes the task, then start the
+// In-Progress timer and move the task out of the active queue.
+function sendCompletionForm(orderId, taskCode, person, link){
+  const o = DATA.orders.find(x=>x.order_id===orderId);
+  const groups = buildTaskFormLinks(o, taskCode, '');
+  const grp = groups.find(g=>g.holder && g.holder.person===person) || groups[0];
+  const evidence = grp ? grp.fields.map(f=>fieldLabel(f)) : [];
+  const p = (typeof personByName==='function')?personByName(person):null;
+  const handle = p && typeof tgDisplay==='function' ? tgDisplay(p) : '';
+  const task = TASK_CATALOG.find(t=>t.code===taskCode);
+  const taskName = task ? task.name : taskCode;
+  const msg = (handle?handle+' ':'')+'— for '+(o?o.store:'this')+' order #'+orderId+': once you\'ve done “'+taskName+'”, please upload the evidence here to complete it:\n'+link
+            + '\n\nWhat to upload: '+(evidence.join(', ')||'the required details')+'.\nThank you!';
+  copyText(msg);
+  markFormSent(orderId, taskCode, person, evidence);
+  const ov = document.getElementById('taskFormOv'); if(ov) ov.remove();
+  renderAll();
+  showToast('Message copied + form marked sent to '+person+' — now tracking in “In Progress”.', 'success');
 }
 function openMissingInfoForm(orderId) {
   formOrderId = orderId;
@@ -3932,7 +4119,12 @@ function openOrderModal(orderId) {
       <div class="form-field"><label>Item quantity <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">PEB branch</span></label><input type="number" id="f_item_quantity" value="${order.item_quantity || ''}" placeholder="1"></div>
       <div class="form-field"><label>Total weight (kg) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">EB branch</span></label><input type="number" step="0.1" id="f_total_weight_kg" value="${order.total_weight_kg || ''}" placeholder="e.g. 1.5"></div>
       <div class="form-field"><label>Total volume (litres) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">BBM: &gt;60 L = collection</span></label><input type="number" step="1" id="f_total_volume_l" value="${order.total_volume_l || ''}" placeholder="e.g. 40"></div>
-      <div class="form-field"><label>Card used</label><input type="text" id="f_card_used" value="${escAttr(order.card_used)}"></div>
+      <div class="form-field"><label>Card used <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">bank + type — chargeback bank derives from this</span></label>
+        <div style="display:flex;gap:6px">
+          <select id="f_card_bank" style="flex:2">${['<option value="">(bank)</option>'].concat(UK_BANKS.map(b=>'<option '+((parseCardUsed(order.card_used).bank===b)?'selected':'')+'>'+escapeHtml(b)+'</option>')).join('')}</select>
+          <select id="f_card_type" style="flex:1"><option value="">(type)</option><option ${parseCardUsed(order.card_used).type==='Credit'?'selected':''}>Credit</option><option ${parseCardUsed(order.card_used).type==='Debit'?'selected':''}>Debit</option></select>
+        </div>
+      </div>
       <div class="form-field"><label>Person responsible <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">email-holder · auto from email</span></label><input type="text" id="f_person" value="${escAttr(order.person)}"></div>
       <div class="form-field"><label>Email</label><input type="text" id="f_email" value="${escAttr(order.email)}" onblur="ofEmailAutofill()"><div id="f_email_hint" style="font-size:11px;margin-top:3px;color:var(--ink-faded)"></div></div>
       <div class="form-field"><label>Card owner <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">handles place-order + chargeback</span></label><input type="text" id="f_card_owner" value="${escAttr(order.card_owner||'')}" placeholder="defaults to person responsible"></div>
@@ -4232,6 +4424,13 @@ function saveOrderEdit() {
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
   else { order = DATA.orders.find(o => o.order_id === editingOrderId); }
   fields.forEach(f => { const el = document.getElementById('f_' + f); if (el) order[f] = el.value.trim(); });
+  // Structured card: compose "Bank — Type" from the two dropdowns, then derive chargeback_bank.
+  const cardBankEl = document.getElementById('f_card_bank');
+  const cardTypeEl = document.getElementById('f_card_type');
+  if (cardBankEl) {
+    order.card_used = composeCardUsed(cardBankEl.value, cardTypeEl ? cardTypeEl.value : '');
+    deriveChargebackBank(order);
+  }
   order.price = parseFloat(document.getElementById('f_price').value) || 0;
   // Persist multi-item list; derive the summary + quantity; sum weight/volume if present.
   if (Array.isArray(OF_ITEMS)) {
@@ -5613,6 +5812,7 @@ function renderAll() {
   renderDashboard();
   renderPriorityQueue();
   renderMissingInfo();
+  renderInProgress();
   renderOrdersDB();
   renderMethodLogic();
   renderDelivery();
