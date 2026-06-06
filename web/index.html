@@ -1355,6 +1355,159 @@ const FIELD_ACCESS = {
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
 
+// ============================================================
+// FIELD MODEL — three axes per field (from the confirmed field-model):
+//   avail   = earliest stage the info becomes knowable (1..8). Gate: never request AVAIL>currentStage.
+//   methods = which methods this field applies to ('ALL' or a list). Off-method => excluded.
+//   inForm  = false => pure outcome-recording, NEVER auto-requested (still manually addable).
+//   taskByMethod = which task this field belongs to, possibly per-method (for the chain test).
+// Method keys: LIT, LITPIC, RTS, DNA, PEB, EB, BBML (bbm-label), BBMC (bbm-collect).
+// ============================================================
+const M_ALL = ['LIT','LITPIC','RTS','DNA','PEB','EB','BBML','BBMC'];
+const M_POST = ['LIT','LITPIC','BBML'];           // methods that generate+post a label (RTS handled externally)
+const M_ESCALATE = ['LIT','LITPIC','RTS','DNA','PEB','EB']; // reach investigation/chargeback/court (NOT bbm)
+const FIELD_MODEL = {
+  // stage 1-2 — ordering & delivery (all methods)
+  store_order_number:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  order_confirmation:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  price:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  order_date:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  item_quantity:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  total_weight_kg:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  total_volume_l:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  inbound_tracking:{avail:2, methods:'ALL', inForm:true, task:'upload_tracking'},
+  inbound_courier:{avail:2, methods:'ALL', inForm:true, task:'upload_tracking'},
+  // stage 3 — delivery/assessment (captured at the delivery/upload step; decide the method)
+  delivery_date_text:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
+  delivery_photo:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
+  delivery_photo_shows_person:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},
+  item_damaged:{avail:3, methods:'ALL', inForm:true, task:'upload_tracking'},   // assessed for all; drives LIT-pic
+  damage_photo:{avail:3, methods:['LITPIC'], inForm:true, task:'damage_photo_check'},
+  bought_by_mistake:{avail:3, methods:'ALL', inForm:true, task:'choose_method'}, // assessed for all; drives BBM
+  method:{avail:3, methods:'ALL', inForm:true, task:'choose_method'},
+  // stage 4 — return (LIT family posts; BBM gets the label/date at contact_retailer)
+  return_label_pdf:{avail:4, methods:M_POST, inForm:true, taskByMethod:{LIT:'generate_return_label', LITPIC:'generate_return_label', BBML:'contact_retailer_investigation'}},
+  return_label_date:{avail:4, methods:M_POST, inForm:true, task:'generate_return_label'},
+  outbound_tracking:{avail:4, methods:['LIT','LITPIC'], inForm:true, task:'generate_return_label'},
+  outbound_courier:{avail:4, methods:['LIT','LITPIC'], inForm:true, task:'generate_return_label'},
+  proof_of_postage:{avail:4, methods:M_POST, inForm:true, task:'post_return_label'},
+  postage_date:{avail:4, methods:M_POST, inForm:true, task:'post_return_label'},
+  posted_from:{avail:4, methods:M_POST, inForm:true, task:'post_return_label'},
+  collection_date:{avail:4, methods:['BBMC'], inForm:true, task:'contact_retailer_investigation'},
+  collection_handover:{avail:4, methods:['BBMC'], inForm:true, task:'hand_over_collection'},
+  // stage 5-6 — investigation / refused (escalating methods only; BBM ends after contact)
+  investigation_deadline:{avail:5, methods:M_ESCALATE, inForm:true, task:'contact_retailer_investigation'},
+  refund_narrative:{avail:5, methods:M_ESCALATE, inForm:true, task:'contact_retailer_investigation'},
+  refund_refused_date:{avail:6, methods:M_ESCALATE, inForm:true, task:'chase_investigation'},
+  retailer_rebuttal_received:{avail:6, methods:M_ESCALATE, inForm:true, task:'chase_investigation'},
+  // stage 7 — chargeback (escalating only; contingent — not guaranteed)
+  card_used:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  chargeback_bank:{avail:1, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
+  chargeback_amount:{avail:3, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},  // known at method choice (full unless PEB)
+  chargeback_date:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
+  chargeback_type:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
+  chargeback_reference:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
+  invoice:{avail:1, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
+  // outcome-recording — never auto-requested
+  refund_received_date:{avail:8, methods:'ALL', inForm:false, task:null},
+  refund_received_amount:{avail:8, methods:'ALL', inForm:false, task:null},
+  // stage 8 — court (escalating only; contingent)
+  court_claim_ref:{avail:8, methods:M_ESCALATE, inForm:true, task:'submit_small_claims_court'},
+  court_fee_paid:{avail:8, methods:M_ESCALATE, inForm:true, task:'submit_small_claims_court'},
+  defendant_legal_entity:{avail:8, methods:M_ESCALATE, inForm:true, task:'submit_small_claims_court'},
+  hearing_date:{avail:8, methods:M_ESCALATE, inForm:true, task:'submit_small_claims_court'},
+  court_outcome:{avail:8, methods:M_ESCALATE, inForm:true, task:'submit_small_claims_court'},
+  total_recovered:{avail:8, methods:M_ESCALATE, inForm:true, task:'submit_small_claims_court'},
+};
+
+// Guaranteed task chains per method. chargeback + small_claims_court are CONTINGENT
+// (only happen if it escalates) → never auto-priority until the order actually reaches them.
+const METHOD_CHAINS = {
+  LIT:   ['place_order','upload_tracking','choose_method','generate_return_label','post_return_label','contact_retailer_investigation','chase_investigation'],
+  LITPIC:['place_order','upload_tracking','choose_method','damage_photo_check','generate_return_label','post_return_label','contact_retailer_investigation','chase_investigation'],
+  RTS:   ['place_order','upload_tracking','choose_method','contact_retailer_investigation','chase_investigation'],
+  DNA:   ['place_order','upload_tracking','choose_method','contact_retailer_investigation','chase_investigation'],
+  PEB:   ['place_order','upload_tracking','choose_method','contact_retailer_investigation','chase_investigation'],
+  EB:    ['place_order','upload_tracking','choose_method','contact_retailer_investigation','chase_investigation'],
+  BBML:  ['place_order','upload_tracking','choose_method','contact_retailer_investigation','post_return_label'],
+  BBMC:  ['place_order','upload_tracking','choose_method','contact_retailer_investigation','hand_over_collection'],
+};
+const CONTINGENT_TASKS = ['submit_chargeback','submit_small_claims_court'];
+// Which stage each task executes at — used for the 1b rule (priority = current stage or next step).
+const TASK_STAGE = {
+  place_order:1, upload_tracking:2, choose_method:3, damage_photo_check:3,
+  generate_return_label:4, post_return_label:4, bbm_book_label:4, bbm_book_collection:4,
+  get_collection_date:4, hand_over_collection:4,
+  contact_retailer_investigation:5, chase_investigation:5,
+  submit_chargeback:7, submit_small_claims_court:8,
+};
+
+// Resolve an order to a model method key (or '' if not yet chosen).
+function methodKey(order){
+  if(order.bought_by_mistake === 'yes'){
+    const r = (typeof bbmRoute === 'function') ? bbmRoute(order) : (order.bbm_route||'');
+    return r === 'collection' ? 'BBMC' : (r === 'label' ? 'BBML' : 'BBM?');  // route maybe undecided
+  }
+  const m = (order.method||'').toLowerCase();
+  if(m === 'lit with pic') return 'LITPIC';
+  if(m === 'lit') return 'LIT';
+  if(m === 'rts') return 'RTS';
+  if(m === 'dna') return 'DNA';
+  if(m === 'peb') return 'PEB';
+  if(m === 'eb') return 'EB';
+  return '';
+}
+function fieldAppliesToMethod(key, mk){
+  const def = FIELD_MODEL[key]; if(!def) return false;
+  if(def.methods === 'ALL') return true;
+  // BBM route undecided: allow either bbm route's fields through
+  if(mk === 'BBM?') return def.methods.indexOf('BBML')>=0 || def.methods.indexOf('BBMC')>=0;
+  return def.methods.indexOf(mk) >= 0;
+}
+function fieldTaskForMethod(key, mk){
+  const def = FIELD_MODEL[key]; if(!def) return null;
+  if(def.taskByMethod && def.taskByMethod[mk]) return def.taskByMethod[mk];
+  return def.task || null;
+}
+
+// THE CLASSIFIER. For an order, returns {priority:[], optional:[], excluded:[]} of field keys
+// among a given candidate set (defaults to all model fields). Pure stage + method + chain rule.
+function classifyFields(order, candidateKeys){
+  const keys = candidateKeys || Object.keys(FIELD_MODEL);
+  const stage = computeStage(order);
+  const curStage = stage === 'done' ? 8 : stage;
+  const mk = methodKey(order);
+  const chain = mk && METHOD_CHAINS[mk] ? METHOD_CHAINS[mk] : null;
+  const out = { priority:[], optional:[], excluded:[] };
+  keys.forEach(k=>{
+    const def = FIELD_MODEL[k];
+    if(!def){ out.excluded.push(k); return; }
+    if(typeof fieldFilled === 'function' && fieldFilled(order, k)) return;  // already have it
+    // EXCLUDED: outcome-only, future-unavailable, or off-method
+    if(!def.inForm){ out.excluded.push(k); return; }
+    if(def.avail > curStage){ out.excluded.push(k); return; }
+    if(mk && !fieldAppliesToMethod(k, mk)){ out.excluded.push(k); return; }
+    // If no method chosen yet: only choose_method-task fields are priority; rest optional.
+    if(!mk || !chain){
+      const t = fieldTaskForMethod(k, mk);
+      if(t === 'choose_method' || t === 'upload_tracking') out.priority.push(k);
+      else out.optional.push(k);
+      return;
+    }
+    // Method chosen: 1b rule. Guaranteed-chain field is PRIORITY only if its task is at the
+    // current stage OR the next not-yet-done guaranteed step. Past-stage guaranteed fields drop
+    // to OPTIONAL. Contingent tasks (chargeback/court) are never auto-priority.
+    const t = fieldTaskForMethod(k, mk);
+    if(!t || chain.indexOf(t) < 0 || CONTINGENT_TASKS.indexOf(t) >= 0){ out.optional.push(k); return; }
+    const ts = TASK_STAGE[t] || 99;
+    let nextStage = 99;
+    for(const ct of chain){ if(CONTINGENT_TASKS.indexOf(ct)>=0) continue; const s=TASK_STAGE[ct]||99; if(s>=curStage){ nextStage=s; break; } }
+    if(ts === curStage || ts === nextStage) out.priority.push(k);
+    else out.optional.push(k);
+  });
+  return out;
+}
+
 // Build a base64 form definition + a shareable link to upload.html for one access-group.
 function buildFormLink(order, group, taskCode, taskLabel, mandSet){
   const fields = (group.fields||[]).map(k=>{
@@ -2867,6 +3020,47 @@ function showTaskFormLinks(orderId, taskCode, taskLabel){
   ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
   document.body.appendChild(ov);
 }
+// Clean one-click upload form for the ADMIN's fields on an order (text + file), reusing the
+// task-form modal. Opens directly so the admin doesn't have to hunt for the field or a link.
+function openAdminUploadForm(orderId){
+  const order = DATA.orders.find(o => o.order_id === orderId);
+  if(!order) return;
+  const cls = (typeof classifyFields==='function') ? classifyFields(order) : {priority:[],optional:[]};
+  const added = (typeof _addedFormFields!=='undefined' && _addedFormFields[orderId]) ? _addedFormFields[orderId] : [];
+  const cand = cls.priority.concat(cls.optional).concat(added);
+  const seen = {};
+  const fields = cand.filter(f=>{ if(seen[f]) return false; seen[f]=true; return fieldAccessClass(f)==='admin'; });
+  if(!fields.length){ showToast('No admin fields to upload for this order right now', 'info'); return; }
+  const reqSet = {}; cls.priority.forEach(f=>reqSet[f]=true);
+  _taskFormState = { taskCode:null, orderId, fileBuf:{}, fields, adminUpload:true };
+  document.getElementById('taskFormTitle').innerHTML = 'Admin upload — ' + escapeHtml(order.store||order.order_id);
+  document.getElementById('taskFormSub').innerHTML =
+    '<span style="font-family:var(--mono)">' + escapeHtml(order.order_id) + '</span>'
+    + '<span>&middot; ' + escapeHtml(order.store||'') + '</span><span>&middot; admin fields</span>';
+  let h = '<div class="staged-form-explainer">Upload or fill the admin-held fields for this order. Required (*) are what\'s needed now; the rest are optional.</div>';
+  h += '<div class="form-grid" style="margin-top:14px">';
+  const FILEF = ['order_confirmation','delivery_photo','damage_photo','return_label_pdf','proof_of_postage','invoice','collection_handover'];
+  fields.forEach(f => {
+    const def = FIELD_DEFS[f] || { label:f, type:'text' };
+    const isFile = FILEF.includes(f);
+    const reqMark = reqSet[f] ? ' <span style="color:var(--red)">*</span>' : '';
+    h += '<div class="form-field full"><label>' + escapeHtml(def.label) + reqMark + '</label>';
+    if(isFile){
+      h += '<div style="display:flex;gap:8px;align-items:center">'
+         + '<input type="text" id="tf_' + f + '" value="'+escAttr(order[f]||'')+'" placeholder="Describe or paste a link" style="flex:1">'
+         + '<label class="file-attach-btn"><span>📎 Attach</span><input type="file" accept="image/*,application/pdf" onchange="taskFormFileUpload(this, \'' + f + '\')"></label>'
+         + '</div><div id="tf_preview_' + f + '" style="font-size:11px;color:var(--ink-faded);margin-top:4px"></div>';
+    } else if(def.type === 'select'){
+      h += '<select id="tf_' + f + '"><option value="">(choose)</option>' + (def.options||[]).filter(Boolean).map(o=>'<option '+((order[f]===o)?'selected':'')+'>'+escapeHtml(o)+'</option>').join('') + '</select>';
+    } else {
+      h += '<input type="text" id="tf_' + f + '" value="'+escAttr(order[f]||'')+'" placeholder="' + escapeHtml(def.help||'') + '">';
+    }
+    h += '</div>';
+  });
+  h += '</div>';
+  document.getElementById('taskFormBody').innerHTML = h;
+  document.getElementById('taskFormModal').classList.add('show');
+}
 function openTaskForm(taskCode, orderId) {
   const order = DATA.orders.find(o => o.order_id === orderId);
   const task = TASK_CATALOG.find(t => t.code === taskCode);
@@ -2949,9 +3143,9 @@ function submitTaskForm() {
   if (!_taskFormState) return;
   const { taskCode, orderId, fileBuf } = _taskFormState;
   const order = DATA.orders.find(o => o.order_id === orderId);
-  const task = TASK_CATALOG.find(t => t.code === taskCode);
-  if (!order || !task) return;
-  const fields = TASK_FORM_FIELDS[taskCode] || [];
+  if (!order) return;
+  const task = taskCode ? TASK_CATALOG.find(t => t.code === taskCode) : null;
+  const fields = _taskFormState.fields || (taskCode ? (TASK_FORM_FIELDS[taskCode] || []) : []);
   const filled = [];
   fields.forEach(f => {
     const el = document.getElementById('tf_' + f);
@@ -2977,12 +3171,13 @@ function submitTaskForm() {
   if (taskCode === 'submit_chargeback' && !order.chargeback_date) order.chargeback_date = todayISO();
   // a passed delivery date means the item is delivered → stage 3
   if (order.delivery_date_text && deliveryDatePassed(order)) order.triggers.item_delivered = true;
-  logAudit(order, 'task_completed', task.name + ' — form submitted by ' + (order.person || '?') + ' (fields: ' + filled.join(', ') + ')');
+  const what = task ? task.name : 'Admin upload';
+  logAudit(order, task ? 'task_completed' : 'admin_upload', what + ' — form submitted by ' + (order.person || '?') + ' (fields: ' + filled.join(', ') + ')');
   stampRequiredFields(order);
   saveData();
   closeTaskForm();
   renderAll();
-  showToast(task.name + ' completed via form — order updated', 'success');
+  showToast(what + (task ? ' completed via form' : ' saved') + ' — order updated', 'success');
 }
 function todayISO() { const d = new Date(); return d.toISOString().slice(0, 10); }
 
@@ -3129,19 +3324,17 @@ function renderMissingInfo() {
     const stage = computeStage(o);
     if (stage === 'done') return;
     const blockers = [];
-    Object.keys(FIELD_BLOCKING).forEach(field => {
-      if (FIELD_BLOCKING[field] == null) return;     // non-blocking field
-      if (!FIELD_DEFS[field]) return;                // matrix-only (spec-fidelity, no demo input)
-      if (fieldFilled(o, field)) return;             // already filled
-      const ip = infoPriorityFor(o, field, stage);
-      if (ip.bf < 10) return;                        // only CURRENT-stage-essential fields block (pure stage rule)
+    const cls = classifyFields(o);                   // priority = currently-needed (guaranteed-chain) fields
+    cls.priority.forEach(field => {
+      if (!FIELD_DEFS[field]) return;
+      const ip = infoPriorityFor(o, field, stage);    // reuse score/days for ranking
       blockers.push({
         field,
         label: fieldLabel(field),
-        bf: ip.bf,
-        score: ip.score,
-        days: ip.days,
-        essentialAt: FIELD_BLOCKING[field],
+        bf: 10,
+        score: ip.score || ((o.price||0) * (1 + (ip.days||0))),
+        days: ip.days || 0,
+        essentialAt: (FIELD_MODEL[field] && FIELD_MODEL[field].avail) || stage,
       });
     });
     if (blockers.length === 0) return;
@@ -3226,27 +3419,17 @@ function renderBlockingMatrix() {
 // ============================================================
 // Build the "send-out forms, split by who has access" panel for an order.
 function renderAccessForms(order){
-  const stage = computeStage(order);
-  const curStage = stage === 'done' ? 8 : stage;
-  // Pure stage rule:
-  //  mandatory = empty AND essential exactly at the current stage (bf 10)
-  //  optional  = empty AND essential at some OTHER stage (earlier backfill or later) — included but not required
-  const mandatory = [], optional = [];
-  Object.keys(FIELD_BLOCKING).forEach(field=>{
-    if(FIELD_BLOCKING[field]==null) return;          // never-essential / display-only
-    if(!FIELD_DEFS[field]) return;                   // no input defined
-    if(fieldFilled(order, field)) return;            // already have it
-    const ess = FIELD_BLOCKING[field];
-    if(ess === curStage) mandatory.push(field);
-    else optional.push(field);
-  });
-  if(!mandatory.length && !optional.length) return '<div class="staged-form-explainer" style="background:#ebfbee;border-color:#b2f2bb"><strong>No information needed right now.</strong></div>';
-  // group BOTH sets by access, but remember which fields are mandatory
-  const mandSet = {}; mandatory.forEach(f=>mandSet[f]=true);
-  const allFields = mandatory.concat(optional);
+  const cls = classifyFields(order);                 // {priority, optional, excluded}
+  const mk = methodKey(order);
+  const curStage = (computeStage(order)==='done')?8:computeStage(order);
+  if(!cls.priority.length && !cls.optional.length) return '<div class="staged-form-explainer" style="background:#ebfbee;border-color:#b2f2bb"><strong>No information needed right now.</strong></div>';
+  const mandSet = {}; cls.priority.forEach(f=>mandSet[f]=true);
+  const added = _addedFormFields[order.order_id] || [];
+  const allFields = cls.priority.concat(cls.optional).concat(added.filter(f=>cls.priority.indexOf(f)<0 && cls.optional.indexOf(f)<0));
   const groups = splitFieldsByAccess(order, allFields);
+  const methodName = mk || 'not yet chosen';
   let h = '<div class="staged-form-explainer"><strong>Send-out forms — split by who has access</strong>'
-        + '<div style="font-size:11.5px;color:var(--ink-faded);margin-top:3px">Each person only gets the fields they can access. <strong>Required</strong> fields are what\'s blocking this order at Stage '+curStage+'; other empty fields are included as optional backfill (useful for later stages, e.g. chargeback).</div></div>';
+        + '<div style="font-size:11.5px;color:var(--ink-faded);margin-top:3px"><strong>Required</strong> = needed for the guaranteed steps of this order\'s flow (method: '+escapeHtml(methodName)+', stage '+curStage+'). Other empty, on-method, already-available fields are optional backfill. Off-method and not-yet-available fields are hidden — use “Add other fields” for special cases.</div></div>';
   groups.forEach(g=>{
     const reqFields = g.fields.filter(f=>mandSet[f]);
     const optFields = g.fields.filter(f=>!mandSet[f]);
@@ -3257,7 +3440,6 @@ function renderAccessForms(order){
       h += '<div style="border:1px solid var(--amber);background:var(--amber-soft);border-radius:10px;padding:12px;margin:8px 0">'
          + '<div style="font-weight:600;color:var(--amber)">⚠ Unknown '+which+' — can\'t route this form</div>'
          + '<div style="font-size:12px;margin:4px 0">Required: '+escapeHtml(reqLabels)+(optLabels?(' · optional: '+escapeHtml(optLabels)):'')+'</div>'
-         + '<div style="font-size:12px;margin-bottom:6px">Set who has access so the form can be sent:</div>'
          + (g.cls==='card_owner'
              ? '<button class="small" onclick="promptSetCardOwner(\''+escAttr(order.order_id)+'\')">Set card owner…</button>'
              : '<button class="small" onclick="openOrderModal(\''+escAttr(order.order_id)+'\')">Set order email / person…</button>')
@@ -3274,8 +3456,9 @@ function renderAccessForms(order){
        + '<div style="font-size:12px;margin:6px 0"><strong>Required:</strong> '+escapeHtml(reqLabels)+'</div>'
        + (optLabels ? '<div style="font-size:12px;color:var(--ink-faded);margin-bottom:4px">Optional backfill: '+escapeHtml(optLabels)+'</div>' : '');
     if(isAdmin){
-      h += '<div style="font-size:12px;color:var(--ink-faded)">These stay in the app — fill them directly in the form below. (A copy of the link is available for quick entry too.)</div>'
+      h += '<div style="font-size:12px;color:var(--ink-faded)">Filled in the app. Click below for a clean upload form for these fields — no link needed.</div>'
          + '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'
+         + '<button class="primary small" onclick="openAdminUploadForm(\''+escAttr(order.order_id)+'\')">📤 Open upload form</button>'
          + '<button class="small" onclick="copyText(\''+escAttr(link)+'\')">📋 Copy quick-entry link</button></div>';
     } else {
       h += '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">'
@@ -3286,7 +3469,29 @@ function renderAccessForms(order){
     }
     h += '</div>';
   });
+  // Manual "+ Add other fields" — special-order escape hatch (off-method / future / outcome fields).
+  const already = {}; allFields.forEach(f=>already[f]=true);
+  const addable = Object.keys(FIELD_MODEL).filter(f=>!already[f] && !(typeof fieldFilled==='function' && fieldFilled(order,f)));
+  h += '<div style="margin-top:10px"><button class="small" onclick="document.getElementById(\'afx_'+escAttr(order.order_id)+'\').style.display=(document.getElementById(\'afx_'+escAttr(order.order_id)+'\').style.display===\'none\'?\'block\':\'none\')">+ Add other fields (special order)</button>'
+     + '<div id="afx_'+escAttr(order.order_id)+'" style="display:none;border:1px dashed var(--line);border-radius:9px;padding:10px;margin-top:6px">'
+     + '<div style="font-size:11.5px;color:var(--ink-faded);margin-bottom:6px">Tick any other missing field to add it to that person\'s form as optional. Bypasses the method/availability filter for edge cases.</div>'
+     + addable.map(f=>{
+         const acc = fieldAccessClass(f);
+         return '<label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;margin:2px 8px 2px 0"><input type="checkbox" data-afx-order="'+escAttr(order.order_id)+'" data-afx-field="'+escAttr(f)+'"> '+escapeHtml(fieldLabel(f))+' <span style="color:var(--ink-faded)">('+acc+')</span></label>';
+       }).join('')
+     + '<div style="margin-top:8px"><button class="small" onclick="applyAddedFields(\''+escAttr(order.order_id)+'\')">Add ticked fields to forms</button></div>'
+     + '</div></div>';
   return h;
+}
+// Re-render the access forms for an order with manually-added fields merged in.
+let _addedFormFields = {};   // order_id -> [field,...]
+function applyAddedFields(orderId){
+  const boxes = document.querySelectorAll('input[data-afx-order="'+orderId+'"]:checked');
+  const adds = Array.prototype.map.call(boxes, b=>b.getAttribute('data-afx-field'));
+  if(!adds.length){ showToast('No fields ticked', 'info'); return; }
+  _addedFormFields[orderId] = (_addedFormFields[orderId]||[]).concat(adds);
+  if(typeof formOrderId!=='undefined' && formOrderId===orderId) openMissingInfoForm(orderId);
+  showToast('Added '+adds.length+' field'+(adds.length>1?'s':'')+' to the form(s)', 'success');
 }
 function promptSetCardOwner(orderId){
   const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
