@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Submit information — Telos House</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="app-config.js"></script>
+<style>
+  :root{ --ink:#1a2238; --ink-faded:#7a8199; --line:#e3e7f0; --bg:#f6f8fc; --card:#fff; --accent:#3b5bdb; --accent-soft:#eef2ff; --green:#2f9e44; --red:#e03131; --amber:#f08c00; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--ink); padding:18px; }
+  .wrap{ max-width:560px; margin:0 auto; }
+  .card{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px; }
+  h1{ font-size:19px; margin:0 0 4px; }
+  .sub{ font-size:13px; color:var(--ink-faded); margin:0 0 18px; }
+  .field{ margin-bottom:16px; }
+  label{ display:block; font-size:13px; font-weight:600; margin-bottom:5px; }
+  .help{ font-size:11.5px; color:var(--ink-faded); margin-top:3px; }
+  input[type=text], input[type=number], textarea, select{ width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:9px; font-size:14px; font-family:inherit; }
+  textarea{ min-height:70px; resize:vertical; }
+  input[type=file]{ font-size:13px; }
+  .filebtn{ display:inline-flex; align-items:center; gap:6px; padding:9px 12px; border:1px dashed var(--line); border-radius:9px; cursor:pointer; font-size:13px; background:var(--accent-soft); color:var(--accent); }
+  .filebtn input{ display:none; }
+  .filename{ font-size:12px; color:var(--green); margin-top:6px; }
+  button.submit{ width:100%; padding:12px; border:none; border-radius:10px; background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer; margin-top:8px; }
+  button.submit:disabled{ opacity:.5; cursor:default; }
+  .msg{ padding:12px; border-radius:9px; font-size:13px; margin-top:14px; }
+  .msg.ok{ background:#ebfbee; color:var(--green); }
+  .msg.err{ background:#fff0f0; color:var(--red); }
+  .done{ text-align:center; padding:30px 10px; }
+  .done .tick{ font-size:42px; }
+  .brand{ font-size:11px; color:var(--ink-faded); text-align:center; margin-top:16px; letter-spacing:.4px; text-transform:uppercase; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card" id="card">
+    <div id="loading" class="sub">Loading…</div>
+    <form id="form" style="display:none" onsubmit="return false">
+      <h1 id="title">Submit information</h1>
+      <p class="sub" id="subtitle"></p>
+      <div id="fields"></div>
+      <button class="submit" id="submitBtn" onclick="submitForm()">Submit</button>
+      <div id="msg"></div>
+    </form>
+    <div id="doneView" class="done" style="display:none">
+      <div class="tick">✓</div>
+      <h1>Thank you</h1>
+      <p class="sub">Your information has been submitted. You can close this page.</p>
+    </div>
+  </div>
+  <div class="brand">Telos House · refund tracker</div>
+</div>
+
+<script>
+"use strict";
+let SB = null, DEF = null;
+
+function qs(name){ return new URLSearchParams(location.search).get(name); }
+function decodeDef(s){
+  try { return JSON.parse(decodeURIComponent(escape(atob(s.replace(/-/g,'+').replace(/_/g,'/'))))); }
+  catch(e){ return null; }
+}
+
+function init(){
+  const cfg = window.APP_CONFIG || {};
+  if(!cfg.url || !cfg.anonKey){ showFatal('This form is not configured. (Missing Supabase settings.)'); return; }
+  SB = window.supabase.createClient(cfg.url, cfg.anonKey);
+
+  const d = qs('d');                 // base64 form definition
+  DEF = d ? decodeDef(d) : null;
+  if(!DEF || !DEF.order || !Array.isArray(DEF.fields)){ showFatal('This form link is invalid or incomplete.'); return; }
+
+  document.getElementById('loading').style.display='none';
+  document.getElementById('form').style.display='';
+  document.getElementById('title').textContent = DEF.title || ('Information needed for order ' + DEF.order);
+  document.getElementById('subtitle').textContent = DEF.subtitle || ('Order #' + DEF.order + (DEF.store ? ' · ' + DEF.store : '') + (DEF.person ? ' · for ' + DEF.person : ''));
+  renderFields();
+}
+
+function renderFields(){
+  const box = document.getElementById('fields');
+  box.innerHTML = DEF.fields.map((f,i)=>{
+    const help = f.help ? '<div class="help">'+esc(f.help)+'</div>' : '';
+    let input;
+    if(f.kind === 'file'){
+      input = '<label class="filebtn">📎 <span id="fbtn'+i+'">Choose file</span>'
+            + '<input type="file" accept="'+(f.accept||'image/*,application/pdf')+'" onchange="onFile('+i+', this)"></label>'
+            + '<div class="filename" id="fname'+i+'"></div>';
+    } else if(f.kind === 'select'){
+      input = '<select id="fld'+i+'"><option value="">(select)</option>'
+            + (f.options||[]).filter(Boolean).map(o=>'<option value="'+esc(o)+'">'+esc(o)+'</option>').join('')
+            + '</select>';
+    } else if(f.kind === 'textarea'){
+      input = '<textarea id="fld'+i+'" placeholder="'+esc(f.placeholder||'')+'"></textarea>';
+    } else {
+      input = '<input type="'+(f.kind==='number'?'number':'text')+'" id="fld'+i+'" placeholder="'+esc(f.placeholder||'')+'">';
+    }
+    return '<div class="field"><label>'+esc(f.label||f.key)+(f.required?' *':'')+'</label>'+input+help+'</div>';
+  }).join('');
+}
+
+const FILES = {}; // index -> { dataUrl, name, type }
+function onFile(i, input){
+  const file = input.files[0]; if(!file) return;
+  const r = new FileReader();
+  r.onload = ()=>{ FILES[i] = { dataUrl:r.result, name:file.name, type:file.type };
+    document.getElementById('fname'+i).textContent = '✓ ' + file.name;
+    document.getElementById('fbtn'+i).textContent = 'Replace file';
+  };
+  r.readAsDataURL(file);
+}
+
+async function submitForm(){
+  const btn = document.getElementById('submitBtn');
+  const msg = document.getElementById('msg');
+  msg.className=''; msg.textContent='';
+  // collect
+  const answers = {};      // field key -> text value
+  const fileUploads = [];  // { key, dataUrl, name, type }
+  for(let i=0;i<DEF.fields.length;i++){
+    const f = DEF.fields[i];
+    if(f.kind === 'file'){
+      if(FILES[i]) fileUploads.push(Object.assign({ key:f.key }, FILES[i]));
+      else if(f.required){ return fail('Please attach: ' + (f.label||f.key)); }
+    } else {
+      const el = document.getElementById('fld'+i);
+      const v = el ? el.value.trim() : '';
+      if(f.required && !v){ return fail('Please fill in: ' + (f.label||f.key)); }
+      if(v) answers[f.key] = v;
+    }
+  }
+  btn.disabled = true; btn.textContent = 'Submitting…';
+  try{
+    // 1) upload files to the labels bucket at the same path the app reads: {order}/{field}.{ext}
+    const filePaths = {};
+    for(const u of fileUploads){
+      const [meta, b64] = u.dataUrl.split(',');
+      const type = (meta.match(/data:([^;]+)/)||[])[1] || 'application/octet-stream';
+      const ext = type.includes('pdf') ? 'pdf' : (type.split('/')[1] || 'bin');
+      const path = DEF.order + '/' + u.key + '.' + ext;
+      const bytes = Uint8Array.from(atob(b64), c=>c.charCodeAt(0));
+      const up = await SB.storage.from('labels').upload(path, bytes, { contentType:type, upsert:true });
+      if(up.error) throw up.error;
+      filePaths[u.key] = { path, filename:u.name, filetype:type, size:bytes.length };
+    }
+    // 2) record one submission row (the app reads this and merges into the order)
+    const payload = {
+      order_id: DEF.order,
+      task: DEF.task || '',
+      access_class: DEF.cls || '',
+      submitted_by: DEF.person || '',
+      answers: answers,
+      files: filePaths,
+      token: DEF.token || ''
+    };
+    const ins = await SB.from('submissions').insert(payload);
+    if(ins.error) throw ins.error;
+    // success
+    document.getElementById('form').style.display='none';
+    document.getElementById('doneView').style.display='';
+  }catch(e){
+    fail('Submission failed: ' + (e.message || e) + '. Please try again, or contact whoever sent you this link.');
+    btn.disabled = false; btn.textContent = 'Submit';
+  }
+}
+
+function fail(t){ const m=document.getElementById('msg'); m.className='msg err'; m.textContent=t; return false; }
+function showFatal(t){ document.getElementById('loading').style.display='none'; const c=document.getElementById('card'); c.innerHTML='<h1>Unable to load</h1><p class="sub">'+esc(t)+'</p>'; }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+init();
+</script>
+</body>
+</html>

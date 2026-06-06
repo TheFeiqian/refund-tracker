@@ -689,6 +689,9 @@ async function __afterLogin() {
   await hostedFetchAll();
   loadData();
   renderAll();
+  // Pull any external form submissions into the matching orders, then poll for new ones.
+  try { await syncSubmissions(); } catch(e){}
+  if (!window.__subPoll) window.__subPoll = setInterval(()=>{ syncSubmissions().catch(()=>{}); }, 60000);
   window.__roleLocked = (role !== 'admin');   // members can't switch to admin
   applyRole(role);
 }
@@ -1326,6 +1329,126 @@ const FIELD_DEFS = {
 };
 
 const STAGE_NAMES = { 1: 'Pre-Order', 2: 'Awaiting Delivery', 3: 'Delivered', 4: 'Return Sent', 5: 'Investigation', 6: 'Refund Refused', 7: 'Chargeback', 8: 'Court Claim', 'done': 'Done' };
+
+// ============================================================
+// FIELD ACCESS-CLASS MAP — who has access to provide each field.
+//   email_holder = the person who owns the order's email/account (retailer account,
+//                  delivery, the physical item).
+//   card_owner   = the order's card_owner (bank statement / card / chargeback info).
+//   admin        = the admin runs this (return postage, method, label, courier admin).
+// Used to split a blocked task's needed fields into one form per accessible person.
+// ============================================================
+const FIELD_ACCESS = {
+  // email holder
+  store_order_number:'email_holder', order_confirmation:'email_holder', order_date:'email_holder',
+  delivery_date_text:'email_holder', delivery_photo:'email_holder', delivery_photo_shows_person:'email_holder',
+  item_damaged:'email_holder', damage_photo:'email_holder', inbound_tracking:'email_holder', inbound_courier:'email_holder',
+  price:'email_holder', item_quantity:'email_holder', total_weight_kg:'email_holder', total_volume_l:'email_holder',
+  // card owner
+  card_used:'card_owner', chargeback_bank:'card_owner', chargeback_amount:'card_owner', chargeback_date:'card_owner',
+  chargeback_reference:'card_owner', chargeback_type:'card_owner', refund_received_amount:'card_owner', refund_received_date:'card_owner',
+  // admin
+  method:'admin', bbm_route:'admin', bought_by_mistake:'admin', return_label_pdf:'admin', return_label_date:'admin',
+  outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
+  collection_date:'admin', collection_handover:'admin', investigation_deadline:'admin', refund_narrative:'admin',
+  refund_refused_date:'admin', invoice:'admin',
+};
+function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
+
+// Build a base64 form definition + a shareable link to upload.html for one access-group.
+function buildFormLink(order, group, taskCode, taskLabel){
+  const fields = (group.fields||[]).map(k=>{
+    const def = FIELD_DEFS[k] || {};
+    const isFile = FILE_FIELDS.indexOf(k) >= 0;
+    return {
+      key: k,
+      label: def.label || k,
+      help: def.help || '',
+      required: !!def.required,
+      kind: isFile ? 'file' : (def.type === 'select' ? 'select' : (def.type === 'textarea' ? 'textarea' : (def.type === 'number' ? 'number' : 'text'))),
+      options: def.options || undefined,
+      accept: (k === 'return_label_pdf') ? 'image/*,application/pdf' : (isFile ? 'image/*,application/pdf' : undefined),
+    };
+  });
+  const token = order._form_token || (order._form_token = Math.random().toString(36).slice(2,10));
+  const def = {
+    order: order.order_id,
+    store: order.store || '',
+    person: (group.holder && group.holder.person) || '',
+    cls: group.cls,
+    task: taskCode || '',
+    title: 'Information needed' + (taskLabel ? ' — ' + taskLabel : ''),
+    subtitle: 'Order #' + order.order_id + (order.store ? ' · ' + order.store : ''),
+    fields: fields,
+    token: token,
+  };
+  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(def)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  const base = (location.origin && location.origin.indexOf('http')===0) ? location.origin : '';
+  return base + '/upload.html?d=' + b64;
+}
+
+// Pull external submissions (from upload.html) back into the matching orders.
+// Files arrive as {field}_path (the app already turns _path into a signed URL on load);
+// text answers are written straight onto the order fields. Idempotent by submission id.
+async function syncSubmissions(){
+  if(typeof sb === 'undefined' || !sb) return 0;
+  let rows;
+  try { const r = await sb.from('submissions').select('*').eq('processed', false); rows = r.data || []; }
+  catch(e){ return 0; }
+  let applied = 0;
+  for(const sub of rows){
+    const o = DATA.orders.find(x=>x.order_id === sub.order_id);
+    if(!o){ continue; }
+    // text answers
+    if(sub.answers){ Object.keys(sub.answers).forEach(k=>{ if(sub.answers[k]!=='' && sub.answers[k]!=null) o[k] = sub.answers[k]; }); }
+    // files → set the durable _path + metadata so the loader shows them
+    if(sub.files){ Object.keys(sub.files).forEach(k=>{ const f=sub.files[k]; if(f && f.path){ o[k+'_path']=f.path; o[k+'_filename']=f.filename||''; o[k+'_filetype']=f.filetype||''; if(!o[k]) o[k]=f.filename||k; } }); }
+    applied++;
+    try { await sb.from('submissions').update({ processed:true }).eq('id', sub.id); } catch(e){}
+  }
+  if(applied){ saveData(); renderAll(); showToast(applied+' external submission'+(applied>1?'s':'')+' received', 'success'); }
+  return applied;
+}
+
+// Resolve an access-class to the person who holds it for THIS order.
+// Returns { cls, person, email, handle, resolved:true } or resolved:false (unknown → alert).
+function resolveAccessHolder(order, cls){
+  if(cls === 'admin') return { cls, person:'Admin', resolved:true, isAdmin:true };
+  if(cls === 'email_holder'){
+    // genuine resolution requires the email to map to a known person
+    const p = (typeof personByEmail === 'function') ? personByEmail(order.email) : null;
+    if(p && p.name) return { cls, person:p.name, email:p.email||order.email, handle:(typeof tgDisplay==='function'?tgDisplay(p):''), resolved:true };
+    if(order.person) return { cls, person:order.person, email:order.email||'', handle:'', resolved:true, weak:true };
+    return { cls, resolved:false, reason:'email_owner' };
+  }
+  if(cls === 'card_owner'){
+    // only resolved if an explicit card_owner is set on the order
+    const co = (order.card_owner && order.card_owner.trim()) ? order.card_owner.trim() : '';
+    if(co){
+      const p = (typeof personByName === 'function') ? personByName(co) : null;
+      return { cls, person:co, email:(p&&p.email)||'', handle:(p&&typeof tgDisplay==='function')?tgDisplay(p):'', resolved:true };
+    }
+    return { cls, resolved:false, reason:'card_owner' };  // unknown → alert to fill in
+  }
+  return { cls, resolved:false, reason:'unknown' };
+}
+
+// Split a list of needed field keys into one group per access-holder.
+// → [{ cls, holder, fields:[...] }], plus unresolved classes flagged for an alert.
+function splitFieldsByAccess(order, fieldKeys){
+  const groups = {};
+  (fieldKeys||[]).forEach(f=>{
+    const cls = fieldAccessClass(f);
+    (groups[cls] = groups[cls] || []).push(f);
+  });
+  const out = [];
+  Object.keys(groups).forEach(cls=>{
+    const holder = resolveAccessHolder(order, cls);
+    out.push({ cls, holder, fields: groups[cls] });
+  });
+  return out;
+}
+
 
 // ============================================================
 // FIELD BLOCKING MATRIX (per refund_information_map_v5.html)
@@ -3040,6 +3163,77 @@ function renderBlockingMatrix() {
 // ============================================================
 // MISSING INFO FORM MODAL (staged)
 // ============================================================
+// Build the "send-out forms, split by who has access" panel for an order.
+function renderAccessForms(order){
+  const stage = computeStage(order);
+  // the fields blocking this order right now
+  const needed = [];
+  Object.keys(FIELD_BLOCKING).forEach(field=>{
+    if(FIELD_BLOCKING[field]==null) return;
+    if(!FIELD_DEFS[field]) return;
+    if(fieldFilled(order, field)) return;
+    const ip = infoPriorityFor(order, field, stage);
+    if(ip.bf === 0) return;
+    needed.push(field);
+  });
+  if(!needed.length) return '<div class="staged-form-explainer" style="background:#ebfbee;border-color:#b2f2bb"><strong>No blocking information needed right now.</strong></div>';
+  const groups = splitFieldsByAccess(order, needed);
+  let h = '<div class="staged-form-explainer"><strong>Send-out forms — split by who has access</strong>'
+        + '<div style="font-size:11.5px;color:var(--ink-faded);margin-top:3px">Each person only gets the fields they can access. Card-account info goes to the card owner, account/delivery info to the email holder, return-process info stays with admin.</div></div>';
+  groups.forEach(g=>{
+    const labels = g.fields.map(f=>fieldLabel(f)).join(', ');
+    if(!g.holder.resolved){
+      const which = g.holder.reason === 'card_owner' ? 'card owner' : 'email-account owner';
+      h += '<div style="border:1px solid var(--amber);background:var(--amber-soft);border-radius:10px;padding:12px;margin:8px 0">'
+         + '<div style="font-weight:600;color:var(--amber)">⚠ Unknown '+which+' — can\'t route this form</div>'
+         + '<div style="font-size:12px;margin:4px 0">Needs: '+escapeHtml(labels)+'</div>'
+         + '<div style="font-size:12px;margin-bottom:6px">Set who has access so the form can be sent:</div>'
+         + (g.cls==='card_owner'
+             ? '<button class="small" onclick="promptSetCardOwner(\''+escAttr(order.order_id)+'\')">Set card owner…</button>'
+             : '<button class="small" onclick="openOrderModal(\''+escAttr(order.order_id)+'\')">Set order email / person…</button>')
+         + '</div>';
+      return;
+    }
+    const link = buildFormLink(order, g, '', '');
+    const isAdmin = g.holder.isAdmin;
+    h += '<div style="border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0">'
+       + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+       + '<div><strong>'+escapeHtml(g.holder.person)+'</strong> '
+       + '<span class="badge-mini" style="background:var(--accent-soft);color:var(--accent-deep)">'+(isAdmin?'ADMIN (in-app)':g.cls==='card_owner'?'CARD OWNER':'EMAIL HOLDER')+'</span></div>'
+       + '</div>'
+       + '<div style="font-size:12px;color:var(--ink-faded);margin:6px 0">Asks for: '+escapeHtml(labels)+'</div>';
+    if(isAdmin){
+      h += '<div style="font-size:12px;color:var(--ink-faded)">These stay in the app — fill them directly in the form below. (A copy of the link is available for quick entry too.)</div>'
+         + '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'
+         + '<button class="small" onclick="copyText(\''+escAttr(link)+'\')">📋 Copy quick-entry link</button></div>';
+    } else {
+      h += '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">'
+         + '<input type="text" readonly value="'+escAttr(link)+'" style="flex:1;min-width:180px;font-size:11px" onclick="this.select()">'
+         + '<button class="small" onclick="copyText(\''+escAttr(link)+'\')">📋 Copy link</button>'
+         + '<button class="small" onclick="copyFormSendMessage(\''+escAttr(order.order_id)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(link)+'\')">📋 Copy message</button>'
+         + '</div>';
+    }
+    h += '</div>';
+  });
+  return h;
+}
+function promptSetCardOwner(orderId){
+  const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
+  const v = window.prompt('Who owns the bank card for this order? (the person who can access the card account / statement)', o.card_owner||'');
+  if(v===null) return;
+  o.card_owner = v.trim(); saveData();
+  if(typeof formOrderId!=='undefined' && formOrderId===orderId) openMissingInfoForm(orderId);
+  renderAll();
+  showToast('Card owner set to '+(v.trim()||'(blank)'), 'success');
+}
+function copyText(t){ if(typeof copyToClipboard==='function'){ copyToClipboard(t); } else { navigator.clipboard&&navigator.clipboard.writeText(t); showToast('Copied','success'); } }
+function copyFormSendMessage(orderId, person, link){
+  const o = DATA.orders.find(x=>x.order_id===orderId);
+  const p = (typeof personByName==='function')?personByName(person):null;
+  const handle = p && typeof tgDisplay==='function' ? tgDisplay(p) : '';
+  const msg = (handle?handle+' ':'')+'— please fill in this short form for '+(o?o.store:'an')+' order #'+orderId+':\n'+link+'\n\nIt only asks for the few details you can access. Thank you!';
+  copyText(msg);
+}
 function openMissingInfoForm(orderId) {
   formOrderId = orderId;
   const order = DATA.orders.find(o => o.order_id === orderId);
@@ -3171,7 +3365,7 @@ function openMissingInfoForm(orderId) {
     </div>`;
   }).join('');
   
-  document.getElementById('formModalBody').innerHTML = explainer + stageHtml;
+  document.getElementById('formModalBody').innerHTML = explainer + renderAccessForms(order) + stageHtml;
   document.getElementById('formModal').classList.add('show');
 }
 
