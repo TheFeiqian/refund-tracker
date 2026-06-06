@@ -592,6 +592,36 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--ink-faded); }
+/* In Progress tab */
+.ip-stats{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:0 0 16px; }
+.ip-stat{ background:var(--surface,#fff); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+.ip-stat .v{ font-size:26px; font-weight:700; line-height:1; font-variant-numeric:tabular-nums; }
+.ip-stat .l{ font-size:12px; color:var(--ink-faded); margin-top:5px; }
+.ip-stat.alert .v{ color:var(--red,#e03131); }
+.ip-stat.good .v{ color:var(--green,#2f9e44); }
+.ip-controls{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+.ip-controls input{ flex:1; min-width:200px; }
+.ip-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:12px; }
+.ip-card{ background:var(--surface,#fff); border:1px solid var(--line); border-left:4px solid var(--accent,#4263eb); border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:9px; transition:box-shadow .15s, transform .15s; }
+.ip-card:hover{ box-shadow:0 6px 20px rgba(0,0,0,.08); transform:translateY(-1px); }
+.ip-card.fresh{ border-left-color:#4263eb; }
+.ip-card.aging{ border-left-color:#f59f00; }
+.ip-card.overdue{ border-left-color:#e03131; }
+.ip-card.done{ border-left-color:#2f9e44; opacity:.62; }
+.ip-card .top{ display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+.ip-card .store{ font-weight:650; font-size:14px; }
+.ip-card .oid{ font-family:var(--mono); font-size:11px; color:var(--ink-faded); }
+.ip-card .timer{ font-family:var(--mono); font-weight:700; font-size:17px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.ip-card.fresh .timer{ color:#4263eb; } .ip-card.aging .timer{ color:#f59f00; } .ip-card.overdue .timer{ color:#e03131; }
+.ip-card .task{ font-size:13px; font-weight:600; }
+.ip-card .who{ font-size:12px; color:var(--ink-faded); display:flex; align-items:center; gap:5px; }
+.ip-card .avatar{ width:20px; height:20px; border-radius:50%; background:var(--accent-soft,#dbe4ff); color:var(--accent-deep,#364fc7); font-size:10px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; }
+.ip-card .ev{ font-size:11.5px; color:var(--ink-faded); background:var(--accent-soft,#f1f3f9); border-radius:7px; padding:6px 9px; }
+.ip-card .acts{ display:flex; gap:6px; margin-top:2px; }
+.ip-card .progress{ height:4px; border-radius:3px; background:var(--line); overflow:hidden; }
+.ip-card .progress > i{ display:block; height:100%; border-radius:3px; }
+.ip-card.fresh .progress > i{ background:#4263eb; } .ip-card.aging .progress > i{ background:#f59f00; } .ip-card.overdue .progress > i{ background:#e03131; }
+.ip-empty{ grid-column:1/-1; text-align:center; padding:40px; color:var(--ink-faded); border:1px dashed var(--line); border-radius:12px; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="app-config.js"></script>
@@ -732,6 +762,15 @@ async function hostedFetchAll() {
     const { data: st } = await sb.from('app_state').select('value').eq('key', 'burndown').maybeSingle();
     window.__HOSTED.burndown = (st && st.value) ? st.value : [];
   } catch (e) { window.__HOSTED.burndown = []; }
+  // In-Progress form tracking + task status (durable across refresh)
+  try {
+    const { data: ft } = await sb.from('app_state').select('value').eq('key', 'formTrack').maybeSingle();
+    window.__HOSTED.formTrack = (ft && ft.value) ? ft.value : {};
+  } catch (e) { window.__HOSTED.formTrack = {}; }
+  try {
+    const { data: ts } = await sb.from('app_state').select('value').eq('key', 'taskStatus').maybeSingle();
+    window.__HOSTED.taskStatus = (ts && ts.value) ? ts.value : {};
+  } catch (e) { window.__HOSTED.taskStatus = {}; }
 }
 
 let __burndownHash = '';
@@ -1012,16 +1051,24 @@ document.addEventListener('DOMContentLoaded', bootHosted);
   <section class="tab-section" data-tab="inprogress">
     <div class="section-intro">
       <h2>In Progress</h2>
-      <p>Tasks delegated via a sent form. Each shows who it went to, what evidence completes it, and how long it has been outstanding since you sent it. When the person uploads via their link, the task auto-completes, the order advances, and it clears from here.</p>
+      <p>Tasks delegated via a sent form — who it went to, what completes it, and how long it has been outstanding. When the person uploads via their link the task auto-completes, the order advances, and it clears from here.</p>
     </div>
-    <div style="overflow:auto">
-      <table class="data-table">
-        <thead><tr>
-          <th>Order</th><th>Task</th><th>Sent to</th><th>Awaiting (evidence)</th><th>Time outstanding</th><th>Status</th><th></th>
-        </tr></thead>
-        <tbody id="inProgressBody"></tbody>
-      </table>
+    <div class="ip-stats" id="inProgressStats"></div>
+    <div class="ip-controls">
+      <input type="text" id="ipSearch" placeholder="Search order, person, task…" oninput="renderInProgress()">
+      <select id="ipFilter" onchange="renderInProgress()">
+        <option value="open">Outstanding only</option>
+        <option value="all">All (incl. completed)</option>
+        <option value="overdue">Overdue (3 days+)</option>
+      </select>
+      <select id="ipSort" onchange="renderInProgress()">
+        <option value="longest">Longest outstanding</option>
+        <option value="newest">Most recently sent</option>
+        <option value="person">By person</option>
+      </select>
     </div>
+    <div class="ip-grid" id="inProgressGrid"></div>
+    <table style="display:none"><tbody id="inProgressBody"></tbody></table>
   </section>
 
   <section class="tab-section" data-tab="orders">
@@ -1613,7 +1660,7 @@ async function syncSubmissions(){
     applied++;
     try { await sb.from('submissions').update({ processed:true }).eq('id', sub.id); } catch(e){}
   }
-  if(applied){ if(typeof stampRequiredFields==='function') DATA.orders.forEach(o=>stampRequiredFields(o)); saveData(); renderAll(); showToast(applied+' external submission'+(applied>1?'s':'')+' received — order updated', 'success'); }
+  if(applied){ DATA.orders.forEach(o=>applyEvidenceAdvances(o)); if(typeof stampRequiredFields==='function') DATA.orders.forEach(o=>stampRequiredFields(o)); saveData(); renderAll(); showToast(applied+' external submission'+(applied>1?'s':'')+' received — order updated', 'success'); }
   return applied;
 }
 
@@ -1903,16 +1950,13 @@ function mergeOrdersWithInitial(saved) {
   return out;
 }
 function normalizeDeliveryDates() {
-  (DATA.orders||[]).forEach(o => {
-    o.triggers = o.triggers || {};
-    if (o.triggers.item_delivered === undefined && o.triggers.item_ordered && deliveryDatePassed(o)) {
-      o.triggers.item_delivered = true;
-    }
-  });
+  (DATA.orders||[]).forEach(o => { applyEvidenceAdvances(o); });
 }
 function loadData() {
   DATA = { orders: (window.__HOSTED && window.__HOSTED.orders) ? window.__HOSTED.orders : [] };
   DATA._burndown = (window.__HOSTED && window.__HOSTED.burndown) ? window.__HOSTED.burndown : [];
+  DATA._formTrack = (window.__HOSTED && window.__HOSTED.formTrack) ? window.__HOSTED.formTrack : {};
+  DATA._taskStatus = (window.__HOSTED && window.__HOSTED.taskStatus) ? window.__HOSTED.taskStatus : {};
   normalizeDeliveryDates();
   (DATA.orders || []).forEach(o => stampRequiredFields(o));
   (DATA.orders || []).forEach(o => {
@@ -1969,6 +2013,30 @@ function evidenceTriggerFor(fieldKey, methodVal){
     default: return null;
   }
 }
+// CENTRALIZED: any evidence that proves a stage has happened advances the order.
+// Only ever sets triggers TRUE (never reverts). Covers a past delivery date, uploaded
+// files, and entered dates. Run on load (corrects existing orders) and after any data entry.
+function applyEvidenceAdvances(order){
+  if(!order) return;
+  order.triggers = order.triggers || {};
+  const t = order.triggers;
+  const present = (f)=> (typeof fieldFilled==='function' ? fieldFilled(order, f) : !!order[f]) || !!order[f+'_path'] || !!order[f+'_file'];
+  // 1) Past delivery date OR a delivery photo => delivered (and therefore ordered).
+  if((order.delivery_date_text && deliveryDatePassed(order)) || present('delivery_photo')){
+    t.item_delivered = true;
+  }
+  // 2) Each evidence field that's present flips the trigger it proves.
+  const m = (order.method||'');
+  ['order_confirmation','store_order_number','delivery_photo','return_label_pdf',
+   'proof_of_postage','collection_handover','refund_refused_date','refund_received_date'
+  ].forEach(f=>{
+    if(present(f)){ const tk = evidenceTriggerFor(f, m); if(tk) t[tk] = true; }
+  });
+  // 3) Monotonic ordering: a later proof implies the earlier stages were reached.
+  if(t.item_delivered) t.item_ordered = true;
+  if(t.lit_rts_sent || t.dna_email_sent || t.lit_created || t.rts_created){ t.item_ordered = true; t.item_delivered = true; }
+  if(t.refund_unsuccessful || t.refunded){ t.item_ordered = true; t.item_delivered = true; }
+}
 function tickTriggerLive(key){
   if(!key) return;
   const cb=document.getElementById('t_'+key);
@@ -1993,7 +2061,21 @@ function updateModalStageHint(){
 }
 
 let saveTimer = null;
-function saveData() { hostedSave(); }
+let __trackersHash = '';
+async function hostedSaveTrackers() {
+  if (!sb) return;
+  try {
+    const ftStr = JSON.stringify(DATA._formTrack || {});
+    const tsStr = JSON.stringify(DATA._taskStatus || {});
+    const h = ftStr + '|' + tsStr;
+    if (h === __trackersHash) return;
+    __trackersHash = h;
+    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; }
+    await sb.from('app_state').upsert({ key: 'formTrack', value: DATA._formTrack || {} }, { onConflict: 'key' });
+    await sb.from('app_state').upsert({ key: 'taskStatus', value: DATA._taskStatus || {} }, { onConflict: 'key' });
+  } catch (e) {}
+}
+function saveData() { hostedSave(); hostedSaveTrackers(); }
 
 // ============================================================
 // COMPUTATIONS
@@ -2883,46 +2965,94 @@ function renderDashboard() {
 // PRIORITY QUEUE WITH EXPANDABLE INSTRUCTIONS
 // ============================================================
 // In Progress tab: every delegated (form-sent) task with its outstanding timer.
+function ipTaskName(r){
+  if((r.task||'').indexOf('info:')===0){
+    const cls = r.task.split(':')[1];
+    return 'Info request (' + (cls==='card_owner'?'card owner':cls==='email_holder'?'email holder':cls) + ')';
+  }
+  const task = (typeof TASK_CATALOG!=='undefined') ? TASK_CATALOG.find(t=>t.code===r.task) : null;
+  return task ? task.name : r.task;
+}
+function ipUrgency(ms){ const d=ms/86400000; if(d>=3) return 'overdue'; if(d>=1) return 'aging'; return 'fresh'; }
+function initials(name){ const p=(name||'').trim().split(/\s+/); return ((p[0]||'?')[0]+(p[1]?p[1][0]:'')).toUpperCase(); }
 function renderInProgress(){
-  const body = document.getElementById('inProgressBody'); if(!body) return;
+  const grid = document.getElementById('inProgressGrid'); if(!grid) return;
   const ft = (typeof formTrackStore==='function') ? formTrackStore() : {};
-  const recs = Object.keys(ft).map(k=>ft[k]).filter(r=>r && r.sent_at);
-  // sort: open (not completed) first, longest outstanding at top
+  let recs = Object.keys(ft).map(k=>Object.assign({_key:k}, ft[k])).filter(r=>r && r.sent_at);
+  const openRecs = recs.filter(r=>!r.completed_at);
+  // stat cards
+  const openCount = openRecs.length;
+  const overdue = openRecs.filter(r=>formTrackElapsed(r)>=3*86400000).length;
+  const avgMs = openRecs.length ? openRecs.reduce((s,r)=>s+formTrackElapsed(r),0)/openRecs.length : 0;
+  const doneRecs = recs.filter(r=>r.completed_at);
+  const avgDoneMs = doneRecs.length ? doneRecs.reduce((s,r)=>s+formTrackElapsed(r),0)/doneRecs.length : 0;
+  const cEl = document.getElementById('inProgressCount'); if(cEl) cEl.textContent = openCount;
+  const stats = document.getElementById('inProgressStats');
+  if(stats){
+    stats.innerHTML =
+      '<div class="ip-stat"><div class="v">'+openCount+'</div><div class="l">Outstanding now</div></div>'
+    + '<div class="ip-stat'+(overdue?' alert':'')+'"><div class="v">'+overdue+'</div><div class="l">Overdue (3 days+)</div></div>'
+    + '<div class="ip-stat"><div class="v">'+(openRecs.length?fmtDuration(avgMs):'—')+'</div><div class="l">Avg time waiting</div></div>'
+    + '<div class="ip-stat good"><div class="v">'+(doneRecs.length?fmtDuration(avgDoneMs):'—')+'</div><div class="l">Avg time to complete</div></div>';
+  }
+  // filters
+  const search = (document.getElementById('ipSearch')||{}).value || '';
+  const filter = (document.getElementById('ipFilter')||{}).value || 'open';
+  const sort = (document.getElementById('ipSort')||{}).value || 'longest';
+  const q = search.toLowerCase().trim();
+  recs = recs.filter(r=>{
+    if(filter==='open' && r.completed_at) return false;
+    if(filter==='overdue' && (r.completed_at || formTrackElapsed(r)<3*86400000)) return false;
+    if(q){
+      const o = DATA.orders.find(x=>x.order_id===r.order_id);
+      const hay = (r.order_id+' '+(o?o.store:'')+' '+(r.person||'')+' '+ipTaskName(r)).toLowerCase();
+      if(hay.indexOf(q)<0) return false;
+    }
+    return true;
+  });
   recs.sort((a,b)=>{
-    const ao=a.completed_at?1:0, bo=b.completed_at?1:0;
-    if(ao!==bo) return ao-bo;
+    if(sort==='newest') return (b.sent_at||0)-(a.sent_at||0);
+    if(sort==='person') return (a.person||'').localeCompare(b.person||'') || formTrackElapsed(b)-formTrackElapsed(a);
+    // longest: open first then by elapsed
+    const ao=a.completed_at?1:0, bo=b.completed_at?1:0; if(ao!==bo) return ao-bo;
     return formTrackElapsed(b)-formTrackElapsed(a);
   });
-  const openCount = recs.filter(r=>!r.completed_at).length;
-  const cEl = document.getElementById('inProgressCount'); if(cEl) cEl.textContent = openCount;
-  if(!recs.length){ body.innerHTML = '<tr><td colspan="7" class="empty-state">Nothing in progress — sent completion forms will appear here with a timer.</td></tr>'; return; }
-  body.innerHTML = recs.map(r=>{
+  if(!recs.length){
+    grid.innerHTML = '<div class="ip-empty"><div style="font-size:30px;margin-bottom:8px">✅</div>Nothing in progress — when you send a completion or info form, it appears here with a live timer.</div>';
+    return;
+  }
+  grid.innerHTML = recs.map(r=>{
     const o = DATA.orders.find(x=>x.order_id===r.order_id);
-    let taskName;
-    if((r.task||'').indexOf('info:')===0){
-      const cls = r.task.split(':')[1];
-      taskName = 'Info request (' + (cls==='card_owner'?'card owner':cls==='email_holder'?'email holder':cls) + ')';
-    } else {
-      const task = TASK_CATALOG.find(t=>t.code===r.task);
-      taskName = task ? task.name : r.task;
-    }
-    const ev = (r.evidence||[]).join(', ') || '—';
-    const elapsed = fmtDuration(formTrackElapsed(r));
     const done = !!r.completed_at;
-    const statusBadge = done
-      ? '<span class="badge-mini" style="background:#ebfbee;color:var(--green)">✓ completed in '+elapsed+'</span>'
-      : '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">outstanding</span>';
-    return '<tr'+(done?' style="opacity:.6"':'')+'>'
-      + '<td><div class="ostore">'+escapeHtml(o?o.store:'?')+'</div><div class="oid">'+escapeHtml(r.order_id)+'</div></td>'
-      + '<td>'+escapeHtml(taskName)+'</td>'
-      + '<td>'+escapeHtml(r.person||'—')+'</td>'
-      + '<td style="font-size:12px">'+escapeHtml(ev)+'</td>'
-      + '<td style="font-family:var(--mono);font-weight:600">'+ (done?'—':elapsed) +'</td>'
-      + '<td>'+statusBadge+'</td>'
-      + '<td>'+ (done ? '' : '<button class="small" onclick="cancelInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\')">Cancel</button>') +'</td>'
-      + '</tr>';
+    const ms = formTrackElapsed(r);
+    const cls = done ? 'done' : ipUrgency(ms);
+    const ev = (r.evidence||[]).join(', ') || 'the requested details';
+    const pct = done ? 100 : Math.min(100, Math.round((ms/(3*86400000))*100)); // 0–3d fills the bar
+    return '<div class="ip-card '+cls+'">'
+      + '<div class="top"><div><div class="store">'+escapeHtml(o?o.store:'?')+'</div><div class="oid">#'+escapeHtml(r.order_id)+'</div></div>'
+      + '<div class="timer" data-sent="'+(r.sent_at||0)+'" data-done="'+(r.completed_at||0)+'">'+(done?('✓ '+fmtDuration(ms)):fmtDuration(ms))+'</div></div>'
+      + '<div class="task">'+escapeHtml(ipTaskName(r))+'</div>'
+      + '<div class="who"><span class="avatar">'+escapeHtml(initials(r.person))+'</span>'+escapeHtml(r.person||'unassigned')+(done?' · completed':' · awaiting upload')+'</div>'
+      + '<div class="ev"><strong>'+(done?'Provided':'Needs')+':</strong> '+escapeHtml(ev)+'</div>'
+      + '<div class="progress"><i style="width:'+pct+'%"></i></div>'
+      + '<div class="acts">'
+      + (done
+          ? '<button class="small" onclick="cancelInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\')">Clear</button>'
+          : '<button class="small" onclick="openOrderModal(\''+escAttr(r.order_id)+'\')">View order</button>'
+            + '<button class="small" onclick="cancelInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\')">Cancel</button>')
+      + '</div>'
+      + '</div>';
   }).join('');
 }
+// Live-tick the outstanding timers every 30s without a full re-render.
+function tickInProgressTimers(){
+  document.querySelectorAll('#inProgressGrid .timer').forEach(el=>{
+    const sent = +el.getAttribute('data-sent'); const done = +el.getAttribute('data-done');
+    if(!sent || done) return;
+    el.textContent = fmtDuration(Math.max(0, Date.now()-sent));
+  });
+}
+if(typeof window!=='undefined'){ if(window.__ipTimer) clearInterval(window.__ipTimer); window.__ipTimer = setInterval(tickInProgressTimers, 30000); }
 function cancelInProgress(orderId, taskCode){
   const s = formTrackStore(); const k = formTrackKey(orderId, taskCode);
   if(s[k]){ delete s[k]; saveData(); renderAll(); showToast('Removed from In Progress — task returns to the queue.', 'success'); }
@@ -3377,6 +3507,7 @@ function submitTaskForm() {
   if (taskCode === 'submit_chargeback' && !order.chargeback_date) order.chargeback_date = todayISO();
   // a passed delivery date means the item is delivered → stage 3
   if (order.delivery_date_text && deliveryDatePassed(order)) order.triggers.item_delivered = true;
+  applyEvidenceAdvances(order);
   const what = task ? task.name : 'Admin upload';
   logAudit(order, task ? 'task_completed' : 'admin_upload', what + ' — form submitted by ' + (order.person || '?') + ' (fields: ' + filled.join(', ') + ')');
   stampRequiredFields(order);
@@ -4551,6 +4682,7 @@ function saveOrderEdit() {
   }
   
   if (isNew) order.order_id = id;
+  applyEvidenceAdvances(order);
   logAudit(order, isNew ? 'order_created' : 'order_edited', isNew ? 'Order created' : 'Order details edited');
   stampRequiredFields(order);
 
