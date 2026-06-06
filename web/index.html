@@ -771,6 +771,10 @@ async function hostedFetchAll() {
     const { data: ts } = await sb.from('app_state').select('value').eq('key', 'taskStatus').maybeSingle();
     window.__HOSTED.taskStatus = (ts && ts.value) ? ts.value : {};
   } catch (e) { window.__HOSTED.taskStatus = {}; }
+  try {
+    const { data: dg } = await sb.from('app_state').select('value').eq('key', 'delegatees').maybeSingle();
+    window.__HOSTED.delegatees = (dg && dg.value) ? dg.value : [];
+  } catch (e) { window.__HOSTED.delegatees = []; }
 }
 
 let __burndownHash = '';
@@ -1836,7 +1840,7 @@ function personByEmail(email){
 function personByName(name){
   if(!name) return null;
   const n=name.trim().toLowerCase();
-  return PEOPLE.find(p=>p.name.toLowerCase()===n) || null;
+  return allPeopleRecords().find(p=>p.name.toLowerCase()===n) || null;
 }
 function tgDisplay(p){
   if(!p) return '';
@@ -1964,6 +1968,7 @@ function loadData() {
   DATA._burndown = (window.__HOSTED && window.__HOSTED.burndown) ? window.__HOSTED.burndown : [];
   DATA._formTrack = (window.__HOSTED && window.__HOSTED.formTrack) ? window.__HOSTED.formTrack : {};
   DATA._taskStatus = (window.__HOSTED && window.__HOSTED.taskStatus) ? window.__HOSTED.taskStatus : {};
+  DATA._delegatees = (window.__HOSTED && window.__HOSTED.delegatees) ? window.__HOSTED.delegatees : [];
   normalizeDeliveryDates();
   (DATA.orders || []).forEach(o => stampRequiredFields(o));
   (DATA.orders || []).forEach(o => {
@@ -2080,12 +2085,14 @@ async function hostedSaveTrackers() {
   try {
     const ftStr = JSON.stringify(DATA._formTrack || {});
     const tsStr = JSON.stringify(DATA._taskStatus || {});
-    const h = ftStr + '|' + tsStr;
+    const dgStr = JSON.stringify(DATA._delegatees || []);
+    const h = ftStr + '|' + tsStr + '|' + dgStr;
     if (h === __trackersHash) return;
     __trackersHash = h;
-    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; }
+    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; window.__HOSTED.delegatees = DATA._delegatees || []; }
     await sb.from('app_state').upsert({ key: 'formTrack', value: DATA._formTrack || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'taskStatus', value: DATA._taskStatus || {} }, { onConflict: 'key' });
+    await sb.from('app_state').upsert({ key: 'delegatees', value: DATA._delegatees || [] }, { onConflict: 'key' });
   } catch (e) {}
 }
 function saveData() { hostedSave(); hostedSaveTrackers(); }
@@ -2267,8 +2274,27 @@ function backfillableFieldsFor(order) {
   return out;
 }
 
+// Extra delegatees added on the fly (name + Telegram). Stored in app_state ('delegatees'),
+// merged on top of the locked PEOPLE array — PEOPLE itself is never modified.
+function extraPeopleStore(){ if(!DATA._delegatees) DATA._delegatees = []; return DATA._delegatees; }
+function allPeopleRecords(){ return PEOPLE.concat(extraPeopleStore()); }
+function addDelegatee(name, tg){
+  name = (name||'').trim(); tg = (tg||'').trim();
+  if(!name) return false;
+  const isPhone = /^[+\d][\d\s()-]{5,}$/.test(tg) && !tg.startsWith('@');
+  const rec = { name, email:'', aliases:[], tg: tg, tgIsPhone: isPhone, _added:true };
+  const list = extraPeopleStore();
+  const existing = list.find(p=>p.name.toLowerCase()===name.toLowerCase());
+  if(existing){ existing.tg = tg; existing.tgIsPhone = isPhone; }
+  else list.push(rec);
+  if(typeof hostedSaveTrackers==='function') hostedSaveTrackers();
+  if(typeof saveData==='function') saveData();
+  return true;
+}
 function getAllPeople() {
-  return [...new Set(DATA.orders.map(o => o.person).filter(Boolean))].sort();
+  const fromOrders = DATA.orders.map(o => o.person).filter(Boolean);
+  const added = extraPeopleStore().map(p=>p.name);
+  return [...new Set(fromOrders.concat(added))].sort();
 }
 
 // ============================================================
@@ -3263,9 +3289,10 @@ function renderPriorityQueue() {
     
     // Build people select for delegable
     const otherPeople = allPeople.filter(p => p !== t.order.person);
-    const peopleSelectHtml = `<select id="assign_${rowKey}">
+    const peopleSelectHtml = `<select id="assign_${rowKey}" onchange="onAssignSelectChange(this)">
       <option value="${escAttr(t.order.person || '')}">${escapeHtml(t.order.person || '(unassigned)')} (suggested)</option>
       ${otherPeople.map(p => `<option value="${escAttr(p)}">${escapeHtml(p)}</option>`).join('')}
+      <option value="__ADD_NEW__">+ Add new person…</option>
     </select>`;
     
     const delegateHtml = t.task.type.admin_only ?
@@ -3776,6 +3803,38 @@ async function copyTaskMessage(taskId, orderId, taskCode){
   copyToClipboard(buildTaskMessage(task, order, fileLinks, completionLink), 'Message copied — paste into Telegram');
 }
 // Deploy B: Mark sent (records sent_at + recipient — separate from copy).
+// Prompt for a new delegatee (name + Telegram) and add them to the delegation list.
+// Returns the added name, or null if cancelled/invalid.
+function promptNewDelegatee(){
+  const name = window.prompt('New person — full name:');
+  if(name === null) return null;
+  if(!name.trim()){ showToast('Name required', 'warn'); return null; }
+  const tg = window.prompt('Telegram for ' + name.trim() + ' (@handle or phone number):', '@');
+  if(tg === null) return null;
+  const clean = (tg||'').trim();
+  if(!clean || clean === '@'){ showToast('Telegram handle or phone required', 'warn'); return null; }
+  addDelegatee(name.trim(), clean);
+  showToast('Added ' + name.trim() + ' to the delegation list', 'success');
+  return name.trim();
+}
+// Queue dropdown: when "+ Add new person…" is chosen, prompt and select the new person.
+function onAssignSelectChange(sel){
+  if(!sel || sel.value !== '__ADD_NEW__') return;
+  const added = promptNewDelegatee();
+  if(added){
+    const opt = document.createElement('option');
+    opt.value = added; opt.textContent = added;
+    sel.insertBefore(opt, sel.querySelector('option[value="__ADD_NEW__"]'));
+    sel.value = added;
+  } else {
+    sel.selectedIndex = 0;   // revert to suggested
+  }
+}
+// Order editor: add a new delegatee and set the person field to them.
+function addPersonFromEditor(){
+  const added = promptNewDelegatee();
+  if(added){ const el = document.getElementById('f_person'); if(el) el.value = added; }
+}
 function markSentFromQueue(rowKey, taskId, ownerOnly, suggestedPerson){
   let recipient;
   if(ownerOnly){ recipient = suggestedPerson; }
@@ -4467,7 +4526,7 @@ function openOrderModal(orderId) {
           <select id="f_card_type" style="flex:1"><option value="">(type)</option><option ${parseCardUsed(order.card_used).type==='Credit'?'selected':''}>Credit</option><option ${parseCardUsed(order.card_used).type==='Debit'?'selected':''}>Debit</option></select>
         </div>
       </div>
-      <div class="form-field"><label>Person responsible <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">email-holder · auto from email</span></label><input type="text" id="f_person" value="${escAttr(order.person)}"></div>
+      <div class="form-field"><label>Person responsible <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">email-holder · auto from email</span></label><input type="text" id="f_person" value="${escAttr(order.person)}"><div style="font-size:11px;margin-top:3px"><span style="color:var(--blue);cursor:pointer;text-decoration:underline" onclick="addPersonFromEditor()">+ add a new person to the delegation list</span></div></div>
       <div class="form-field"><label>Email</label><input type="text" id="f_email" value="${escAttr(order.email)}" onblur="ofEmailAutofill()"><div id="f_email_hint" style="font-size:11px;margin-top:3px;color:var(--ink-faded)"></div></div>
       <div class="form-field"><label>Card owner <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">handles place-order + chargeback</span></label><input type="text" id="f_card_owner" value="${escAttr(order.card_owner||'')}" placeholder="defaults to person responsible"></div>
       <div class="form-field"><label>Phone</label><input type="text" id="f_phone" value="${escAttr(order.phone)}"></div>
