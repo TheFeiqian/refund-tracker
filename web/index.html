@@ -961,6 +961,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
       <div class="filter-group">
         <label>Total priority</label>
         <span id="priorityTotalValue" style="font-family:var(--mono);font-weight:500"></span>
+        <button class="primary small" id="sendAllBtn" style="margin-left:14px" onclick="markAllSentFromQueue()" title="Mark every task currently shown as sent and move them to In Progress">✓ Send all shown</button>
       </div>
     </div>
     <div id="sentTracker"></div>
@@ -1263,7 +1264,7 @@ const TASK_CATALOG = [
     completed_when: (o) => bbmBooked(o),
     completed_via: 'return_label_pdf filled (→ label) OR collection_date filled (→ collection)',
     info_needed: 'Retailer returns contact, order ref, customer identification',
-    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and needs to go back.\n\nPlease call/contact {store} and arrange the return — in this order:\n  1. FIRST ask if they can issue a RETURN LABEL for this item (the easier, free drop-off route). If yes, reply with the return label.\n  2. If they will NOT provide a label for this item, ask them to book a home COLLECTION instead, and reply with the confirmed collection date.\n\nIdentification: {person}, {email}, order no. {store_order_number}, address {address}.\n\nReply with whichever you obtain so we can book the next step.' },
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and needs to go back.\n  Retailer contact: {store_contact}\n\nPlease call/contact {store} and arrange the return — in this order:\n  1. FIRST ask if they can issue a RETURN LABEL for this item (the easier, free drop-off route). If yes, reply with the return label.\n  2. If they will NOT provide a label for this item, ask them to book a home COLLECTION instead, and reply with the confirmed collection date.\n\nIdentification: name on delivery {delivery_name}, contact {person}, phone {phone}, email {email}, order no. {store_order_number}, address {address}.\n\nReply with whichever you obtain so we can book the next step.' },
 
   { code: 'bbm_book_collection', name: 'Call to book a collection', stage: 4, sla: 6, owner_only: false, info_only: false,
     applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o) && bbmRoute(o)==='collection',
@@ -1272,7 +1273,7 @@ const TASK_CATALOG = [
     completed_when: (o) => bbmBooked(o),
     completed_via: 'collection_date filled',
     info_needed: 'Retailer returns contact, collection address, available dates',
-    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake. This item is large, so it goes back by home COLLECTION (a parcel-shop label isn’t practical).\n\nPlease contact {store}, book a home collection, and reply with the confirmed collection date.\n\nIdentification: {person}, {email}, order no. {store_order_number}\nCollection address: {address}' },
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake. This item is large, so it goes back by home COLLECTION (a parcel-shop label isn’t practical).\n  Retailer contact: {store_contact}\n\nPlease contact {store}, book a home collection, and reply with the confirmed collection date.\n\nIdentification: name on delivery {delivery_name}, contact {person}, phone {phone}, email {email}, order no. {store_order_number}\nCollection address: {address}' },
 
 
   { code: 'bbm_book_label', name: 'Get a return label and post it', stage: 4, sla: 6, owner_only: false, info_only: false,
@@ -1282,7 +1283,7 @@ const TASK_CATALOG = [
     completed_when: (o) => bbmBooked(o),
     completed_via: 'return_label_pdf filled',
     info_needed: 'Retailer returns contact, order ref, customer identification',
-    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and goes back by RETURN LABEL.\n\nPlease contact {store} and request a return label for this order, then reply with the label.\n\nIdentification: {person}, {email}, order no. {store_order_number}, address {address}.' },  { code: 'hand_over_collection', name: 'Hand over items on the collection date', stage: 4, sla: 48, owner_only: false, info_only: false,
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and goes back by RETURN LABEL.\n  Retailer contact: {store_contact}\n\nPlease contact {store} and request a return label for this order, then reply with the label.\n\nIdentification: name on delivery {delivery_name}, contact {person}, phone {phone}, email {email}, order no. {store_order_number}, address {address}.' },  { code: 'hand_over_collection', name: 'Hand over items on the collection date', stage: 4, sla: 48, owner_only: false, info_only: false,
     applies_when: (o)=> o.bought_by_mistake==='yes' && bbmRoute(o)==='collection' && bbmBooked(o),
     appears_when: 'BBM via collection — collection booked',
     advances_when: 'LIT/RTS sent ✓ → Stage 5',
@@ -1297,7 +1298,7 @@ const TASK_CATALOG = [
     completed_when: (o) => fieldFilled(o, 'investigation_deadline'),
     completed_via: 'investigation_deadline is set (retailer gave a response date)',
     info_needed: 'Retailer contact, order ref, return tracking status, days since movement',
-    instruction_template: 'Hi {person},\n\nThe return parcel for {store} order {order_id} ({items}, £{price}) has been with {outbound_courier} for 5+ working days with no movement.\n\nPlease contact {store} and formally open an investigation. Include:\n\n  - Order ref: {store_order_number}\n  - Method used: {method}\n  - Outbound tracking: {outbound_tracking}\n  - Proof of postage: {proof_of_postage}\n\nAsk for an investigation reference and target completion date. Reply with both.' },
+    instruction_template: 'Hi {person},\n\nThe return parcel for {store} order {order_id} ({items}, £{price}) has been with {outbound_courier} for 5+ working days with no movement.\n\nPlease contact {store} and formally open an investigation.\n  Retailer contact: {store_contact}\n\nInclude:\n\n  - Name on delivery: {delivery_name}\n  - Contact phone: {phone}\n  - Contact email: {email}\n  - Order ref: {store_order_number}\n  - Method used: {method}\n  - Outbound tracking: {outbound_tracking}\n  - Proof of postage: {proof_of_postage}\n\nAsk for an investigation reference and target completion date. Reply with both.' },
 
   { code: 'chase_investigation', name: 'Follow up on investigation', stage: 6, sla: 4, owner_only: false, info_only: false,
     appears_when: 'Manual stage = 6 (no trigger path naturally reaches 6 — refund_unsuccessful skips to 7)',
@@ -1305,7 +1306,7 @@ const TASK_CATALOG = [
     completed_when: (o) => fieldFilled(o, 'refund_narrative'),
     completed_via: 'refund_narrative is captured (retailer’s final response written up)',
     info_needed: 'Retailer contact, investigation reference, days since last response',
-    instruction_template: 'Hi {person},\n\nInvestigation with {store} for order {order_id} is past its deadline. Please follow up.\n\n  Value: £{price}\n  Investigation deadline: {investigation_deadline}\n  Last update: see thread\n\nIf {store} refuses the refund, request that refusal in writing - we need it for the chargeback.' },
+    instruction_template: 'Hi {person},\n\nInvestigation with {store} for order {order_id} is past its deadline. Please follow up.\n  Retailer contact: {store_contact}\n  Identify the order with: name on delivery {delivery_name}, phone {phone}, email {email}, order no. {store_order_number}.\n\n  Value: £{price}\n  Investigation deadline: {investigation_deadline}\n  Last update: see thread\n\nIf {store} refuses the refund, request that refusal in writing - we need it for the chargeback.' },
 
   { code: 'submit_chargeback', name: 'Submit chargeback', stage: 7, sla: 24, owner_only: true, info_only: false,
     appears_when: 'Refund unsuccessful ✓ (stage 7)',
@@ -1347,6 +1348,7 @@ const FIELD_DEFS = {
   price: { label: 'Price (£)', required: true, type: 'number', help: 'Total order value' },
   phone: { label: 'Contact phone', required: false, type: 'text', help: 'Phone used at checkout' },
   email: { label: 'Contact email', required: true, type: 'text', help: 'Email used at checkout' },
+  delivery_name: { label: 'Delivery address name', required: true, type: 'text', help: 'The person whose name is on the delivery address (used to identify the order to the retailer)' },
   address: { label: 'Delivery address', required: true, type: 'textarea', help: 'Full address as entered at checkout', full: true },
   person: { label: 'Person responsible', required: true, type: 'text', help: 'Who placed and owns this order' },
   inbound_tracking: { label: 'Inbound tracking number', required: true, type: 'text', help: 'From order confirmation email' },
@@ -1414,7 +1416,7 @@ const FIELD_ACCESS = {
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
   collection_date:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_narrative:'admin',
-  refund_refused_date:'admin', invoice:'email_holder',
+  refund_refused_date:'admin', invoice:'email_holder', delivery_name:'delivery',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
 
@@ -1433,6 +1435,10 @@ const FIELD_MODEL = {
   // stage 1-2 — ordering & delivery (all methods)
   store_order_number:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
   order_confirmation:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  // retailer-contact identification — stage-1, used in every task that contacts the retailer.
+  delivery_name:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  phone:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
+  email:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
   price:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
   order_date:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
   item_quantity:{avail:1, methods:'ALL', inForm:true, aiDerived:true, task:'place_order'},   // captured via the items list
@@ -1668,6 +1674,7 @@ async function syncSubmissions(){
 // Returns { cls, person, email, handle, resolved:true } or resolved:false (unknown → alert).
 function resolveAccessHolder(order, cls){
   if(cls === 'admin') return { cls, person:'Admin', resolved:true, isAdmin:true };
+  if(cls === 'delivery') return { cls, person:'Admin', resolved:true, isAdmin:true }; // delivery name is maintained in-app, not delegated to a person's form
   if(cls === 'email_holder'){
     // genuine resolution requires the email to map to a known person
     const p = (typeof personByEmail === 'function') ? personByEmail(order.email) : null;
@@ -1962,6 +1969,12 @@ function loadData() {
   (DATA.orders || []).forEach(o => {
     if (!o.created_at) o.created_at = Date.now() - (o.days_back || 0) * 86400000;
     if (o.card_owner === undefined) o.card_owner = '';
+    // One-time seed of the existing orders' delivery name (Clara Bale; Celine Li for Hofats).
+    // This is seed DATA, not a rule: it runs once per order, then the value is whatever you set
+    // (including blank). New orders start blank and are never auto-filled.
+    if (o.delivery_name === undefined) {
+      o.delivery_name = (/hofats/i.test(o.store || '') || o.order_id === 'SW383004') ? 'Celine Li' : 'Clara Bale';
+    }
     touchStageHistory(o);
   });
   recordBurndownSnapshot();
@@ -2444,6 +2457,10 @@ function copyToClipboard(text, okMsg){
 // INSTRUCTION GENERATION
 // ============================================================
 function tplVal(order, key) {
+  // store_contact pulls the retailer's contact details from the store record (not the order).
+  if (key === 'store_contact') {
+    return (typeof formatStoreContact === 'function') ? formatStoreContact(order) : null;
+  }
   const v = order[key];
   if (v === undefined || v === null || v === '' || v === 'FALSE' || v === 'TRUE') {
     return null;
@@ -2452,6 +2469,24 @@ function tplVal(order, key) {
     return v ? v.toFixed(2) : null;
   }
   return v;
+}
+// Build a readable retailer-contact string from the store's saved contact details.
+// Returns null if nothing is on file (so the template shows it as [store contact - TBD]).
+function formatStoreContact(order){
+  if(!order || !order.store) return null;
+  let ci = null;
+  try {
+    const flags = (typeof getStoreFlags==='function') ? getStoreFlags()[order.store] : null;
+    ci = (flags && flags.contactInfo) || (typeof CONTACT_DATA!=='undefined' ? CONTACT_DATA[order.store] : null) || null;
+  } catch(e){}
+  if(!ci) return null;
+  const parts = [];
+  if(ci.phone) parts.push('phone ' + ci.phone);
+  if(ci.email) parts.push('email ' + ci.email);
+  if(ci.portal) parts.push('returns portal ' + ci.portal);
+  if(ci.website) parts.push(ci.website);
+  if(ci.chat) parts.push('live chat on site');
+  return parts.length ? parts.join(' · ') : null;
 }
 
 function generateInstruction(task, order) {
@@ -3109,6 +3144,44 @@ function cancelInProgress(orderId, taskCode){
   const s = formTrackStore(); const k = formTrackKey(orderId, taskCode);
   if(s[k]){ delete s[k]; saveData(); renderAll(); showToast('Removed from In Progress — task returns to the queue.', 'success'); }
 }
+// The set of tasks currently SHOWN in the queue (after sent-filter + user filters).
+function visibleQueueTasks(){
+  const taskFilter = (document.getElementById('priorityTaskFilter')||{}).value || 'all';
+  const personFilter = (document.getElementById('priorityPersonFilter')||{}).value || 'all';
+  const search = ((document.getElementById('prioritySearch')||{}).value||'').toLowerCase().trim();
+  let tasks = getAllTasksWithPriority();
+  const ft = (typeof formTrackStore==='function') ? formTrackStore() : {};
+  tasks = tasks.filter(t => { const k = t.order.order_id + '::' + t.task.type.code; const rec = ft[k]; return !(rec && rec.sent_at && !rec.completed_at); });
+  if (taskFilter !== 'all') tasks = tasks.filter(t => t.task.type.code === taskFilter);
+  if (personFilter !== 'all') tasks = tasks.filter(t => t.order.person === personFilter);
+  if (search) tasks = tasks.filter(t =>
+    (t.order.order_id || '').toLowerCase().includes(search) ||
+    (t.order.store || '').toLowerCase().includes(search) ||
+    (t.order.items || '').toLowerCase().includes(search) ||
+    (t.task.type.code || '').toLowerCase().includes(search));
+  return tasks;
+}
+// Send all currently-shown tasks: flip every send button to a green "✓ Sent" immediately,
+// then mark each sent (which moves them to In Progress) and re-render.
+function markAllSentFromQueue(){
+  const tasks = visibleQueueTasks();
+  if(!tasks.length){ showToast('No tasks shown to send', 'warn'); return; }
+  // immediate visual feedback: turn every send button green + "Sent"
+  document.querySelectorAll('.priority-table .send-row button.primary, .priority-table .send-row button').forEach(b=>{
+    if(/Mark as sent|Send/.test(b.textContent)){ b.textContent='✓ Sent'; b.style.background='var(--green,#2f9e44)'; b.style.color='#fff'; b.disabled=true; }
+  });
+  let n=0;
+  tasks.forEach(t=>{
+    const code = t.task.type.code;
+    const recipient = t.order.person || '';
+    markTaskSent(t.task.task_id, recipient, 'telegram');
+    const evidence = ((TASK_FORM_FIELDS[code]||[]).filter(f=>{ const d=FIELD_MODEL[f]; return !(d&&d.aiDerived) && !(d&&d.inForm===false); })).map(f=>fieldLabel(f));
+    markFormSent(t.order.order_id, code, recipient, evidence);
+    n++;
+  });
+  showToast('Sent '+n+' task'+(n>1?'s':'')+' — moved to In Progress', 'success');
+  setTimeout(renderAll, 450);   // brief delay so the green state is visible before they move
+}
 function renderPriorityQueue() {
   const taskFilter = (document.getElementById('priorityTaskFilter')||{}).value || 'all';
   const personFilter = document.getElementById('priorityPersonFilter').value;
@@ -3261,7 +3334,9 @@ function renderPriorityQueue() {
                     const labelFor = {order_confirmation:'order confirmation', return_label_pdf:'label', proof_of_postage:'proof of postage', delivery_photo:'delivery photo', damage_photo:'damage photo', collection_handover:'handover proof', invoice:'invoice'};
                     return show.map(f=>'<button class="small" onclick="downloadOrderFile(\''+escAttr(t.order.order_id)+'\',\''+f+'\'); event.stopPropagation();" title="Download the uploaded file to attach to an email">📄 Download '+labelFor[f]+'</button>').join(' ');
                   })()}
-                  <button class="primary small" onclick="markSentFromQueue('${rowKey}','${escAttr(t.task.task_id)}', ${t.task.type.owner_only}, '${escAttr(t.order.person || '')}'); event.stopPropagation();">✓ Mark as sent</button>
+                  ${(function(){ const st=getTaskStatus(t.task.task_id); const sent = st && st.sent_at && !st.completed_at; return sent
+                    ? '<button class="small" style="background:var(--green,#2f9e44);color:#fff;font-weight:600" onclick="event.stopPropagation()" disabled>✓ Sent</button>'
+                    : '<button class="primary small" onclick="markSentFromQueue(\''+rowKey+'\',\''+escAttr(t.task.task_id)+'\', '+t.task.type.owner_only+', \''+escAttr(t.order.person || '')+'\'); event.stopPropagation();">✓ Mark as sent</button>'; })()}
                 </div>
                 ${(function(){ const st=getTaskStatus(t.task.task_id); if(st&&st.completed_at) return '<div style="font-size:11px;color:var(--green)">✓ completed '+fmtDays((Date.now()-st.completed_at)/86400000)+' ago · <span style="cursor:pointer;text-decoration:underline" onclick=\'reverseTaskCompletion("'+escAttr(t.task.task_id)+'");renderAll()\'>reverse</span></div>'; if(st&&st.sent_at){ const d=daysOutstanding(t.task.task_id); return '<div style="font-size:11px;color:'+(d>=2?'var(--amber)':'var(--ink-faded)')+'">sent to '+escapeHtml(st.sent_to||'?')+' · '+fmtDays(d)+' outstanding <span style="cursor:pointer;text-decoration:underline" onclick=\'trackerAddEvidenceAndComplete("'+escAttr(t.task.task_id)+'")\'>add evidence &amp; mark done</span></div>'; } return ''; })()}
               </div>
@@ -4248,7 +4323,7 @@ function openOrderModal(orderId) {
   const isNew = orderId === null;
   let order;
   if (isNew) {
-    order = { order_id: '', store: '', items: '', store_order_number: '', card_used: '', card_owner: '', price: 0, phone: '', email: '', address: '', person: '', inbound_tracking: '', inbound_courier: '', order_date: '', delivery_date_text: '', delivery_photo: '', method: '', bbm_route: '', return_label_pdf: '', return_label_date: '', outbound_tracking: '', investigation_deadline: '', proof_of_postage: '', postage_date: '', posted_from: '', refund_narrative: '', invoice: '', chargeback_bank: '', chargeback_amount: '', chargeback_date: '', notes: '', outbound_courier: '', triggers: { item_ordered: false, item_delivered: false, lit_created: false, rts_created: false, dna_email_sent: false, lit_rts_sent: false, refund_successful: false, refund_unsuccessful: false, refunded: false }, days_back: 0 };
+    order = { order_id: '', store: '', items: '', store_order_number: '', card_used: '', card_owner: '', price: 0, phone: '', email: '', address: '', delivery_name: '', person: '', inbound_tracking: '', inbound_courier: '', order_date: '', delivery_date_text: '', delivery_photo: '', method: '', bbm_route: '', return_label_pdf: '', return_label_date: '', outbound_tracking: '', investigation_deadline: '', proof_of_postage: '', postage_date: '', posted_from: '', refund_narrative: '', invoice: '', chargeback_bank: '', chargeback_amount: '', chargeback_date: '', notes: '', outbound_courier: '', triggers: { item_ordered: false, item_delivered: false, lit_created: false, rts_created: false, dna_email_sent: false, lit_rts_sent: false, refund_successful: false, refund_unsuccessful: false, refunded: false }, days_back: 0 };
   } else {
     order = DATA.orders.find(o => o.order_id === orderId);
     if (!order) return;
@@ -4397,6 +4472,7 @@ function openOrderModal(orderId) {
       <div class="form-field"><label>Card owner <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">handles place-order + chargeback</span></label><input type="text" id="f_card_owner" value="${escAttr(order.card_owner||'')}" placeholder="defaults to person responsible"></div>
       <div class="form-field"><label>Phone</label><input type="text" id="f_phone" value="${escAttr(order.phone)}"></div>
       <div class="form-field full"><label>Delivery address</label><textarea id="f_address" rows="2">${escapeHtml(order.address)}</textarea></div>
+      <div class="form-field"><label>Name on delivery address</label><input type="text" id="f_delivery_name" value="${escAttr(order.delivery_name||'')}"><div style="font-size:11px;margin-top:3px;color:var(--ink-faded)">Used to identify the order to the retailer in all contact tasks</div></div>
     </div>
     <div class="form-section-title">Delivery & tracking</div>
     <div class="form-grid">
@@ -4685,7 +4761,7 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
