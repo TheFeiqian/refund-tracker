@@ -1173,38 +1173,36 @@ const TASK_CATALOG = [
     instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}) is returning as damaged. Please send a picture of the damaged item — specific guidance for what to capture is tailored to this item and will be sent alongside this task.' },
 
   { code: 'generate_return_label', name: 'Generate return label', stage: 4, sla: 6, owner_only: false, info_only: false,
-    applies_when: (o)=>!isCollectionPath(o),
-    appears_when: 'LIT created ✓ OR RTS created ✓ (stage 4)',
+    applies_when: (o)=> o.bought_by_mistake!=='yes' && !isCollectionPath(o),
+    appears_when: 'LIT created ✓ OR RTS created ✓ (stage 4, non-BBM)',
     advances_when: 'LIT/RTS sent ✓ → Stage 5',
     completed_when: (o) => fieldFilled(o, 'return_label_pdf') || !!o.return_label_pdf_file,
     completed_via: 'return_label_pdf filled OR a return label file is attached',
     info_needed: 'Order ref, identification, retailer return portal or contact',
     instruction_template: 'Hi {person},\n\nPlease request a return label from {store} for order {order_id} ({items}).\n\nIdentification to use:\n  Customer name: {person}\n  Email used: {email}\n  Delivery address used: {address}\n  Store order number: {store_order_number}\n  Method: {method}\n\nUse the retailer’s return portal or email customer service. Reply with the return label PDF (or photo of the label).' },
 
-  { code: 'post_return_label', name: 'Post the return', stage: 4, sla: 48, owner_only: false, info_only: false,
-    applies_when: (o)=>!isCollectionPath(o),
-    appears_when: 'Stage 4 AND generate_return_label is completed (return label uploaded)',
+  { code: 'post_return_label', name: 'Take the parcel to the post office', stage: 4, sla: 48, owner_only: false, info_only: false,
+    applies_when: (o)=> ((o.bought_by_mistake!=='yes' && !isCollectionPath(o)) || (o.bought_by_mistake==='yes' && bbmRoute(o)==='label' && bbmBooked(o))) && (fieldFilled(o,'return_label_pdf') || !!o.return_label_pdf_file),
+    appears_when: 'Return label obtained (non-BBM, or BBM-label after booking)',
     advances_when: 'LIT/RTS sent ✓ → Stage 5',
-    requires: ['generate_return_label'],
     completed_when: (o) => fieldFilled(o, 'proof_of_postage') || !!o.proof_of_postage_file,
     completed_via: 'proof_of_postage filled OR a postage receipt file is attached',
     info_needed: 'Printed label, parcel ready, drop-off options',
     instruction_template: 'Hi {person},\n\nReady to post: return for {store} order {order_id} ({items}).\n\n  Method: {method}\n  Courier: {outbound_courier}\n  Label: {return_label_pdf}\n\nPlease pack and drop off at any {outbound_courier} point. Reply with a clear photo of the proof-of-postage receipt (we need this if we have to chargeback).' },
 
-  { code: 'get_collection_date', name: 'Get collection date', stage: 4, sla: 6, owner_only: false, info_only: false,
-    applies_when: (o)=>isCollectionPath(o),
-    appears_when: 'BBM order, large volume, store offers collection (stage 4)',
-    advances_when: 'LIT/RTS sent ✓ → Stage 5 (once items handed over)',
-    completed_when: (o) => fieldFilled(o, 'collection_date'),
-    completed_via: 'collection_date is filled (retailer booked a collection slot)',
-    info_needed: 'Retailer returns contact, collection address, available dates',
-    instruction_template: 'Hi {person},\n\nThis was bought by mistake and is too large to drop at a parcel shop, so {store} will collect it from home.\n\nOrder: {order_id} ({items}, £{price})\nIdentification: {person}, {email}, order no. {store_order_number}\nCollection address: {address}\n\nPlease contact {store} (BBM / unwanted return), book a home collection, and reply with the confirmed collection date.' },
+  { code: 'bbm_book', name: 'Call to book return label or collection', stage: 4, sla: 6, owner_only: false, info_only: false,
+    applies_when: (o)=> o.bought_by_mistake==='yes' && !bbmBooked(o),
+    appears_when: 'BBM order at stage 4 — route/date not yet obtained',
+    advances_when: 'A collection date OR a return label is obtained → next BBM task',
+    completed_when: (o) => bbmBooked(o),
+    completed_via: 'collection_date filled (→ collection) OR return_label_pdf filled (→ label)',
+    info_needed: 'Retailer returns contact, order ref, customer identification',
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was bought by mistake and needs to go back.\n\nPlease contact {store} and arrange the return. Two possible routes:\n  • a home COLLECTION — reply with the confirmed collection date, or\n  • a RETURN LABEL to post — reply with the return label.\n\nIdentification: {person}, {email}, order no. {store_order_number}, address {address}.\n\nReply with whichever they give you so we can book the next step.' },
 
-  { code: 'hand_over_collection', name: 'Hand over items for collection', stage: 4, sla: 48, owner_only: false, info_only: false,
-    applies_when: (o)=>isCollectionPath(o),
-    appears_when: 'Stage 4 AND get_collection_date is completed (collection booked)',
+  { code: 'hand_over_collection', name: 'Hand over items on the collection date', stage: 4, sla: 48, owner_only: false, info_only: false,
+    applies_when: (o)=> o.bought_by_mistake==='yes' && bbmRoute(o)==='collection' && bbmBooked(o),
+    appears_when: 'BBM via collection — collection booked',
     advances_when: 'LIT/RTS sent ✓ → Stage 5',
-    requires: ['get_collection_date'],
     completed_when: (o) => fieldFilled(o, 'collection_handover') || !!o.collection_handover_file,
     completed_via: 'collection_handover filled OR a handover photo/receipt is attached',
     info_needed: 'Items packed, collection slot, anyone present at the address',
@@ -3157,7 +3155,7 @@ function openOrderModal(orderId) {
   const isNew = orderId === null;
   let order;
   if (isNew) {
-    order = { order_id: '', store: '', items: '', store_order_number: '', card_used: '', card_owner: '', price: 0, phone: '', email: '', address: '', person: '', inbound_tracking: '', inbound_courier: '', order_date: '', delivery_date_text: '', delivery_photo: '', method: '', return_label_pdf: '', return_label_date: '', outbound_tracking: '', investigation_deadline: '', proof_of_postage: '', postage_date: '', posted_from: '', refund_narrative: '', invoice: '', chargeback_bank: '', chargeback_amount: '', chargeback_date: '', notes: '', outbound_courier: '', triggers: { item_ordered: false, item_delivered: false, lit_created: false, rts_created: false, dna_email_sent: false, lit_rts_sent: false, refund_successful: false, refund_unsuccessful: false, refunded: false }, days_back: 0 };
+    order = { order_id: '', store: '', items: '', store_order_number: '', card_used: '', card_owner: '', price: 0, phone: '', email: '', address: '', person: '', inbound_tracking: '', inbound_courier: '', order_date: '', delivery_date_text: '', delivery_photo: '', method: '', bbm_route: '', return_label_pdf: '', return_label_date: '', outbound_tracking: '', investigation_deadline: '', proof_of_postage: '', postage_date: '', posted_from: '', refund_narrative: '', invoice: '', chargeback_bank: '', chargeback_amount: '', chargeback_date: '', notes: '', outbound_courier: '', triggers: { item_ordered: false, item_delivered: false, lit_created: false, rts_created: false, dna_email_sent: false, lit_rts_sent: false, refund_successful: false, refund_unsuccessful: false, refunded: false }, days_back: 0 };
   } else {
     order = DATA.orders.find(o => o.order_id === orderId);
     if (!order) return;
@@ -3494,7 +3492,7 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
@@ -3757,6 +3755,37 @@ function isCollectionPath(o, flags) {
   const vol = parseFloat(o.total_volume_l) || 0;
   return offersCollection && vol > VOLUME_THRESHOLD_L;
 }
+// BBM route resolution: manual force wins; else inferred from whichever booking
+// artifact exists (collection_date → collection, return_label_pdf → label).
+// Returns 'collection' | 'label' | '' (unknown / not yet booked).
+function bbmRoute(o){
+  if(!o || o.bought_by_mistake!=='yes') return '';
+  if(o.bbm_route==='collection' || o.bbm_route==='label') return o.bbm_route;
+  if(fieldFilled(o,'collection_date')) return 'collection';
+  if(fieldFilled(o,'return_label_pdf') || o.return_label_pdf_file) return 'label';
+  return '';
+}
+function bbmBooked(o){
+  // the first BBM task is done once we have a route AND its booking datum (or a manual force)
+  const r = bbmRoute(o);
+  if(!r) return false;
+  if(o.bbm_route && !fieldFilled(o,'collection_date') && !fieldFilled(o,'return_label_pdf') && !o.return_label_pdf_file){
+    // route manually forced but no date/label yet → still "booked enough" to route,
+    // but the booking task stays open until the datum arrives
+    return false;
+  }
+  return true;
+}
+// Manually force a BBM order down a known route (collection/label) without the date.
+function forceBBMRoute(orderId, route){
+  const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
+  o.bought_by_mistake='yes'; o.method='BBM'; o.method_confirmed=true;
+  o.triggers=o.triggers||{}; o.triggers.lit_created=true; // onto stage 4
+  o.bbm_route = route;
+  touchStageHistory(o);
+  saveData(); renderAll();
+  showToast('BBM route forced to '+route+' for #'+orderId, 'success');
+}
 function deriveMethod(o, flags) {
   const f = flags[o.store];
   // BBM is a manual flag set at delivery review; it runs the LIT chain, with a collection fork by volume.
@@ -3765,6 +3794,13 @@ function deriveMethod(o, flags) {
             collection: isCollectionPath(o, flags), return_label_courier:(f&&f.courier)||''};
   }
   const courier = o.inbound_courier || (f && f.inbound_courier) || '';
+  // Under £100: prefer a claim over a real return (explicit-no DNA, then EB, then PEB).
+  if ((o.price||0) > 0 && (o.price||0) < 100) {
+    if (o.delivery_photo_shows_person === 'no') return {method:'DNA', resolved:'sub100', blocked_at:'', missing:[]};
+    if (o.total_weight_kg && parseFloat(o.total_weight_kg) < 2) return {method:'EB', resolved:'sub100', blocked_at:'', missing:[]};
+    if (orderQty(o) > 10) return {method:'PEB', resolved:'sub100', blocked_at:'', missing:[]};
+    // else fall through to the normal tree
+  }
   // Q1/Q2: only a NEVER-ASSESSED store stalls. An assessed store with no drop-off
   // label (unwanted/damaged false) is a definite "no" — flow through to Q3+.
   if (!f || !f.assessed) return {method:'', blocked_at:'Q1', missing:[{key:'parcel_shop_flags',src:'Stores',scope:'store'}]};
@@ -3772,7 +3808,7 @@ function deriveMethod(o, flags) {
   if (f.damaged) return {method:'LIT with pic', return_label_courier: f.courier||'', resolved:'Q2', blocked_at:'', missing:[]};
   if (!courier) return {method:'', blocked_at:'Q3', missing:[{key:'inbound_courier',src:'stage 2',scope:'order'}]};
   if (RET_COURIERS.includes(courier)) return {method:'RTS', resolved:'Q3', blocked_at:'', missing:[]};
-  if (o.delivery_photo_shows_person === 'yes') return {method:'DNA', resolved:'Q4', blocked_at:'', missing:[]};
+  if (o.delivery_photo_shows_person === 'no') return {method:'DNA', resolved:'Q4', blocked_at:'', missing:[]};
   if (!o.delivery_photo_shows_person) return {method:'', blocked_at:'Q4', missing:[{key:'delivery_photo_shows_person',src:'stage 3',scope:'order'}]};
   if (orderQty(o) > 10) return {method:'PEB', resolved:'Q5', blocked_at:'', missing:[]};
   if (o.total_weight_kg && parseFloat(o.total_weight_kg) < 2) return {method:'EB', resolved:'Q6', blocked_at:'', missing:[]};
@@ -4023,12 +4059,16 @@ function renderOrderFlowchart(o, flags) {
   const collection = isCollectionPath(o, flags);
   // Determine where the order resolves (or null if blocked)
   let resolvedAt = null, method = '', courierRes = '';
+  const sub100 = (o.price||0) > 0 && (o.price||0) < 100;
   if (bbm) { resolvedAt='BBM'; method='BBM'; courierRes=f.courier||''; }
+  else if (sub100 && o.delivery_photo_shows_person === 'no') { resolvedAt='sub100'; method='DNA'; }
+  else if (sub100 && o.total_weight_kg && parseFloat(o.total_weight_kg) < 2) { resolvedAt='sub100'; method='EB'; }
+  else if (sub100 && parseFloat(o.item_quantity) > 10) { resolvedAt='sub100'; method='PEB'; }
   else if (!f.assessed) { resolvedAt=null; method=''; }  // unassessed store stalls at Q1
   else if (f.unwanted) { resolvedAt='Q1'; method='LIT'; courierRes=f.courier||''; }
   else if (f.damaged) { resolvedAt='Q2'; method='LIT with pic'; courierRes=f.courier||''; }
   else if (RET.indexOf(courier) >= 0) { resolvedAt='Q3'; method='RTS'; courierRes=courier; }
-  else if (o.delivery_photo_shows_person === 'yes') { resolvedAt='Q4'; method='DNA'; }
+  else if (o.delivery_photo_shows_person === 'no') { resolvedAt='Q4'; method='DNA'; }
   else if (parseFloat(o.item_quantity) > 10) { resolvedAt='Q5'; method='PEB'; }
   else if (o.total_weight_kg && parseFloat(o.total_weight_kg) < 2) { resolvedAt='Q6'; method='EB'; }
 
@@ -4062,7 +4102,7 @@ function renderOrderFlowchart(o, flags) {
       + step('Q1', 'Parcel-shop label for unwanted?', (f.unwanted==null?'?':(f.unwanted?'yes':'no')), f.unwanted ? '→ LIT' : 'no', false)
       + step('Q2', 'Parcel-shop label for damaged?', (f.damaged==null?'?':(f.damaged?'yes':'no')), f.damaged ? '→ LIT with pic' : 'no', false)
       + step('Q3', 'Inbound courier (DPD/RM/Parcelforce)?', (courier||'?'), RET.indexOf(courier)>=0 ? '→ RTS' : 'no', false)
-      + step('Q4', 'Delivery photo shows a person?', (o.delivery_photo_shows_person||'?'), o.delivery_photo_shows_person==='yes' ? '→ DNA' : 'no', false)
+      + step('Q4', 'Delivery photo shows a person?', (o.delivery_photo_shows_person||'?'), o.delivery_photo_shows_person==='no' ? '→ DNA' : (o.delivery_photo_shows_person==='yes'?'shows person — continue':'no proof yet'), false)
       + step('Q5', 'Item quantity > 10?', (o.item_quantity||'?'), parseFloat(o.item_quantity)>10 ? '→ PEB' : 'no', false)
       + step('Q6', 'Weight under 2 kg?', (o.total_weight_kg||'?'), (o.total_weight_kg && parseFloat(o.total_weight_kg)<2) ? '→ EB' : 'no', false)
     + '</div></div>';
@@ -4085,6 +4125,14 @@ const MC_NEED_LABEL = {
 // Pure tree over an explicit variable bag -> {method, blocked, need, at}
 function mcEvaluate(v){
   if(v.bbm) return {method:'BBM', at:'BBM', blocked:false};
+  // Under £100: prefer a claim over a real return. Fires before the normal tree.
+  // DNA needs an EXPLICIT "no" in the photo field (empty stays a stall, handled below).
+  if((v.price||0) > 0 && (v.price||0) < 100){
+    if(v.delivery_photo_shows_person==='no') return {method:'DNA', at:'sub100', blocked:false};
+    if(v.weight && parseFloat(v.weight) < 2) return {method:'EB', at:'sub100', blocked:false};
+    if((v.qty||0) > 10) return {method:'PEB', at:'sub100', blocked:false};
+    // none of the claim triggers fired → fall through into the normal tree below
+  }
   // Q1/Q2: store drop-off label. Only a NEVER-ASSESSED store stalls here.
   // An assessed store with no drop-off label (unwanted=false, damaged=false) is a
   // definite "no" — LIT/LIT-with-pic are ruled out and we flow on to Q3+.
@@ -4093,7 +4141,8 @@ function mcEvaluate(v){
   if(v.store_damaged===true) return {method:'LIT with pic', at:'Q2', blocked:false};
   if(!v.inbound_courier) return {method:'', blocked:'Q3', need:'inbound_courier'};
   if(RET_COURIERS.includes(v.inbound_courier)) return {method:'RTS', at:'Q3', blocked:false};
-  if(v.delivery_photo_shows_person==='yes') return {method:'DNA', at:'Q4', blocked:false};
+  // Q4 DNA: fires on an EXPLICIT "no" (photo doesn't show recipient → no proof of receipt).
+  if(v.delivery_photo_shows_person==='no') return {method:'DNA', at:'Q4', blocked:false};
   if(!v.delivery_photo_shows_person) return {method:'', blocked:'Q4', need:'delivery_photo_shows_person'};
   if((v.qty||0) > 10) return {method:'PEB', at:'Q5', blocked:false};
   if(v.weight && parseFloat(v.weight) < 2) return {method:'EB', at:'Q6', blocked:false};
@@ -4103,6 +4152,7 @@ function mcEvaluate(v){
 function mcVarsForOrder(o, flags){
   const f = flags[o.store];
   return {
+    price: o.price||0,
     bbm: o.bought_by_mistake==='yes',
     assessed: !!(f && f.assessed),
     store_unwanted: f ? !!f.unwanted : false,
@@ -4160,7 +4210,37 @@ function renderMethodLogic(){
   h += '<p style="font-size:12px;color:var(--ink-faded);margin:0 0 8px">The decision can\'t be made until one variable is supplied. Send an info request to the relevant person — the method then auto-resolves.</p>';
   h += missing.length ? missing.map(({o,r})=>mcMissingCard(o,r)).join('') : '<div class="empty-state">Nothing blocked on missing info.</div>';
 
+  // 4) BBM orders — show route + the task needed to progress them
+  const bbms = DATA.orders.filter(o=>o.bought_by_mistake==='yes' && orderStage(o)!=='resolved' && computeStage(o)!=='done');
+  h += '<h3 class="delivery-h" style="margin-top:24px">Bought-by-mistake orders <span class="count">'+bbms.length+'</span></h3>';
+  h += '<p style="font-size:12px;color:var(--ink-faded);margin:0 0 8px">BBM returns go one of two ways — via store collection or via a return label. The first task is to call and book; once a collection date or label is obtained the next task follows. If you already know the route but not the date, force it.</p>';
+  h += bbms.length ? bbms.map(o=>mcBBMCard(o)).join('') : '<div class="empty-state">No BBM orders in progress.</div>';
+
   body.innerHTML = h;
+}
+// Card for a BBM order: route, current open task, and manual force-route.
+function mcBBMCard(o){
+  const route = bbmRoute(o);
+  const booked = bbmBooked(o);
+  const tasks = (typeof getTasksForOrder==='function') ? getTasksForOrder(o) : [];
+  const open = tasks[0];
+  const routeBadge = route
+    ? '<span class="badge-mini" style="background:var(--accent-soft);color:var(--accent-deep)">via '+(route==='collection'?'collection':'return label')+'</span>'
+    : '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">route not set</span>';
+  let taskLine;
+  if(open){ taskLine = 'Next task: <strong>'+escapeHtml(open.type.name)+'</strong>'+(booked?'':' — outstanding until a collection date or label is obtained'); }
+  else { taskLine = 'No open task (may be awaiting handover/postage proof or resolved).'; }
+  return '<div class="order-card" style="border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+    + '<div><strong>'+escapeHtml(o.store)+'</strong> <span style="color:var(--ink-faded);font-size:12px">#'+escapeHtml(o.order_id)+' · '+escapeHtml(o.items||'')+'</span></div>'
+    + '<div style="display:flex;gap:6px;align-items:center">'+routeBadge+'<span style="font-size:12px;color:var(--ink-faded)">'+fmtMoney(o.price||0)+'</span></div></div>'
+    + '<div style="margin-top:8px;padding:8px 10px;background:var(--accent-soft);border-radius:6px;font-size:13px;color:var(--accent-deep)">'+taskLine+'</div>'
+    + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">'
+    + '<span style="font-size:11px;color:var(--ink-faded)">Force route:</span>'
+    + '<button class="small" onclick="forceBBMRoute(\''+escAttr(o.order_id)+'\',\'collection\')"'+(route==='collection'?' style="background:var(--ink);color:var(--bg-card)"':'')+'>Collection</button>'
+    + '<button class="small" onclick="forceBBMRoute(\''+escAttr(o.order_id)+'\',\'label\')"'+(route==='label'?' style="background:var(--ink);color:var(--bg-card)"':'')+'>Return label</button>'
+    + '<button class="small" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">Open order</button>'
+    + '</div></div>';
 }
 
 // ---- The top flowchart (sample OR a loaded order); interactive + drop target ----
@@ -4196,7 +4276,7 @@ function mcFlowchartBlock(flags){
     ['Q1','Parcel-shop label for unwanted?', !v.assessed?'assess store first':(v.store_unwanted===true?'→ LIT':'no → continue')],
     ['Q2','Parcel-shop label for damaged?', !v.assessed?'—':(v.store_damaged===true?'→ LIT with pic':'no → continue')],
     ['Q3','Inbound courier DPD/RM/Parcelforce?', RET_COURIERS.includes(v.inbound_courier)?'→ RTS':'no'],
-    ['Q4','Delivery photo shows recipient?', v.delivery_photo_shows_person==='yes'?'→ DNA':'no'],
+    ['Q4','Delivery photo shows recipient?', v.delivery_photo_shows_person==='no'?'→ DNA':(v.delivery_photo_shows_person==='yes'?'shows person':'no proof yet')],
     ['Q5','Quantity over 10?', (v.qty||0)>10?'→ PEB':'no'],
     ['Q6','Weight under 2 kg?', (v.weight&&parseFloat(v.weight)<2)?'→ EB':'no']
   ];
@@ -4511,6 +4591,14 @@ function renderDeliveryCalendar(awaitingDelivery, awaitingCollection){
   }
   awaitingDelivery.forEach(o=>add(o,o.delivery_date_text,'delivery'));
   awaitingCollection.forEach(o=>add(o,o.collection_date,'collection'));
+  // BBM returns: collection dates + label return/postage dates, scheduled regardless.
+  DATA.orders.forEach(o=>{
+    if(o.bought_by_mistake!=='yes') return;
+    const t=o.triggers||{}; if(t.lit_rts_sent||t.refunded||t.refund_successful) return;
+    const r = bbmRoute(o);
+    if(r==='collection' && o.collection_date) add(o,o.collection_date,'collection');
+    else if(r==='label' && (o.postage_date||o.return_label_date)) add(o,(o.postage_date||o.return_label_date),'return');
+  });
   // grid: start on Monday
   const firstDay = (monthStart.getDay()+6)%7; // 0=Mon
   const daysInMonth = new Date(m.getFullYear(), m.getMonth()+1, 0).getDate();
@@ -4532,14 +4620,15 @@ function renderDeliveryCalendar(awaitingDelivery, awaitingCollection){
     const items = ev[key]||[];
     let inner='<div style="font-size:11px;font-weight:600;color:'+(isToday?'var(--blue)':'var(--ink-faded)')+'">'+d+'</div>';
     items.slice(0,3).forEach(({o,kind})=>{
-      const col = kind==='delivery'?'var(--blue-soft);color:var(--blue)':'var(--accent-soft);color:var(--accent-deep)';
-      inner+='<div onclick="openOrderModal(\''+escAttr(o.order_id)+'\')" title="'+escAttr(o.store+' — '+(o.items||''))+'" style="margin-top:2px;font-size:10px;padding:1px 4px;border-radius:3px;background:'+col+';cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+(kind==='delivery'?'📦 ':'🚚 ')+escapeHtml(o.store)+'</div>';
+      const col = kind==='delivery'?'var(--blue-soft);color:var(--blue)':(kind==='return'?'var(--amber-soft);color:var(--amber)':'var(--accent-soft);color:var(--accent-deep)');
+      const icon = kind==='delivery'?'📦 ':(kind==='return'?'↩️ ':'🚚 ');
+      inner+='<div onclick="openOrderModal(\''+escAttr(o.order_id)+'\')" title="'+escAttr(o.store+' — '+(o.items||''))+'" style="margin-top:2px;font-size:10px;padding:1px 4px;border-radius:3px;background:'+col+';cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+icon+escapeHtml(o.store)+'</div>';
     });
     if(items.length>3) inner+='<div style="font-size:9px;color:var(--ink-faded);margin-top:1px">+'+(items.length-3)+' more</div>';
     h+='<div style="min-height:78px;background:var(--bg-card);border:1px solid '+(isToday?'var(--blue)':'var(--line)')+';border-radius:6px;padding:4px">'+inner+'</div>';
   });
   h+='</div>';
-  h+='<div style="display:flex;gap:14px;margin-top:10px;font-size:11px;color:var(--ink-faded)"><span>📦 delivery</span><span>🚚 collection</span></div>';
+  h+='<div style="display:flex;gap:14px;margin-top:10px;font-size:11px;color:var(--ink-faded)"><span>📦 delivery</span><span>🚚 collection</span><span>↩️ store return</span></div>';
   return h;
 }
 function renderDelivery() {
@@ -4550,6 +4639,15 @@ function renderDelivery() {
     const t = o.triggers||{};
     return o.bought_by_mistake === 'yes' && o.collection_date && !o.collection_handover && !t.lit_rts_sent;
   });
+  // All BBM orders still in progress, grouped by route, for the pending view + calendar.
+  const bbmPending = DATA.orders.filter(o => {
+    const t = o.triggers||{}; if(o.bought_by_mistake!=='yes') return false;
+    if(t.lit_rts_sent || t.refunded || t.refund_successful) return false;
+    return computeStage(o)!=='done';
+  });
+  const bbmCollection = bbmPending.filter(o=>bbmRoute(o)==='collection');
+  const bbmLabel = bbmPending.filter(o=>bbmRoute(o)==='label');
+  const bbmUnrouted = bbmPending.filter(o=>!bbmRoute(o));
   const recentlyDelivered = DATA.orders.filter(o => {
     const t = o.triggers||{}; if (!t.item_delivered) return false;
     // delivered but NOT yet progressed beyond the delivery/awaiting-method stage:
@@ -4618,6 +4716,37 @@ function renderDelivery() {
   h += awaitingDelivery.length ? '<div class="delivery-grid">'+awaitingDelivery.map(o=>card(o,'delivery')).join('')+'</div>' : '<div class="empty-state">Nothing on the way right now.</div>';
   h += '<h3 class="delivery-h" style="margin-top:24px">Awaiting collection <span class="count">'+awaitingCollection.length+'</span></h3>';
   h += awaitingCollection.length ? '<div class="delivery-grid">'+awaitingCollection.map(o=>card(o,'collection')).join('')+'</div>' : '<div class="empty-state">No home collections booked.</div>';
+
+  // BBM returns — every BBM in progress, by route, waiting for its date.
+  const bbmCard = (o)=>{
+    const route = bbmRoute(o);
+    const dateStr = route==='collection' ? o.collection_date : (route==='label' ? (o.postage_date||o.return_label_date) : '');
+    const d = parseDateLoose(dateStr);
+    const waitLabel = route==='collection' ? 'waiting for collection' : route==='label' ? 'waiting to return to store' : 'route not set';
+    let badge;
+    if(!route) badge='<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">set route</span>';
+    else if(!d) badge='<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">awaiting date</span>';
+    else { const days=Math.round((d-today)/86400000); badge='<span class="badge-mini" style="background:var(--accent-soft);color:var(--accent-deep)">'+(days===0?'today':days>0?days+'d away':Math.abs(days)+'d ago')+'</span>'; }
+    const force = '<div style="margin-top:8px;display:flex;gap:6px;align-items:center;font-size:11px" onclick="event.stopPropagation()">'
+      + '<span style="color:var(--ink-faded)">route:</span>'
+      + '<button class="small" onclick="forceBBMRoute(\''+escAttr(o.order_id)+'\',\'collection\')"'+(route==='collection'?' style="background:var(--ink);color:var(--bg-card)"':'')+'>Collection</button>'
+      + '<button class="small" onclick="forceBBMRoute(\''+escAttr(o.order_id)+'\',\'label\')"'+(route==='label'?' style="background:var(--ink);color:var(--bg-card)"':'')+'>Label</button>'
+      + '</div>';
+    return '<div class="delivery-card" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">'
+      + '<div class="delivery-head"><div class="delivery-store">'+escapeHtml(o.store)+'</div>'+badge+'</div>'
+      + '<div class="delivery-items">'+escapeHtml(o.items||'')+'</div>'
+      + '<div class="delivery-meta">'+escapeHtml(o.person||'?')+' · '+fmtMoney(o.price)+' · '+waitLabel+'</div>'
+      + '<div class="delivery-date">'+(dateStr?('<strong>'+escapeHtml(dateStr)+'</strong>'):'<span style="color:var(--amber)">date not set</span>')+'</div>'
+      + force + '</div>';
+  };
+  h += '<h3 class="delivery-h" style="margin-top:24px">BBM — waiting for collection <span class="count">'+bbmCollection.length+'</span></h3>';
+  h += bbmCollection.length ? '<div class="delivery-grid">'+bbmCollection.map(bbmCard).join('')+'</div>' : '<div class="empty-state">No BBM collections pending.</div>';
+  h += '<h3 class="delivery-h" style="margin-top:24px">BBM — waiting to return to store <span class="count">'+bbmLabel.length+'</span></h3>';
+  h += bbmLabel.length ? '<div class="delivery-grid">'+bbmLabel.map(bbmCard).join('')+'</div>' : '<div class="empty-state">No BBM store-returns pending.</div>';
+  if(bbmUnrouted.length){
+    h += '<h3 class="delivery-h" style="margin-top:24px">BBM — route not yet set <span class="count">'+bbmUnrouted.length+'</span></h3>';
+    h += '<div class="delivery-grid">'+bbmUnrouted.map(bbmCard).join('')+'</div>';
+  }
   if (recentlyDelivered.length) {
     h += '<h3 class="delivery-h" style="margin-top:24px">Received — awaiting next step <span class="count">'+recentlyDelivered.length+'</span></h3>';
     h += '<div class="delivery-grid">'+recentlyDelivered.map(o=>card(o,'received')).join('')+'</div>';
