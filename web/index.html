@@ -2628,14 +2628,46 @@ async function onFormFieldFileUpload(input, fieldKey) {
     saveData();
     showToast(`Attached ${file.name}`, 'success');
     
-    // AI PARSE: proof of postage triggers automatic extraction
-    if (fieldKey === 'proof_of_postage') {
-      showToast('Parsing receipt with AI…', '');
-      const updates = await parseProofOfPostageReceipt(file, dataUrl);
-      // Only fill empty fields - never overwrite manual entries
+    // AI PARSE: proof of postage AND return label trigger automatic extraction.
+    if (fieldKey === 'proof_of_postage' || fieldKey === 'return_label_pdf') {
+      const isLabel = fieldKey === 'return_label_pdf';
+      showToast(isLabel ? 'Parsing return label with AI…' : 'Parsing receipt with AI…', '');
+      const updates = isLabel
+        ? await parseReturnLabel(file, dataUrl)
+        : await parseProofOfPostageReceipt(file, dataUrl);
       const confidence = updates._parse_confidence || {};
       delete updates._parse_confidence;
+
+      // Tracking-source rule: the return label is the primary source for outbound_tracking.
+      // A receipt may only set tracking if a label hasn't already provided one.
+      if (isLabel) {
+        if (updates.outbound_tracking) {
+          order.outbound_tracking = updates.outbound_tracking;       // label always wins
+          order.outbound_tracking_source = 'label';
+        }
+      } else {
+        // proof of postage: keep label-sourced tracking; otherwise the receipt may fill it
+        if (updates.outbound_tracking) {
+          if (order.outbound_tracking_source === 'label') {
+            delete updates.outbound_tracking;                        // protected — don't overwrite
+          } else {
+            order.outbound_tracking = updates.outbound_tracking;
+            order.outbound_tracking_source = 'receipt';
+          }
+        }
+      }
+      delete updates.outbound_tracking;   // handled above; below only fills the rest
+
+      // Date fallback: if no printed date was read, use the uploaded file's date.
+      const dateField = isLabel ? 'return_label_date' : 'postage_date';
+      if (!updates[dateField] && !order[dateField]) {
+        const fileDate = file.lastModified ? new Date(file.lastModified) : new Date();
+        updates[dateField] = fileDate.toLocaleDateString('en-GB');
+      }
+
+      // Fill remaining empty fields only — never overwrite manual entries.
       Object.keys(updates).forEach(k => { if (!order[k]) order[k] = updates[k]; });
+      if (typeof applyEvidenceAdvances === 'function') applyEvidenceAdvances(order);
       order._last_parse = { fieldKey, at: Date.now(), confidence };
       saveData();
       showParseToast(updates);
@@ -2854,6 +2886,24 @@ async function parseProofOfPostageReceipt(file, fileDataUrl) {
       ? await window.__parseReceiptImpl(file, fileDataUrl)
       : {};
     return updates || {};
+  } catch (e) { return {}; }
+}
+// Parse a return label via /api/ai (task: parse_label) → {outbound_tracking, outbound_courier, return_label_date}.
+async function parseReturnLabel(file, fileDataUrl) {
+  try {
+    const { media_type, image_base64 } = __dataUrlParts(fileDataUrl);
+    const res = await fetch((window.APP_CONFIG && window.APP_CONFIG.aiProxyUrl) || '/api/ai', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'parse_label', image_base64, media_type })
+    });
+    if (!res.ok) return {};
+    const data = await res.json();
+    const f = (data && data.fields) || {};
+    const out = {};
+    if (f.outbound_tracking) out.outbound_tracking = String(f.outbound_tracking).replace(/\s+/g, '');
+    if (f.outbound_courier) out.outbound_courier = f.outbound_courier;
+    if (f.return_label_date) out.return_label_date = f.return_label_date;
+    return out;
   } catch (e) { return {}; }
 }
 
@@ -4725,7 +4775,7 @@ function ofRenderItems(){
     '<div style="display:flex;gap:6px;margin-bottom:5px;align-items:center">'
     + '<input type="text" placeholder="item name" value="'+escAttr(it.name)+'" oninput="ofItemField('+i+',\'name\',this.value)" style="flex:1;min-width:120px">'
     + '<input type="number" min="1" placeholder="qty" value="'+(it.qty||1)+'" oninput="ofItemField('+i+',\'qty\',this.value)" style="width:62px" title="quantity of this item">'
-    + '<span style="font-size:10px;color:var(--ink-faded);min-width:92px">'+(it.weight?(it.weight+'kg'):'?kg')+' · '+(it.volume?(it.volume+'L'):'?L')+'</span>'
+    + '<span style="font-size:10px;color:var(--ink-faded);min-width:130px">'+(it.weight?(it.weight+'kg'):'?kg')+' · '+(it.volume?(it.volume+'L'):'?L')+(it.qty>1&&(it.weight||it.volume)?(' → ×'+it.qty+' = '+(it.weight?(Math.round(parseFloat(it.weight)*it.qty*100)/100)+'kg':'')+(it.weight&&it.volume?' · ':'')+(it.volume?(Math.round(parseFloat(it.volume)*it.qty)+'L'):'')):'')+'</span>'
     + (OF_ITEMS.length>1?'<button type="button" class="small" onclick="ofRemoveItem('+i+')" title="remove">×</button>':'<span style="width:24px"></span>')
     + '</div>'
   ).join('');
@@ -4746,9 +4796,10 @@ async function ofEstimateWV(){
   if(!items.length){ showToast('Add at least one item name first','error'); return; }
   showToast('Estimating weight & volume…','success');
   try{
-    const prompt = 'For each item, estimate a realistic single-unit weight in kg and packed volume in litres. '
-      + 'Return ONLY a JSON array, one object per item in order, like [{"weight":1.2,"volume":8}]. Items:\n'
-      + items.map((it,i)=>(i+1)+'. '+it.name+(it.qty>1?(' (qty '+it.qty+', give PER-UNIT values)'):'')).join('\n');
+    const prompt = 'Estimate a realistic weight in kilograms and packed parcel volume in litres for ONE single unit of each item below. '
+      + 'Ignore any quantities — give the value for a single unit only. '
+      + 'Return ONLY a JSON array, one object per item in the same order, like [{"weight":1.2,"volume":8}]. Items:\n'
+      + items.map((it,i)=>(i+1)+'. '+it.name).join('\n');
     const res = await fetch((window.APP_CONFIG&&window.APP_CONFIG.aiProxyUrl)||'/api/ai', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ task:'estimate_wv', prompt })
@@ -5831,7 +5882,7 @@ function openStoreForm(name) {
   ov.innerHTML=`<div class="modal" style="max-width:560px"><div class="modal-head"><h2>${name?'Edit store: '+escapeHtml(name):'Add store'}</h2><button class="modal-close" onclick="closeStoreForm()">&times;</button></div>
   <div class="modal-body">
     <div class="form-grid"><div class="form-field"><label>Store name</label><input type="text" id="sf_name" value="${escAttr(r.name)}"></div>
-    <div class="form-field"><label>Yearly revenue (£, min 2M)</label><input type="text" id="sf_rev" value="${r.revenue!=null?r.revenue.toLocaleString():''}" placeholder="e.g. 14,000,000" oninput="sfBudget()"></div></div>
+    <div class="form-field"><label>Yearly revenue (£, min 2M)</label><input type="text" id="sf_rev" value="${r.revenue!=null?r.revenue.toLocaleString():''}" placeholder="e.g. 14,000,000" oninput="sfBudget()"><div style="margin-top:5px"><button type="button" class="small" id="sfRevBtn" onclick="researchRevenue()" style="background:linear-gradient(135deg,#6d28d9,#2563eb);border:none;color:#fff">✨ Research revenue</button> <span id="sfRevStatus" style="font-size:11px;color:var(--ink-faded)"></span></div></div></div>
     <div class="form-field"><label>Store website</label><input type="text" id="sfc_website_v" value="${escAttr((r.website)||(ci.website)||'')}" placeholder="https://..."></div>
     <div style="display:flex;align-items:center;gap:10px;margin:4px 0 12px"><button type="button" class="primary small" id="sfAutoBtn" onclick="autofillStore()" style="background:linear-gradient(135deg,#6d28d9,#2563eb);border:none">✨ Auto-fill from web</button><span id="sfAutoStatus" style="font-size:12px;color:var(--ink-faded)"></span></div>
     <div id="sf_budget" style="background:var(--blue-soft);color:var(--blue);border-radius:8px;padding:8px 12px;margin:10px 0;font-size:13px">${r.budget==null?'Budget derives from revenue (÷ 10,000, capped £3,000).':(r.budget===0?'Below £2M minimum — store not eligible.':'Budget: <strong>'+fmtMoney(r.budget)+'</strong>'+(r.budget===3000?' (capped)':'')+' · source: '+REV_SOURCE_LABEL[r.rev_source])}</div>
@@ -5854,18 +5905,59 @@ function sfBudget(){ const v=parseFloat((document.getElementById('sf_rev').value
   if(v>=2000000){ const x=Math.min(3000,Math.round(v/10000)); b.innerHTML='Budget auto-derived: <strong>'+fmtMoney(x)+'</strong> (÷ 10,000, capped £3,000).'; }
   else if(v>0){ b.textContent='Below £2M minimum — store not eligible.'; } }
 function closeStoreForm(){ const o=document.getElementById('storeModalOv'); if(o) o.remove(); }
+// Parse an AI revenue string like "£120M", "£3.2bn", "120,000,000", "£2.4 billion" into a number.
+function parseRevenueString(s){
+  if(s==null || s==='') return null;
+  if(typeof s==='number') return s;
+  let t=String(s).toLowerCase().replace(/[£$,\s]/g,'');
+  let mult=1;
+  if(/bn|billion|b$/.test(t)){ mult=1e9; t=t.replace(/bn|billion|b$/,''); }
+  else if(/m|million/.test(t)){ mult=1e6; t=t.replace(/m|million/,''); }
+  else if(/k|thousand/.test(t)){ mult=1e3; t=t.replace(/k|thousand/,''); }
+  const n=parseFloat(t);
+  if(isNaN(n)) return null;
+  return Math.round(n*mult);
+}
+async function researchRevenue(){
+  const name=(document.getElementById('sf_name').value||'').trim();
+  const website=(document.getElementById('sfc_website_v').value||'').trim();
+  const status=document.getElementById('sfRevStatus');
+  const btn=document.getElementById('sfRevBtn');
+  if(!name && !website){ status.textContent='Enter a store name first'; status.style.color='var(--amber)'; return; }
+  btn.disabled=true; const orig=btn.textContent; btn.textContent='Researching…';
+  status.style.color='var(--ink-faded)'; status.textContent='Looking up revenue…';
+  try{
+    const res = await fetch((window.APP_CONFIG&&window.APP_CONFIG.aiProxyUrl)||'/api/ai', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ task:'company_revenue', store: name || website, website })
+    });
+    if(!res.ok) throw new Error('AI endpoint returned '+res.status);
+    const data = await res.json();
+    const f=(data&&data.fields)||{};
+    btn.disabled=false; btn.textContent=orig;
+    if(f.known===false || (!f.revenue && f.revenue_over_2m==null)){ status.style.color='var(--amber)'; status.textContent='Revenue not found — enter manually'; return; }
+    const revNum=parseRevenueString(f.revenue);
+    if(revNum!=null){ const rEl=document.getElementById('sf_rev'); if(rEl){ rEl.value=revNum.toLocaleString(); rEl.style.background='#f3e8ff'; rEl.style.borderColor='#a855f7'; if(typeof sfBudget==='function') sfBudget(); } status.style.color='#7c3aed'; status.innerHTML='✓ '+(f.revenue||fmtRevenue(revNum))+(f.revenue_over_2m===false?' — below £2M':'')+'. <strong>Verify before saving.</strong>'+(f.source_note?'<br><span style="color:var(--ink-faded)">'+escapeHtml(f.source_note)+'</span>':''); }
+    else if(f.revenue_over_2m!=null){ status.style.color='var(--ink-faded)'; status.textContent=f.revenue_over_2m?'Likely above £2M (no exact figure) — enter manually':'Likely below £2M — not eligible'; }
+    else { status.style.color='var(--amber)'; status.textContent='No figure found — enter manually'; }
+  }catch(e){ status.style.color='var(--amber)'; status.textContent='Lookup failed: '+(e.message||e); btn.disabled=false; btn.textContent=orig; }
+}
 async function autofillStore(){
   const name=(document.getElementById('sf_name').value||'').trim();
   const website=(document.getElementById('sfc_website_v').value||'').trim();
   const status=document.getElementById('sfAutoStatus');
   const btn=document.getElementById('sfAutoBtn');
   if(!name && !website){ status.textContent='Enter a store name or website first'; status.style.color='var(--amber)'; return; }
-  if(typeof sb==='undefined' || !sb){ status.textContent='Auto-fill needs the live app (not available offline)'; status.style.color='var(--amber)'; return; }
   btn.disabled=true; const orig=btn.textContent; btn.textContent='Searching…';
   status.style.color='var(--ink-faded)'; status.textContent='Looking up returns & contact details…';
   try{
-    const { data, error } = await sb.functions.invoke('lookup-store', { body:{ name, website } });
-    if(error || !data || !data.fields || data.fields.raw){ status.textContent='Could not find structured details — fill in manually'; status.style.color='var(--amber)'; btn.disabled=false; btn.textContent=orig; return; }
+    const res = await fetch((window.APP_CONFIG&&window.APP_CONFIG.aiProxyUrl)||'/api/ai', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ task:'store_autofill', store: name || website, website })
+    });
+    if(!res.ok) throw new Error('AI endpoint returned '+res.status);
+    const data = await res.json();
+    if(!data || !data.fields){ status.textContent='Could not find structured details — fill in manually'; status.style.color='var(--amber)'; btn.disabled=false; btn.textContent=orig; return; }
     const f=data.fields;
     const setV=(id,val)=>{ const el=document.getElementById(id); if(el && val!=null && val!==''){ el.value=val; el.style.background='#f3e8ff'; el.style.borderColor='#a855f7'; } };
     const tick=(cbId,boxId,val)=>{ const cb=document.getElementById(cbId); if(cb && val){ cb.checked=true; if(boxId){const b=document.getElementById(boxId); if(b)b.style.display='block';} } };
@@ -5886,6 +5978,9 @@ async function autofillStore(){
     // return courier
     if(f.return_courier){ const sel=document.getElementById('sf_courier'); if(sel){ [...sel.options].forEach(o=>{ if(o.value===f.return_courier||o.text===f.return_courier) sel.value=o.value; }); sel.style.background='#f3e8ff'; filled.push('return courier'); } }
     if(f.return_courier){ const sel=document.getElementById('sf_inbound'); }
+    // revenue (parse "£120M" / "£3.2B" / "120000000" into a number) → fills the eligibility field
+    const revNum = parseRevenueString(f.revenue);
+    if(revNum!=null){ const rEl=document.getElementById('sf_rev'); if(rEl){ rEl.value=revNum.toLocaleString(); rEl.style.background='#f3e8ff'; rEl.style.borderColor='#a855f7'; if(typeof sfBudget==='function') sfBudget(); filled.push('revenue'); } }
     btn.disabled=false; btn.textContent=orig;
     if(filled.length){ status.style.color='#7c3aed'; status.innerHTML='✓ Filled '+filled.length+' field'+(filled.length>1?'s':'')+' (purple = from web). <strong>Review before saving.</strong>'+(f.notes?'<br><span style="color:var(--ink-faded)">'+escapeHtml(f.notes)+'</span>':''); }
     else { status.style.color='var(--amber)'; status.textContent='Nothing found to fill — enter details manually'; }
