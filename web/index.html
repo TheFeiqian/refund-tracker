@@ -654,11 +654,16 @@ function __dataUrlParts(dataUrl) {
 window.__parseReceiptImpl = async function (file, dataUrl) {
   try {
     const { media_type, image_base64 } = __dataUrlParts(dataUrl);
-    const { data, error } = await sb.functions.invoke('parse-receipt', { body: { image_base64, media_type } });
-    if (error || !data || !data.fields) return {};
-    const f = data.fields, out = { _parse_confidence: {} };
-    if (f.tracking_number) out.outbound_tracking = f.tracking_number;
-    if (f.courier) out.outbound_courier = f.courier;
+    const res = await fetch((window.APP_CONFIG && window.APP_CONFIG.aiProxyUrl) || '/api/ai', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'parse_postage', image_base64, media_type })
+    });
+    if (!res.ok) return {};
+    const data = await res.json();
+    const f = (data && data.fields) || {};
+    const out = { _parse_confidence: {} };
+    if (f.outbound_tracking) out.outbound_tracking = f.outbound_tracking;
+    if (f.outbound_courier) out.outbound_courier = f.outbound_courier;
     if (f.postage_date) out.postage_date = f.postage_date;
     if (f.posted_from) out.posted_from = f.posted_from;
     return out;
@@ -2841,67 +2846,15 @@ function removeAttachedFile(fieldKey, ctx) {
 // Extracts: postage_date, outbound_tracking, outbound_courier, posted_from
 // ============================================================
 async function parseProofOfPostageReceipt(file, fileDataUrl) {
-  /* === PRODUCTION HOOK ============================================================
-     Send the receipt image to a vision LLM to extract:
-       - postage_date (the dispatch date stamped on the receipt)
-       - outbound_tracking (the tracking/reference number)
-       - outbound_courier (Royal Mail, DPD, Evri, Parcelforce, etc.)
-       - posted_from (the Post Office / parcelshop / drop-off location)
-     
-     Example:
-       const fd = new FormData();
-       fd.append('file', file);
-       const r = await fetch('/api/parse-postage-receipt', { method: 'POST', body: fd });
-       return await r.json();  // { postage_date, outbound_tracking, outbound_courier, posted_from }
-     ============================================================================ */
-  
-  // DEMO STUB: simulate latency, extract heuristic patterns from filename
-  await new Promise(r => setTimeout(r, 1500));
-  
-  const filename = file.name.replace(/\.[^.]+$/, '');
-  const updates = {};
-  
-  // Try to find a date-like pattern in the filename
-  const dateMatch = filename.match(/(\d{1,2}[-_\/.]\d{1,2}[-_\/.]\d{2,4})|(\d{4}[-_\/.]\d{1,2}[-_\/.]\d{1,2})/);
-  if (dateMatch) {
-    updates.postage_date = dateMatch[0].replace(/[_.]/g, '/');
-  } else {
-    updates.postage_date = new Date().toLocaleDateString('en-GB');
-  }
-  
-  // Tracking number — typically 10-30 alphanumerics. Try a few formats.
-  const trackingMatch = filename.match(/[A-Z]{2}\d{6,}[A-Z]{0,3}/i) || filename.match(/\d{12,}/);
-  if (trackingMatch) {
-    updates.outbound_tracking = trackingMatch[0].toUpperCase();
-  }
-  
-  // Try to spot a courier name in the filename
-  const courierPatterns = [
-    [/royal\s*mail|rm[\W_]/i, 'Royal Mail'],
-    [/parcelforce|pf[\W_]/i, 'Parcelforce'],
-    [/dpd/i, 'DPD'],
-    [/evri|hermes/i, 'Evri'],
-    [/dhl/i, 'DHL'],
-    [/yodel/i, 'Yodel'],
-    [/ups/i, 'UPS'],
-    [/fedex/i, 'FedEx'],
-  ];
-  for (const [pat, name] of courierPatterns) {
-    if (pat.test(filename)) { updates.outbound_courier = name; break; }
-  }
-  
-  // Posted-from is hardest to infer from filename; leave as placeholder
-  updates.posted_from = '(extracted from receipt — please verify)';
-  
-  // Confidence flags so the UI can highlight what was inferred vs guessed
-  updates._parse_confidence = {
-    postage_date: dateMatch ? 'high' : 'low (no date in filename)',
-    outbound_tracking: trackingMatch ? 'medium' : 'none',
-    outbound_courier: updates.outbound_courier ? 'medium' : 'none',
-    posted_from: 'stub',
-  };
-  
-  return updates;
+  // Real call: send the receipt image to the secure /api/ai proxy (task: parse_postage),
+  // which invokes Claude vision server-side. Returns {postage_date, outbound_tracking,
+  // outbound_courier, posted_from}. Falls back to {} if the endpoint isn't reachable yet.
+  try {
+    const updates = (typeof window.__parseReceiptImpl === 'function')
+      ? await window.__parseReceiptImpl(file, fileDataUrl)
+      : {};
+    return updates || {};
+  } catch (e) { return {}; }
 }
 
 function showParseToast(updates) {
