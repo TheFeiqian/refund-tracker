@@ -23,7 +23,7 @@ function jsonFromText(text) {
   return null;
 }
 
-async function callAnthropic(apiKey, { system, userText, image }) {
+async function callAnthropic(apiKey, { system, userText, image, webSearch }) {
   const content = [];
   if (image && image.image_base64) {
     const mt = image.media_type || 'image/jpeg';
@@ -37,10 +37,13 @@ async function callAnthropic(apiKey, { system, userText, image }) {
 
   const body = {
     model: MODEL,
-    max_tokens: 1024,
+    max_tokens: webSearch ? 2048 : 1024,
     messages: [{ role: 'user', content }],
   };
   if (system) body.system = system;
+  if (webSearch) {
+    body.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }];
+  }
 
   const r = await fetch(ANTHROPIC_URL, {
     method: 'POST',
@@ -53,6 +56,7 @@ async function callAnthropic(apiKey, { system, userText, image }) {
   });
   const data = await r.json();
   if (!r.ok) throw new Error((data && data.error && data.error.message) || ('Anthropic ' + r.status));
+  // With web search the response has multiple text blocks (search + answer) — join them all.
   const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
   return text;
 }
@@ -141,23 +145,23 @@ module.exports = async (req, res) => {
 
     if (task === 'store_autofill') {
       const text = await callAnthropic(apiKey, {
-        system: 'You provide UK retailer returns + company information for a returns-processing tool. '
-          + 'Reply with ONLY a JSON object, no prose. Be accurate: if you are not confident of a specific value (especially phone numbers, emails, exact revenue), use an empty string or null rather than inventing it. '
-          + 'For booleans, only set true when you are reasonably confident.',
-        userText: 'For the UK retailer "' + (payload.store || '') + '"' + (payload.website ? (' (website ' + payload.website + ')') : '') + ', return ONLY this JSON:\n'
+        webSearch: true,
+        system: 'You research UK retailer returns + contact information for a returns-processing tool. USE WEB SEARCH to find the retailer\'s official website and read their actual contact / customer-service / returns pages. '
+          + 'The phone number and email MUST come from the retailer\'s real official site or a clearly authoritative source you found via search — do NOT recall from memory and do NOT guess. If after searching you cannot confirm the official customer-service phone number, return "" for phone rather than a number you are unsure about. The same applies to email. '
+          + 'After any searching, your FINAL message must be ONLY the JSON object and nothing else.',
+        userText: 'Research the UK retailer "' + (payload.store || '') + '"' + (payload.website ? (' (website ' + payload.website + ')') : '') + ' by searching the web and reading their official site. Then return ONLY this JSON:\n'
           + '{'
-          + '"website":"official UK website URL or empty",'
+          + '"website":"official UK website URL",'
           + '"returns_portal":"online returns portal URL if they have one, else empty",'
-          + '"phone":"UK customer-service phone or empty",'
-          + '"email":"customer-service email or empty",'
-          + '"live_chat":true/false (do they offer live chat),'
-          + '"parcel_shop_unwanted":true/false (do they provide a free parcel-shop/drop-off return label for UNWANTED items),'
-          + '"parcel_shop_damaged":true/false (do they provide a parcel-shop/drop-off label for DAMAGED/faulty items),'
-          + '"offers_collection":true/false (do they offer home collection for returns),'
-          + '"return_courier":"the courier they use for returns if known (Royal Mail/Evri/DPD/etc), else empty",'
+          + '"phone":"official UK customer-service phone from their site, else empty",'
+          + '"email":"official customer-service email from their site, else empty",'
+          + '"live_chat":true/false,'
+          + '"parcel_shop_unwanted":true/false (free parcel-shop/drop-off return label for UNWANTED items),'
+          + '"parcel_shop_damaged":true/false (parcel-shop/drop-off label for DAMAGED items),'
+          + '"offers_collection":true/false (home collection for returns),'
           + '"category":["one or more of: Furniture, Electronics, Fashion, Homeware, Garden, Beauty, Sports, Other"],'
-          + '"revenue":"approximate most-recent annual revenue as a short string e.g. \\"£120M\\" or \\"£3.2B\\", else empty",'
-          + '"revenue_over_2m":true/false (is annual revenue above £2 million),'
+          + '"revenue":"approximate most-recent annual revenue as a short string e.g. \\"£120M\\", else empty",'
+          + '"revenue_over_2m":true/false,'
           + '"notes":"one short sentence on their returns policy"'
           + '}.',
       });
@@ -166,10 +170,11 @@ module.exports = async (req, res) => {
 
     if (task === 'company_revenue') {
       const text = await callAnthropic(apiKey, {
-        system: 'You provide approximate company revenue figures for a business-eligibility check. Reply with ONLY a JSON object. '
-          + 'If you are not confident, set known=false and leave revenue empty rather than guessing a specific figure.',
-        userText: 'For the company "' + (payload.store || payload.company || '') + '"' + (payload.website ? (' (' + payload.website + ')') : '') + ', return ONLY JSON: '
-          + '{"revenue":"approximate most-recent annual revenue as a short string e.g. \\"£120M\\", else empty","revenue_over_2m":true/false,"known":true/false,"source_note":"one short sentence on the basis for this figure"}.',
+        webSearch: true,
+        system: 'You research approximate company revenue for a business-eligibility check. USE WEB SEARCH to find a recent, authoritative figure (company filings, Companies House, reputable business sources). Do not guess. If you cannot find a credible figure after searching, set known=false and leave revenue empty. '
+          + 'After any searching, your FINAL message must be ONLY the JSON object and nothing else.',
+        userText: 'Research the most recent annual revenue of the company "' + (payload.store || payload.company || '') + '"' + (payload.website ? (' (' + payload.website + ')') : '') + ' by searching the web. Then return ONLY JSON: '
+          + '{"revenue":"approximate most-recent annual revenue as a short string e.g. \\"£120M\\", else empty","revenue_over_2m":true/false,"known":true/false,"source_note":"one short sentence naming the source / basis"}.',
       });
       return res.status(200).json({ fields: jsonFromText(text) || {} });
     }

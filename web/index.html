@@ -2024,6 +2024,11 @@ function deliveryDatePassed(o){
   const d=parseDateLoose(o && o.delivery_date_text); if(!d) return false;
   const today=new Date(); today.setHours(23,59,59,999); return d<=today;
 }
+// True when the investigation deadline date is today or earlier (so the chase task should fire).
+function investigationDeadlinePassed(o){
+  const d=parseDateLoose(o && o.investigation_deadline); if(!d) return false;
+  const today=new Date(); today.setHours(23,59,59,999); return d<=today;
+}
 // which trigger a piece of evidence implies (method-aware for the return label)
 function evidenceTriggerFor(fieldKey, methodVal){
   switch(fieldKey){
@@ -2116,6 +2121,8 @@ function computeStage(order) {
   if (t.refunded) return 'done';
   if (t.refund_successful) return 'done';
   if (t.refund_unsuccessful) return 7;
+  // Investigation deadline reached → move to the chase stage so the follow-up task regenerates.
+  if ((t.lit_rts_sent || t.dna_email_sent) && order.investigation_deadline && !fieldFilled(order, 'refund_narrative') && investigationDeadlinePassed(order)) return 6;
   if (t.lit_rts_sent || t.dna_email_sent) return 5;
   if (t.lit_created || t.rts_created) return 4;
   // A BBM order that's been delivered is in the return-execution stage (4) regardless
@@ -2487,10 +2494,31 @@ function copyToClipboard(text, okMsg){
 // ============================================================
 // INSTRUCTION GENERATION
 // ============================================================
+// Add N working days (Mon-Fri) to a date, returning a DD/MM/YYYY string.
+function addWorkingDays(fromDate, n){
+  const d = new Date(fromDate.getTime());
+  let added = 0;
+  while(added < n){
+    d.setDate(d.getDate() + 1);
+    const day = d.getDay();
+    if(day !== 0 && day !== 6) added++;   // skip Sat(6)/Sun(0)
+  }
+  const pad = x => String(x).padStart(2,'0');
+  return pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear();
+}
 function tplVal(order, key) {
   // store_contact pulls the retailer's contact details from the store record (not the order).
   if (key === 'store_contact') {
     return (typeof formatStoreContact === 'function') ? formatStoreContact(order) : null;
+  }
+  // address in retailer-facing messages uses the SPECIFIED (deliberately-imperfect) address
+  // when one is set — the correct original stays internal for reference.
+  if (key === 'address') {
+    if (order.use_specified_address && order.specified_address && order.specified_address.trim()) {
+      return order.specified_address;
+    }
+    const a = order.address;
+    return (a === undefined || a === null || a === '') ? null : a;
   }
   const v = order[key];
   if (v === undefined || v === null || v === '' || v === 'FALSE' || v === 'TRUE') {
@@ -3123,8 +3151,12 @@ function renderInProgress(){
       + (function(){
           const isInfo = (r.task||'').indexOf('info:')===0;
           let btns = '';
-          // Re-send the message (so proof/instructions can be sent again)
-          if(!isInfo){
+          if(isInfo){
+            // Info-request card: re-open the Missing-Info form link / message for re-sending.
+            const cls = (r.task||'').split(':')[1] || '';
+            btns += '<button class="small" onclick="reSendInfoInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(cls)+'\')" title="Re-open the info form link to send again">📋 Re-send info request</button>';
+          } else {
+            // Re-send the message (so proof/instructions can be sent again)
             btns += '<button class="small" onclick="reSendInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\',\''+escAttr(r.person||'')+'\')" title="Copy the message again to re-send">📋 Re-send message</button>';
           }
           // Download any files on the order (label, proof of postage, photos…)
@@ -3133,8 +3165,11 @@ function renderInProgress(){
           FF.filter(f=> (typeof hasOrderFile==='function') ? hasOrderFile(o,f) : (o && (o[f+'_file']||o[f+'_path']))).forEach(f=>{
             btns += '<button class="small" onclick="downloadOrderFile(\''+escAttr(r.order_id)+'\',\''+f+'\')" title="Download to attach to an email">📄 '+labelFor[f]+'</button>';
           });
-          // Re-open the completion-form links view (same as the queue) so the form can be re-sent
-          if(!isInfo){
+          // Form link: completion form for tasks, info form for info-requests
+          if(isInfo){
+            const cls = (r.task||'').split(':')[1] || '';
+            btns += '<button class="small" onclick="reSendInfoInProgress(\''+escAttr(r.order_id)+'\',\''+escAttr(cls)+'\')" title="Re-open the info upload form link">🔗 Form link</button>';
+          } else {
             btns += '<button class="small" onclick="showTaskFormLinks(\''+escAttr(r.order_id)+'\',\''+escAttr(r.task)+'\',\'\')" title="Re-open the upload form link">🔗 Form link</button>';
           }
           btns += '<button class="small" onclick="openOrderModal(\''+escAttr(r.order_id)+'\')">View order</button>';
@@ -3148,6 +3183,25 @@ function renderInProgress(){
   }).join('');
 }
 // Re-send the message for an in-progress task (re-copies it with current file links).
+// Re-send an info-request (Missing-Info) form for an in-progress card: rebuild the link for that
+// access class and re-copy the message. Does not re-mark (already tracked in In Progress).
+function reSendInfoInProgress(orderId, cls){
+  const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
+  const c = (typeof classifyForMissingInfo==='function') ? classifyForMissingInfo(o) : ((typeof classifyFields==='function')?classifyFields(o):{priority:[],optional:[]});
+  const fields = c.priority.concat(c.optional).filter(f=>fieldAccessClass(f)===cls);
+  if(!fields.length){ showToast('No outstanding info for this person right now', 'info'); return; }
+  const holder = (typeof resolveAccessHolder==='function') ? resolveAccessHolder(o, cls) : {person:''};
+  const mandSet = {}; c.priority.forEach(f=>mandSet[f]=true);
+  const link = buildFormLink(o, { cls, holder, fields }, '', '', mandSet);
+  const person = holder && holder.person ? holder.person : '';
+  const p = (typeof personByName==='function')?personByName(person):null;
+  const handle = p && typeof tgDisplay==='function' ? tgDisplay(p) : '';
+  const evidence = fields.map(f=>fieldLabel(f));
+  const msg = (handle?handle+' ':'')+'— please complete this short form for '+(o.store||'this')+' order #'+orderId+':\n'+link
+            + '\n\nWhat we need: '+(evidence.join(', ')||'the details requested')+'.\nThank you!';
+  copyText(msg);
+  showToast('Info-request message re-copied — paste to send again.', 'success');
+}
 function reSendInProgress(orderId, taskCode, person){
   const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
   const tasks = (typeof getAllTasksForOrder==='function') ? getAllTasksForOrder(o) : [];
@@ -3588,6 +3642,13 @@ function openTaskForm(taskCode, orderId) {
     } else {
       h += '<input type="text" id="tf_' + f + '" placeholder="' + escapeHtml(def.help || '') + '">';
     }
+    // Investigation deadline: most stores don't give one — offer a "no deadline given" shortcut
+    // that assumes 5 working days (the chase task then regenerates once that date is reached).
+    if (f === 'investigation_deadline') {
+      h += '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;cursor:pointer">'
+         + '<input type="checkbox" id="tf_no_deadline" onchange="var d=document.getElementById(\'tf_investigation_deadline\'); if(d){ d.disabled=this.checked; if(this.checked) d.value=\'\'; }" style="width:auto;margin:0">'
+         + '<span>No investigation deadline given — assume 5 working days from today</span></label>';
+    }
     h += '</div>';
   });
   h += '</div>';
@@ -3653,6 +3714,13 @@ function submitTaskForm() {
       if (f === 'delivery_photo' && !order.delivery_photo_shows_person) order.delivery_photo_shows_person = 'no';
     }
   });
+  // "No investigation deadline given" → assume 5 working days from today so the chase task regenerates.
+  const noDeadlineEl = document.getElementById('tf_no_deadline');
+  if (noDeadlineEl && noDeadlineEl.checked) {
+    order.investigation_deadline = addWorkingDays(new Date(), 5);
+    order.investigation_deadline_assumed = true;
+    if (filled.indexOf('investigation_deadline') < 0) filled.push('investigation_deadline');
+  }
   // Auto-tick the trigger the evidence maps to (per the evidence→trigger logic)
   order.triggers = order.triggers || {};
   filled.forEach(f => {
@@ -4533,7 +4601,18 @@ function openOrderModal(orderId) {
       <div class="form-field"><label>Email</label><input type="text" id="f_email" value="${escAttr(order.email)}" onblur="ofEmailAutofill()"><div id="f_email_hint" style="font-size:11px;margin-top:3px;color:var(--ink-faded)"></div></div>
       <div class="form-field"><label>Card owner <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">handles place-order + chargeback</span></label><input type="text" id="f_card_owner" value="${escAttr(order.card_owner||'')}" placeholder="defaults to person responsible"></div>
       <div class="form-field"><label>Phone</label><input type="text" id="f_phone" value="${escAttr(order.phone)}"></div>
-      <div class="form-field full"><label>Delivery address</label><textarea id="f_address" rows="2">${escapeHtml(order.address)}</textarea></div>
+      <div class="form-field full"><label>Delivery address <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">the correct, true address (kept internal)</span></label><textarea id="f_address" rows="2">${escapeHtml(order.address)}</textarea></div>
+      <div class="form-field full" style="background:var(--surface-2,#faf9f7);border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:0">
+          <input type="checkbox" id="f_use_specified_address" ${order.use_specified_address ? 'checked' : ''} onchange="document.getElementById('f_specified_address_wrap').style.display=this.checked?'block':'none'" style="width:auto;margin:0">
+          <span>Use a specified (edited) address for the retailer</span>
+        </label>
+        <div style="font-size:11px;color:var(--ink-faded);margin:5px 0 0 26px">When ticked, this version (a few deliberate edits, same postcode so it still delivers) is what appears in retailer-facing messages and forms. The correct address above stays internal.</div>
+        <div id="f_specified_address_wrap" style="display:${order.use_specified_address ? 'block' : 'none'};margin-top:8px">
+          <textarea id="f_specified_address" rows="2" placeholder="Edited address — keep the correct postcode">${escapeHtml(order.specified_address || '')}</textarea>
+          <button type="button" class="small" style="margin-top:6px" onclick="copyCorrectToSpecified()">Copy correct address to edit from</button>
+        </div>
+      </div>
       <div class="form-field"><label>Name on delivery address</label><input type="text" id="f_delivery_name" value="${escAttr(order.delivery_name||'')}"><div style="font-size:11px;margin-top:3px;color:var(--ink-faded)">Used to identify the order to the retailer in all contact tasks</div></div>
     </div>
     <div class="form-section-title">Delivery & tracking</div>
@@ -4824,12 +4903,22 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
   else { order = DATA.orders.find(o => o.order_id === editingOrderId); }
   fields.forEach(f => { const el = document.getElementById('f_' + f); if (el) order[f] = el.value.trim(); });
+  // Specified (edited) delivery address toggle.
+  const useSpecEl = document.getElementById('f_use_specified_address');
+  if (useSpecEl) order.use_specified_address = useSpecEl.checked;
+  // Warn (don't block) if the specified address loses the correct postcode — delivery relies on it.
+  if (order.use_specified_address && order.specified_address && order.address) {
+    const pc = (order.address.match(/[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}/i) || [])[0];
+    if (pc && order.specified_address.toUpperCase().replace(/\s/g,'').indexOf(pc.toUpperCase().replace(/\s/g,'')) < 0) {
+      showToast('Note: the specified address may be missing the correct postcode ('+pc+') — delivery needs it.', 'warn');
+    }
+  }
   // Structured card: compose "Bank — Type" from the two dropdowns, then derive chargeback_bank.
   const cardBankEl = document.getElementById('f_card_bank');
   const cardTypeEl = document.getElementById('f_card_type');
@@ -5942,6 +6031,11 @@ async function researchRevenue(){
     else { status.style.color='var(--amber)'; status.textContent='No figure found — enter manually'; }
   }catch(e){ status.style.color='var(--amber)'; status.textContent='Lookup failed: '+(e.message||e); btn.disabled=false; btn.textContent=orig; }
 }
+// Copy the correct address into the specified field as a starting point to edit from.
+function copyCorrectToSpecified(){
+  const src=document.getElementById('f_address'); const dst=document.getElementById('f_specified_address');
+  if(src && dst && !dst.value.trim()){ dst.value=src.value; }
+}
 async function autofillStore(){
   const name=(document.getElementById('sf_name').value||'').trim();
   const website=(document.getElementById('sfc_website_v').value||'').trim();
@@ -5976,8 +6070,9 @@ async function autofillStore(){
     // categories
     if(Array.isArray(f.category)){ document.querySelectorAll('.sf_cat_cb').forEach(c=>{ if(f.category.includes(c.value)){ c.checked=true; } }); if(f.category.length) filled.push('category'); }
     // return courier
-    if(f.return_courier){ const sel=document.getElementById('sf_courier'); if(sel){ [...sel.options].forEach(o=>{ if(o.value===f.return_courier||o.text===f.return_courier) sel.value=o.value; }); sel.style.background='#f3e8ff'; filled.push('return courier'); } }
-    if(f.return_courier){ const sel=document.getElementById('sf_inbound'); }
+    // NOTE: auto-fill deliberately does NOT set the "Return label courier" field — that field
+    // informs the LIT / LIT-with-pic method decision and must be set manually, never by the web
+    // lookup. Auto-fill only fills genuine contact details + policy flags.
     // revenue (parse "£120M" / "£3.2B" / "120000000" into a number) → fills the eligibility field
     const revNum = parseRevenueString(f.revenue);
     if(revNum!=null){ const rEl=document.getElementById('sf_rev'); if(rEl){ rEl.value=revNum.toLocaleString(); rEl.style.background='#f3e8ff'; rEl.style.borderColor='#a855f7'; if(typeof sfBudget==='function') sfBudget(); filled.push('revenue'); } }
