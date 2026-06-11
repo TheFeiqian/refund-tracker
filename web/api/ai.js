@@ -152,7 +152,9 @@ module.exports = async (req, res) => {
         userText: 'Research the UK retailer "' + (payload.store || '') + '"' + (payload.website ? (' (website ' + payload.website + ')') : '') + ' by searching the web and reading their official site. Then return ONLY this JSON:\n'
           + '{'
           + '"website":"official UK website URL",'
-          + '"returns_portal":"online returns portal URL if they have one, else empty",'
+          + '"contact_form":"URL of their GENERAL customer-service / contact / help enquiry form — the page used to ask a question or raise a general query. This is NOT the returns page. Empty if none.",'
+          + '"returns_form":"URL of the form used SPECIFICALLY to start or request a return / RMA — the page a customer uses to return an item. This is NOT the general contact form. Empty if none.",'
+          + '"returns_portal":"URL of a self-service returns PORTAL if distinct from the returns form, else empty",'
           + '"phone":"official UK customer-service phone from their site, else empty",'
           + '"email":"official customer-service email from their site, else empty",'
           + '"live_chat":true/false,'
@@ -163,7 +165,7 @@ module.exports = async (req, res) => {
           + '"revenue":"approximate most-recent annual revenue as a short string e.g. \\"£120M\\", else empty",'
           + '"revenue_over_2m":true/false,'
           + '"notes":"one short sentence on their returns policy"'
-          + '}.',
+          + '}. IMPORTANT: contact_form and returns_form are DIFFERENT pages — never put the same URL in both, and never put a returns URL in contact_form or vice versa. If you are unsure which one a page is, leave the less certain one empty.',
       });
       return res.status(200).json({ fields: jsonFromText(text) || {} });
     }

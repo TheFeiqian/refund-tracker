@@ -754,7 +754,17 @@ async function hostedFetchAll() {
   __orderHashes = {}; list.forEach(o => __orderHashes[o.order_id] = __hash(o));
   const flags = {};
   (stores || []).forEach(s => {
+    const contact = s.contact || {};
+    // Backfill: stores saved before `_assessed` existed have no flag. If such a store already
+    // has real setup data (contact details, a category, or drop-off flags), treat it as assessed
+    // so previously-completed stores don't revert to incomplete after this update.
+    const hadSetup = !!(contact && (contact.phone || contact.email || contact.portal || contact.contact_form || contact.returns_form || contact.website))
+      || (Array.isArray(s.cat) && s.cat.length > 0)
+      || s.unwanted === true || s.damaged === true || s.collection === true;
     flags[s.name] = {
+      // `_assessed` was persisted inside the contact JSON; restore it so the store's
+      // "complete" status survives reloads instead of resetting every new version.
+      assessed: (contact._assessed !== undefined) ? !!contact._assessed : hadSetup,
       unwanted: s.unwanted, damaged: s.damaged, collection: s.collection,
       cat: s.cat || [], inbound_courier: s.inbound_courier || '',
       courier: s.return_label_courier || '', revenue: s.revenue,
@@ -841,11 +851,15 @@ function hostedGetStoreFlags() { return Object.assign({}, STORE_SEED, window.__H
 function hostedSetStoreFlags(name, rec) {
   window.__HOSTED.storeFlags[name] = rec;
   if (!sb) return;
+  // Persist assessment + the new contact-form/returns-form fields inside the contact JSON
+  // (the `stores` table has no dedicated columns for them, and `contact` is already a JSON blob).
+  // This is what stops a store's "complete" status resetting on every reload.
+  const contactBlob = Object.assign({}, rec.contactInfo || {}, { _assessed: !!rec.assessed });
   sb.from('stores').upsert({
     name, unwanted: rec.unwanted, damaged: rec.damaged, collection: rec.collection,
     cat: rec.cat || [], inbound_courier: rec.inbound_courier || null,
     return_label_courier: rec.courier || null, revenue: (rec.revenue ?? null),
-    contact: rec.contactInfo || null,
+    contact: contactBlob,
   }, { onConflict: 'name' }).then(() => sb.from('audit_log').insert({ entity: 'store', entity_id: name, action: 'upsert' }));
 }
 
@@ -2378,6 +2392,12 @@ function clearTaskSent(taskId){
 // submission completes it (completed_at), so we can measure time-to-complete.
 // ============================================================
 function formTrackStore(){ if(!DATA._formTrack) DATA._formTrack={}; return DATA._formTrack; }
+// True when an info-request form for this order + access class has been sent (and not completed).
+function isInfoFormSent(orderId, cls){
+  const s = formTrackStore();
+  const rec = s[orderId + '::info:' + cls];
+  return !!(rec && rec.sent_at && !rec.completed_at);
+}
 function formTrackKey(orderId, taskCode){ return orderId + '::' + (taskCode||''); }
 function markFormSent(orderId, taskCode, person, evidenceList){
   const s = formTrackStore();
@@ -2542,7 +2562,10 @@ function formatStoreContact(order){
   const parts = [];
   if(ci.phone) parts.push('phone ' + ci.phone);
   if(ci.email) parts.push('email ' + ci.email);
-  if(ci.portal) parts.push('returns portal ' + ci.portal);
+  if(ci.returns_form) parts.push('returns form ' + ci.returns_form);
+  if(ci.returns_portal) parts.push('returns portal ' + ci.returns_portal);
+  if(ci.portal && ci.portal!==ci.returns_portal) parts.push('returns portal ' + ci.portal);
+  if(ci.contact_form) parts.push('contact form ' + ci.contact_form);
   if(ci.website) parts.push(ci.website);
   if(ci.chat) parts.push('live chat on site');
   return parts.length ? parts.join(' · ') : null;
@@ -3233,6 +3256,7 @@ function visibleQueueTasks(){
   const personFilter = (document.getElementById('priorityPersonFilter')||{}).value || 'all';
   const search = ((document.getElementById('prioritySearch')||{}).value||'').toLowerCase().trim();
   let tasks = getAllTasksWithPriority();
+  // Send-all should only target tasks NOT already sent.
   const ft = (typeof formTrackStore==='function') ? formTrackStore() : {};
   tasks = tasks.filter(t => { const k = t.order.order_id + '::' + t.task.type.code; const rec = ft[k]; return !(rec && rec.sent_at && !rec.completed_at); });
   if (taskFilter !== 'all') tasks = tasks.filter(t => t.task.type.code === taskFilter);
@@ -3287,9 +3311,9 @@ function renderPriorityQueue() {
   }
   
   let tasks = getAllTasksWithPriority();
-  // Tasks whose completion form has been sent (and not yet completed) move to the In Progress tab.
+  // Sent tasks STAY in the queue, shown with a green "✓ Sent" button (and also tracked in In
+  // Progress). Only completed tasks leave the queue.
   const ft = (typeof formTrackStore==='function') ? formTrackStore() : {};
-  tasks = tasks.filter(t => { const k = t.order.order_id + '::' + t.task.type.code; const rec = ft[k]; return !(rec && rec.sent_at && !rec.completed_at); });
   if (taskFilter !== 'all') tasks = tasks.filter(t => t.task.type.code === taskFilter);
   if (personFilter !== 'all') tasks = tasks.filter(t => t.order.person === personFilter);
   if (search) tasks = tasks.filter(t =>
@@ -4078,7 +4102,12 @@ function renderAccessForms(order){
          + '<input type="text" readonly value="'+escAttr(link)+'" style="flex:1;min-width:180px;font-size:11px" onclick="this.select()">'
          + '<button class="small" onclick="copyText(\''+escAttr(link)+'\')">📋 Copy link</button>'
          + '<button class="small" onclick="copyFormSendMessage(\''+escAttr(order.order_id)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(link)+'\')">📋 Copy message</button>'
-         + '<button class="primary small" onclick="sendInfoForm(\''+escAttr(order.order_id)+'\',\''+escAttr(g.cls)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(link)+'\')">✓ Sent — track in progress</button>'
+         + (function(){
+             const sent = (typeof isInfoFormSent==='function') && isInfoFormSent(order.order_id, g.cls);
+             return sent
+               ? '<button class="small" style="background:var(--green,#2f9e44);color:#fff;font-weight:600" disabled>✓ Sent</button>'
+               : '<button class="primary small" onclick="sendInfoForm(\''+escAttr(order.order_id)+'\',\''+escAttr(g.cls)+'\',\''+escAttr(g.holder.person)+'\',\''+escAttr(link)+'\')">✓ Sent — track in progress</button>';
+           })()
          + '</div>';
     }
     h += '</div>';
@@ -4138,6 +4167,11 @@ function sendInfoForm(orderId, cls, person, link){
   copyText(msg);
   markFormSent(orderId, 'info:'+cls, person, evidence);
   renderAll();
+  // Re-render the open Missing-Info modal so this button flips to its green "Sent" state.
+  const modal = document.getElementById('formModal');
+  if (modal && modal.classList.contains('show') && typeof openMissingInfoForm === 'function') {
+    try { openMissingInfoForm(orderId); } catch(e){}
+  }
   showToast('Message copied + form marked sent to '+person+' — tracking in In Progress.', 'success');
 }
 // Send a completion form: copy a message that says a link is being sent for them to UPLOAD
@@ -5984,6 +6018,8 @@ function openStoreForm(name) {
     <div style="border-top:1px solid var(--line);margin:14px 0;padding-top:12px;font-weight:600">Contact <span style="font-weight:400;color:var(--ink-faded);font-size:12px">&mdash; tick what the store has</span></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_phone_cb" ${ci.phone?'checked':''} onchange="document.getElementById('sfc_phone').style.display=this.checked?'block':'none'"> Has phone?</label><div id="sfc_phone" style="display:${ci.phone?'block':'none'};margin-top:6px"><input type="text" id="sfc_phone_v" value="${escAttr(ci.phone||'')}" placeholder="+44..."></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_email_cb" ${ci.email?'checked':''} onchange="document.getElementById('sfc_email').style.display=this.checked?'block':'none'"> Has email?</label><div id="sfc_email" style="display:${ci.email?'block':'none'};margin-top:6px"><input type="text" id="sfc_email_v" value="${escAttr(ci.email||'')}" placeholder="returns@..."></div></div>
+    <div class="form-field"><label><input type="checkbox" id="sfc_contactform_cb" ${ci.contact_form?'checked':''} onchange="document.getElementById('sfc_contactform').style.display=this.checked?'block':'none'"> Has contact form? <span style="font-size:10px;color:var(--ink-faded)">(general customer-service enquiries)</span></label><div id="sfc_contactform" style="display:${ci.contact_form?'block':'none'};margin-top:6px"><input type="text" id="sfc_contactform_v" value="${escAttr(ci.contact_form||'')}" placeholder="https://… contact / help form URL"></div></div>
+    <div class="form-field"><label><input type="checkbox" id="sfc_returnsform_cb" ${ci.returns_form?'checked':''} onchange="document.getElementById('sfc_returnsform').style.display=this.checked?'block':'none'"> Has returns form? <span style="font-size:10px;color:var(--ink-faded)">(specifically to start a return)</span></label><div id="sfc_returnsform" style="display:${ci.returns_form?'block':'none'};margin-top:6px"><input type="text" id="sfc_returnsform_v" value="${escAttr(ci.returns_form||'')}" placeholder="https://… returns request / RMA form URL"></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_portal_cb" ${ci.portal?'checked':''} onchange="document.getElementById('sfc_portal').style.display=this.checked?'block':'none'"> Has returns portal?</label><div id="sfc_portal" style="display:${ci.portal?'block':'none'};margin-top:6px"><input type="text" id="sfc_portal_v" value="${escAttr(ci.portal||'')}" placeholder="https://..."></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_chat_cb" ${ci.chat?'checked':''} onchange="document.getElementById('sfc_chat').style.display=this.checked?'block':'none'"> Has live chat?</label><div id="sfc_chat" style="display:${ci.chat?'block':'none'};margin-top:6px"><input type="text" id="sfc_chat_v" value="${ci.chat&&ci.chat!==true?escAttr(ci.chat):(ci.chat?'yes':'')}" placeholder="chat link or yes"></div></div>
   </div>
@@ -6059,6 +6095,9 @@ async function autofillStore(){
     // website + returns portal
     if(f.website){ setV('sfc_website_v', f.website); filled.push('website'); }
     if(f.returns_portal){ tick('sfc_portal_cb','sfc_portal',true); setV('sfc_portal_v', f.returns_portal); filled.push('returns portal'); }
+    // contact form vs returns form — kept SEPARATE (do not conflate the two)
+    if(f.contact_form){ tick('sfc_contactform_cb','sfc_contactform',true); setV('sfc_contactform_v', f.contact_form); filled.push('contact form'); }
+    if(f.returns_form){ tick('sfc_returnsform_cb','sfc_returnsform',true); setV('sfc_returnsform_v', f.returns_form); filled.push('returns form'); }
     // phone / email / chat
     if(f.phone){ tick('sfc_phone_cb','sfc_phone',true); setV('sfc_phone_v', f.phone); filled.push('phone'); }
     if(f.email){ tick('sfc_email_cb','sfc_email',true); setV('sfc_email_v', f.email); filled.push('email'); }
@@ -6088,6 +6127,8 @@ function saveStoreForm(){
     website: cv('sfc_website_v'),
     phone: document.getElementById('sfc_phone_cb').checked?cv('sfc_phone_v'):'',
     email: document.getElementById('sfc_email_cb').checked?cv('sfc_email_v'):'',
+    contact_form: document.getElementById('sfc_contactform_cb').checked?cv('sfc_contactform_v'):'',
+    returns_form: document.getElementById('sfc_returnsform_cb').checked?cv('sfc_returnsform_v'):'',
     portal: document.getElementById('sfc_portal_cb').checked?cv('sfc_portal_v'):'',
     chat: document.getElementById('sfc_chat_cb').checked?(cv('sfc_chat_v')||true):false };
   const cats=[...document.querySelectorAll('.sf_cat_cb')].filter(c=>c.checked).map(c=>c.value);
