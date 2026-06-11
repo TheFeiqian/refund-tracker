@@ -790,6 +790,16 @@ async function hostedFetchAll() {
     const { data: dg } = await sb.from('app_state').select('value').eq('key', 'delegatees').maybeSingle();
     window.__HOSTED.delegatees = (dg && dg.value) ? dg.value : [];
   } catch (e) { window.__HOSTED.delegatees = []; }
+  // Deleted-order IDs — so deletions stick across reloads and aren't re-seeded.
+  try {
+    const { data: del } = await sb.from('app_state').select('value').eq('key', 'deleted_orders').maybeSingle();
+    window.__HOSTED.deletedOrders = (del && del.value) ? del.value : [];
+  } catch (e) { window.__HOSTED.deletedOrders = []; }
+  // Defensive: drop any deleted orders that may still be in the DB from before this fix.
+  if (window.__HOSTED.deletedOrders.length) {
+    const dset = {}; window.__HOSTED.deletedOrders.forEach(id => dset[id] = true);
+    window.__HOSTED.orders = (window.__HOSTED.orders || []).filter(o => !dset[o.order_id]);
+  }
 }
 
 let __burndownHash = '';
@@ -1232,8 +1242,8 @@ const TASK_CATALOG = [
   { code: 'place_order', name: 'Place the order', stage: 1, sla: 4, owner_only: true, info_only: false,
     appears_when: '(default state — no triggers ticked)',
     advances_when: 'Item ordered ✓ → Stage 2',
-    completed_when: (o) => !!(o.triggers && o.triggers.item_ordered) || fieldFilled(o, 'store_order_number') || !!o.order_confirmation_file,
-    completed_via: 'Item ordered trigger ticked, OR store_order_number filled, OR an order confirmation file is uploaded',
+    completed_when: (o) => !!(o.triggers && o.triggers.item_ordered) || fieldFilled(o, 'store_order_number'),
+    completed_via: 'Item ordered trigger ticked, OR store_order_number filled (the order confirmation PDF is optional and never completes this task on its own)',
     info_needed: 'Items, store, card details, delivery address, contact email + phone',
     instruction_template: 'Hi {person},\n\nPlease place this order using your usual card. Details:\n\n  Store: {store}\n  Items: {items}\n  Approx price: £{price}\n  Card to use: {card_used}\n  Delivery address: {address}\n  Contact email: {email}\n  Contact phone: {phone}\n\nOnce placed, reply with the order number and forward the confirmation email.\n\nOur internal ref: {order_id}' },
 
@@ -1684,11 +1694,15 @@ async function syncSubmissions(){
     // a posting task completes on the proof-of-postage UPLOAD even before AI parses the date/tracking
     if((sub.files && sub.files.proof_of_postage) || o.proof_of_postage_path){ o.triggers.lit_rts_sent = true; }
     if(o.delivery_date_text && typeof deliveryDatePassed==='function' && deliveryDatePassed(o)) o.triggers.item_delivered = true;
-    // record completion time for the In-Progress tracker (task this submission was for)
+    // record completion time for the In-Progress tracker.
+    // A delegated TASK completes under its task code; an INFO-REQUEST completes under info:<cls>.
     if(sub.task){ markSubmissionComplete(sub.order_id, sub.task); }
+    if(sub.access_class){ markSubmissionComplete(sub.order_id, 'info:' + sub.access_class); }
     applied++;
     try { await sb.from('submissions').update({ processed:true }).eq('id', sub.id); } catch(e){}
   }
+  // After merging, auto-complete any open info-request whose necessary fields are now all filled.
+  if(typeof reconcileInfoRequests === 'function') reconcileInfoRequests();
   if(applied){ DATA.orders.forEach(o=>applyEvidenceAdvances(o)); if(typeof stampRequiredFields==='function') DATA.orders.forEach(o=>stampRequiredFields(o)); saveData(); renderAll(); showToast(applied+' external submission'+(applied>1?'s':'')+' received — order updated', 'success'); }
   return applied;
 }
@@ -1956,11 +1970,16 @@ let formOrderId = null;
 
 function mergeOrdersWithInitial(saved) {
   const initial = JSON.parse(JSON.stringify(INITIAL_ORDERS));
-  if (!(saved && Array.isArray(saved.orders))) return { orders: initial };
+  // Deleted orders must never be re-seeded from INITIAL_ORDERS.
+  const deleted = {};
+  const delList = (window.__HOSTED && window.__HOSTED.deletedOrders) ? window.__HOSTED.deletedOrders
+                 : (saved && saved._deletedOrders) ? saved._deletedOrders : [];
+  (delList || []).forEach(id => deleted[id] = true);
+  if (!(saved && Array.isArray(saved.orders))) return { orders: initial.filter(io => !deleted[io.order_id]) };
   const savedById = {};
   saved.orders.forEach(o => { if (o && o.order_id) savedById[o.order_id] = o; });
   const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
-  const merged = initial.map(io => {
+  const merged = initial.filter(io => !deleted[io.order_id]).map(io => {
     const so = savedById[io.order_id];
     if (!so) return io;
     const m = Object.assign({}, io, so);
@@ -1974,7 +1993,7 @@ function mergeOrdersWithInitial(saved) {
     delete savedById[io.order_id];
     return m;
   });
-  Object.keys(savedById).forEach(id => merged.push(savedById[id]));
+  Object.keys(savedById).forEach(id => { if (!deleted[id]) merged.push(savedById[id]); });
   const out = { orders: merged };
   Object.keys(saved).forEach(k => { if (k !== 'orders' && out[k] === undefined) out[k] = saved[k]; });
   return out;
@@ -2046,7 +2065,7 @@ function investigationDeadlinePassed(o){
 // which trigger a piece of evidence implies (method-aware for the return label)
 function evidenceTriggerFor(fieldKey, methodVal){
   switch(fieldKey){
-    case 'order_confirmation': case 'store_order_number': return 'item_ordered';
+    case 'store_order_number': return 'item_ordered';
     case 'delivery_photo': return 'item_delivered';
     case 'return_label_pdf': return (methodVal==='RTS') ? 'rts_created' : 'lit_created';
     case 'proof_of_postage': case 'collection_handover': return 'lit_rts_sent';
@@ -2069,7 +2088,9 @@ function applyEvidenceAdvances(order){
   }
   // 2) Each evidence field that's present flips the trigger it proves.
   const m = (order.method||'');
-  ['order_confirmation','store_order_number','delivery_photo','return_label_pdf',
+  // order_confirmation is intentionally NOT here — it's a parsing aid only and must never
+  // advance the order or complete a task. Only store_order_number proves the order exists.
+  ['store_order_number','delivery_photo','return_label_pdf',
    'proof_of_postage','collection_handover','refund_refused_date','refund_received_date'
   ].forEach(f=>{
     if(present(f)){ const tk = evidenceTriggerFor(f, m); if(tk) t[tk] = true; }
@@ -2119,7 +2140,7 @@ async function hostedSaveTrackers() {
     await sb.from('app_state').upsert({ key: 'delegatees', value: DATA._delegatees || [] }, { onConflict: 'key' });
   } catch (e) {}
 }
-function saveData() { hostedSave(); hostedSaveTrackers(); }
+function saveData() { if(typeof reconcileInfoRequests==='function') reconcileInfoRequests(); hostedSave(); hostedSaveTrackers(); }
 
 // ============================================================
 // COMPUTATIONS
@@ -2405,6 +2426,31 @@ function markFormSent(orderId, taskCode, person, evidenceList){
   s[k] = Object.assign({}, s[k], { order_id:orderId, task:taskCode||'', person:person||'', evidence:(evidenceList||[]), sent_at: Date.now(), completed_at: null });
   saveData();
 }
+// The fields an info-request for this access class genuinely NEEDS filled.
+// order_confirmation is deliberately excluded — it's only ever an optional parsing aid and must
+// never keep an info-request (or any task) open.
+function necessaryInfoFields(order, cls){
+  const c = (typeof classifyForMissingInfo === 'function') ? classifyForMissingInfo(order)
+          : ((typeof classifyFields === 'function') ? classifyFields(order) : {priority:[],optional:[]});
+  return (c.priority || []).filter(f => f !== 'order_confirmation' && (typeof fieldAccessClass === 'function' ? fieldAccessClass(f) === cls : true));
+}
+// Auto-complete rule: any open info-request whose necessary fields are now ALL filled is marked done.
+function reconcileInfoRequests(){
+  const s = formTrackStore();
+  Object.keys(s).forEach(k => {
+    const rec = s[k];
+    if(!rec || rec.completed_at) return;
+    const m = /^(.*)::info:(.*)$/.exec(k);
+    if(!m) return;
+    const orderId = m[1], cls = m[2];
+    const order = DATA.orders.find(o => o.order_id === orderId);
+    if(!order) return;
+    const need = necessaryInfoFields(order, cls);
+    // If there are no outstanding necessary fields for this class, the request is satisfied.
+    const allFilled = need.every(f => (typeof fieldFilled === 'function') ? fieldFilled(order, f) : !!order[f]);
+    if(allFilled){ rec.completed_at = Date.now(); }
+  });
+}
 function markSubmissionComplete(orderId, taskCode){
   const s = formTrackStore();
   const k = formTrackKey(orderId, taskCode);
@@ -2625,7 +2671,9 @@ function fileSizeFmt(bytes) {
 // Build a file-input row (used in form modal). Stores dataUrl on the order under {field}_file,
 // the filename under {field}_filename, and MIME under {field}_filetype.
 function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType, disabled, fid) {
+  const order = DATA.orders.find(o => o.order_id === (typeof formOrderId !== 'undefined' && formOrderId ? formOrderId : editingOrderId));
   const accept = fieldKey === 'return_label_pdf' ? 'image/*,application/pdf' : 'image/*';
+  const multiAttr = fieldKey === 'return_label_pdf' ? 'multiple' : '';
   const isImg = fileType && fileType.startsWith('image/');
   const isPdf = fileType === 'application/pdf';
   const icon = isImg ? '🖼️' : isPdf ? '📄' : '📎';
@@ -2635,8 +2683,8 @@ function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType
       <div style="display:flex;gap:8px;align-items:flex-start">
         <input type="text" id="${fid}" value="${escAttr(textValue || '')}" ${disabled} placeholder="Type a value, or attach a file →" style="flex:1">
         <label class="file-attach-btn ${disabled ? 'disabled' : ''}">
-          <span>📎 ${hasFile ? 'Replace' : 'Attach'}</span>
-          <input type="file" accept="${accept}" onchange="onFormFieldFileUpload(this, '${escAttr(fieldKey)}')" ${disabled}>
+          <span>📎 ${fieldKey === 'return_label_pdf' ? (hasFile ? 'Add more' : 'Attach') : (hasFile ? 'Replace' : 'Attach')}</span>
+          <input type="file" accept="${accept}" ${multiAttr} onchange="onFormFieldFileUpload(this, '${escAttr(fieldKey)}')" ${disabled}>
         </label>
       </div>
       ${hasFile ? `
@@ -2653,32 +2701,63 @@ function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType
           </div>
         </div>
       ` : ''}
+      ${fieldKey === 'return_label_pdf' && order && Array.isArray(order.return_label_pdfs) && order.return_label_pdfs.length > 1 ? `
+        <div style="margin-top:8px;border-top:1px dashed var(--line);padding-top:8px">
+          <div style="font-size:11px;color:var(--ink-faded);margin-bottom:4px">All return labels (${order.return_label_pdfs.length}):</div>
+          ${order.return_label_pdfs.map((lbl, i) => `
+            <div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
+              <span>${(lbl.filetype === 'application/pdf') ? '📄' : '🖼️'}</span>
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(lbl.filename || ('label ' + (i+1)))}</span>
+              <button type="button" class="tiny" onclick="downloadReturnLabelAt(${i}); event.preventDefault();">Download</button>
+              <button type="button" class="tiny danger" onclick="removeReturnLabelAt(${i}); event.preventDefault();">Remove</button>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
     </div>
   `;
 }
 
 async function onFormFieldFileUpload(input, fieldKey) {
-  const file = input.files[0];
-  if (!file) return;
-  if (file.size > 4 * 1024 * 1024) {
-    if (!confirm(`This file is ${fileSizeFmt(file.size)}. Large files may exceed your browser’s storage limit. Continue?`)) {
-      input.value = '';
-      return;
+  const files = Array.from(input.files || []);
+  if (!files.length) return;
+  // Return labels can be multiple; everything else is single.
+  const allowMultiple = (fieldKey === 'return_label_pdf');
+  const toProcess = allowMultiple ? files : [files[0]];
+  for (const file of toProcess) {
+    if (file.size > 4 * 1024 * 1024) {
+      if (!confirm(`This file is ${fileSizeFmt(file.size)}. Large files may exceed your browser’s storage limit. Continue?`)) {
+        input.value = '';
+        continue;
+      }
     }
+    await __handleOneFormFileUpload(file, fieldKey);
   }
+  input.value = '';
+}
+async function __handleOneFormFileUpload(file, fieldKey) {
   try {
     const dataUrl = await readFileAsDataURL(file);
     if (!formOrderId) return;
     const order = DATA.orders.find(o => o.order_id === formOrderId);
     if (!order) return;
-    order[fieldKey + '_file'] = dataUrl;
-    order[fieldKey + '_filename'] = file.name;
-    order[fieldKey + '_filetype'] = file.type;
-    // Also set the text value to the filename if currently empty
-    if (!order[fieldKey]) order[fieldKey] = file.name;
+    // Multiple return labels: keep every label in an array, plus the first as the primary field.
+    if (fieldKey === 'return_label_pdf') {
+      if (!Array.isArray(order.return_label_pdfs)) order.return_label_pdfs = [];
+      order.return_label_pdfs.push({ file: dataUrl, filename: file.name, filetype: file.type, added: Date.now() });
+    }
+    const isFirstLabel = (fieldKey === 'return_label_pdf') && order.return_label_pdfs.length === 1;
+    // The primary single-field value drives completion + AI parsing. For a return label, only the
+    // FIRST upload sets it; later labels are added to the list without disturbing the primary.
+    if (fieldKey !== 'return_label_pdf' || isFirstLabel || !order[fieldKey + '_file']) {
+      order[fieldKey + '_file'] = dataUrl;
+      order[fieldKey + '_filename'] = file.name;
+      order[fieldKey + '_filetype'] = file.type;
+      if (!order[fieldKey]) order[fieldKey] = file.name;
+    }
     saveData();
     showToast(`Attached ${file.name}`, 'success');
-    
+
     // AI PARSE: proof of postage AND return label trigger automatic extraction.
     if (fieldKey === 'proof_of_postage' || fieldKey === 'return_label_pdf') {
       const isLabel = fieldKey === 'return_label_pdf';
@@ -2923,7 +3002,34 @@ function removeAttachedFile(fieldKey, ctx) {
   showToast('Attachment removed', 'success');
 }
 
-// ============================================================
+// Download / remove one of the multiple return labels by index.
+function downloadReturnLabelAt(i){
+  const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
+  if(!order || !Array.isArray(order.return_label_pdfs) || !order.return_label_pdfs[i]) return;
+  const lbl = order.return_label_pdfs[i];
+  const src = lbl.file || lbl.path;
+  if(!src){ showToast('No file data for this label', 'info'); return; }
+  const a = document.createElement('a'); a.href = src; a.download = lbl.filename || ('return-label-'+(i+1)); a.target='_blank'; a.click();
+}
+function removeReturnLabelAt(i){
+  const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
+  if(!order || !Array.isArray(order.return_label_pdfs)) return;
+  if(!confirm('Remove this return label?')) return;
+  order.return_label_pdfs.splice(i, 1);
+  // If the primary (first) was removed, promote the next to the primary single-field value.
+  if(order.return_label_pdfs.length){
+    const first = order.return_label_pdfs[0];
+    order.return_label_pdf_file = first.file || ''; order.return_label_pdf_filename = first.filename || ''; order.return_label_pdf_filetype = first.filetype || '';
+    order.return_label_pdf = first.filename || order.return_label_pdf;
+  } else {
+    order.return_label_pdf = '';
+    delete order.return_label_pdf_file; delete order.return_label_pdf_filename; delete order.return_label_pdf_filetype;
+  }
+  saveData();
+  if(formOrderId && document.getElementById('formModal') && document.getElementById('formModal').classList.contains('show')) openMissingInfoForm(formOrderId);
+  else if(editingOrderId) openOrderModal(editingOrderId);
+  renderAll();
+}
 // AI PROOF-OF-POSTAGE PARSING
 // Triggered automatically when a proof_of_postage file is attached.
 // Extracts: postage_date, outbound_tracking, outbound_courier, posted_from
@@ -5022,8 +5128,24 @@ function saveOrderEdit() {
 function deleteCurrentOrder() {
   if (!editingOrderId) return;
   if (!confirm('Delete this order? This cannot be undone (unless you re-import).')) return;
-  DATA.orders = DATA.orders.filter(o => o.order_id !== editingOrderId);
+  const id = editingOrderId;
+  DATA.orders = DATA.orders.filter(o => o.order_id !== id);
+  // Record the deletion so it survives reloads/updates and is never re-seeded from INITIAL_ORDERS.
+  recordDeletedOrder(id);
+  // Remove the row from the database too (hostedSave only upserts, it never deletes).
+  try { if (typeof sb !== 'undefined' && sb) { sb.from('orders').delete().eq('order_id', id); } } catch(e){}
   saveData(); closeOrderModal(); renderAll();
+}
+// Persistent set of deleted order IDs (app_state key 'deleted_orders'), so deletions stick.
+function deletedOrderSet(){
+  if(!DATA._deletedOrders) DATA._deletedOrders = (window.__HOSTED && window.__HOSTED.deletedOrders) ? window.__HOSTED.deletedOrders.slice() : [];
+  return DATA._deletedOrders;
+}
+function recordDeletedOrder(id){
+  const s = deletedOrderSet();
+  if(s.indexOf(id) < 0) s.push(id);
+  if(window.__HOSTED) window.__HOSTED.deletedOrders = s.slice();
+  try { if (typeof sb !== 'undefined' && sb) { sb.from('app_state').upsert({ key:'deleted_orders', value: s }, { onConflict:'key' }); } } catch(e){}
 }
 
 document.getElementById('orderModal').addEventListener('click', e => { if (e.target.id === 'orderModal') closeOrderModal(); });
@@ -6020,7 +6142,6 @@ function openStoreForm(name) {
     <div class="form-field"><label><input type="checkbox" id="sfc_email_cb" ${ci.email?'checked':''} onchange="document.getElementById('sfc_email').style.display=this.checked?'block':'none'"> Has email?</label><div id="sfc_email" style="display:${ci.email?'block':'none'};margin-top:6px"><input type="text" id="sfc_email_v" value="${escAttr(ci.email||'')}" placeholder="returns@..."></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_contactform_cb" ${ci.contact_form?'checked':''} onchange="document.getElementById('sfc_contactform').style.display=this.checked?'block':'none'"> Has contact form? <span style="font-size:10px;color:var(--ink-faded)">(general customer-service enquiries)</span></label><div id="sfc_contactform" style="display:${ci.contact_form?'block':'none'};margin-top:6px"><input type="text" id="sfc_contactform_v" value="${escAttr(ci.contact_form||'')}" placeholder="https://… contact / help form URL"></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_returnsform_cb" ${ci.returns_form?'checked':''} onchange="document.getElementById('sfc_returnsform').style.display=this.checked?'block':'none'"> Has returns form? <span style="font-size:10px;color:var(--ink-faded)">(specifically to start a return)</span></label><div id="sfc_returnsform" style="display:${ci.returns_form?'block':'none'};margin-top:6px"><input type="text" id="sfc_returnsform_v" value="${escAttr(ci.returns_form||'')}" placeholder="https://… returns request / RMA form URL"></div></div>
-    <div class="form-field"><label><input type="checkbox" id="sfc_portal_cb" ${ci.portal?'checked':''} onchange="document.getElementById('sfc_portal').style.display=this.checked?'block':'none'"> Has returns portal?</label><div id="sfc_portal" style="display:${ci.portal?'block':'none'};margin-top:6px"><input type="text" id="sfc_portal_v" value="${escAttr(ci.portal||'')}" placeholder="https://..."></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_chat_cb" ${ci.chat?'checked':''} onchange="document.getElementById('sfc_chat').style.display=this.checked?'block':'none'"> Has live chat?</label><div id="sfc_chat" style="display:${ci.chat?'block':'none'};margin-top:6px"><input type="text" id="sfc_chat_v" value="${ci.chat&&ci.chat!==true?escAttr(ci.chat):(ci.chat?'yes':'')}" placeholder="chat link or yes"></div></div>
   </div>
   <div class="modal-foot"><button class="primary" onclick="saveStoreForm()">Save store</button><button onclick="closeStoreForm()">Cancel</button></div></div>`;
@@ -6094,7 +6215,8 @@ async function autofillStore(){
     let filled=[];
     // website + returns portal
     if(f.website){ setV('sfc_website_v', f.website); filled.push('website'); }
-    if(f.returns_portal){ tick('sfc_portal_cb','sfc_portal',true); setV('sfc_portal_v', f.returns_portal); filled.push('returns portal'); }
+    // returns portal (legacy) now feeds the returns-form field only if returns_form wasn't given
+    if(f.returns_portal && !f.returns_form){ tick('sfc_returnsform_cb','sfc_returnsform',true); setV('sfc_returnsform_v', f.returns_portal); filled.push('returns form'); }
     // contact form vs returns form — kept SEPARATE (do not conflate the two)
     if(f.contact_form){ tick('sfc_contactform_cb','sfc_contactform',true); setV('sfc_contactform_v', f.contact_form); filled.push('contact form'); }
     if(f.returns_form){ tick('sfc_returnsform_cb','sfc_returnsform',true); setV('sfc_returnsform_v', f.returns_form); filled.push('returns form'); }
@@ -6129,7 +6251,6 @@ function saveStoreForm(){
     email: document.getElementById('sfc_email_cb').checked?cv('sfc_email_v'):'',
     contact_form: document.getElementById('sfc_contactform_cb').checked?cv('sfc_contactform_v'):'',
     returns_form: document.getElementById('sfc_returnsform_cb').checked?cv('sfc_returnsform_v'):'',
-    portal: document.getElementById('sfc_portal_cb').checked?cv('sfc_portal_v'):'',
     chat: document.getElementById('sfc_chat_cb').checked?(cv('sfc_chat_v')||true):false };
   const cats=[...document.querySelectorAll('.sf_cat_cb')].filter(c=>c.checked).map(c=>c.value);
   let revRaw=(document.getElementById('sf_rev').value||'').replace(/[,£\s]/g,'');
