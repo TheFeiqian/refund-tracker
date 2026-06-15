@@ -1323,7 +1323,7 @@ const TASK_CATALOG = [
     completed_when: (o) => fieldFilled(o, 'collection_handover') || !!o.collection_handover_file,
     completed_via: 'collection_handover filled OR a handover photo/receipt is attached',
     info_needed: 'Items packed, collection slot, anyone present at the address',
-    instruction_template: 'Hi {person},\n\nCollection is booked for {store} order {order_id} ({items}).\n\n  Collection date: {collection_date}\n  Address: {address}\n\nPlease have the items packed and ready, hand them to the courier, and reply with a photo of the collection receipt / driver confirmation (we need proof the items left, in case we have to chargeback).' },
+    instruction_template: 'Hi {person},\n\nCollection is booked for {store} order {order_id} ({items}).\n\n  Collection date: {collection_date}\n  Collection time: {collection_time}\n  Address: {address}\n\nPlease have the items packed and ready, hand them to the courier, and reply with a photo of the collection receipt / driver confirmation (we need proof the items left, in case we have to chargeback).' },
 
   { code: 'contact_retailer_investigation', name: 'Open formal investigation', stage: 5, sla: 4, owner_only: false, info_only: false,
     appears_when: 'LIT/RTS sent ✓ OR DNA email sent ✓ (stage 5)',
@@ -1365,7 +1365,7 @@ const STAGE_FIELDS = {
   1: { name: 'Pre-Order', desc: 'Information needed before the order is placed', fields: ['order_id', 'store', 'items', 'item_quantity', 'total_weight_kg', 'total_volume_l', 'store_order_number', 'card_used', 'price', 'phone', 'email', 'address', 'person'] },
   2: { name: 'Awaiting Delivery', desc: 'Once the order is placed and being shipped', fields: ['inbound_tracking', 'inbound_courier', 'order_date'] },
   3: { name: 'Delivered', desc: 'Item arrived; choose return method', fields: ['delivery_date_text', 'delivery_photo', 'delivery_photo_shows_person', 'item_damaged', 'damage_photo', 'bought_by_mistake', 'method'] },
-  4: { name: 'Return Sent', desc: 'Label generated AND parcel posted (or collection booked + handed over for BBM)', fields: ['return_label_pdf', 'return_label_date', 'outbound_tracking', 'outbound_courier', 'proof_of_postage', 'postage_date', 'posted_from', 'collection_date', 'collection_handover'] },
+  4: { name: 'Return Sent', desc: 'Label generated AND parcel posted (or collection booked + handed over for BBM)', fields: ['return_label_pdf', 'return_label_date', 'outbound_tracking', 'outbound_courier', 'proof_of_postage', 'postage_date', 'posted_from', 'collection_date', 'collection_time', 'collection_handover'] },
   5: { name: 'Investigation', desc: 'Retailer is processing - awaiting response', fields: ['investigation_deadline'] },
   6: { name: 'Refund Refused', desc: 'Preparing chargeback case', fields: ['refund_narrative', 'refund_refused_date'] },
   7: { name: 'Chargeback', desc: 'Filed with bank', fields: ['chargeback_bank', 'chargeback_amount', 'chargeback_date', 'invoice', 'refund_received_date', 'refund_received_amount'] },
@@ -1416,6 +1416,7 @@ const FIELD_DEFS = {
   total_weight_kg: { label: 'Total weight (kg)', required: false, type: 'number', help: 'Parcel weight (drives the EB branch, under 2 kg)' },
   total_volume_l: { label: 'Total volume (litres)', required: false, type: 'number', help: 'Order volume — for BBM, above 60 L means home collection rather than a parcel-shop return label' },
   collection_date: { label: 'Collection date', required: false, type: 'text', help: 'BBM collection path: date the retailer booked to collect from home' },
+  collection_time: { label: 'Collection time', required: false, type: 'text', help: 'BBM collection path: time (or window) the courier is due on the collection date' },
   collection_handover: { label: 'Handed over for collection', required: false, type: 'text', help: 'BBM collection path: confirmation/receipt that items left with the courier' },
   delivery_photo_shows_person: { label: 'Delivery photo shows a person?', required: false, type: 'select', options: ['', 'yes', 'no'], help: 'From reviewing the proof-of-delivery photo (drives the DNA branch)' },
   item_damaged: { label: 'Item damaged?', required: false, type: 'select', options: ['', 'yes', 'no'], help: 'Set after physical inspection (drives LIT with pic)' },
@@ -1442,13 +1443,14 @@ const FIELD_ACCESS = {
   delivery_date_text:'email_holder', delivery_photo:'email_holder', delivery_photo_shows_person:'email_holder',
   damage_photo:'email_holder', inbound_tracking:'email_holder', inbound_courier:'email_holder',
   price:'email_holder', item_quantity:'email_holder', total_weight_kg:'email_holder', total_volume_l:'email_holder', items:'email_holder',
+  phone:'email_holder', email:'email_holder', address:'email_holder',
   // card owner
   card_used:'card_owner', chargeback_bank:'card_owner', chargeback_amount:'card_owner', chargeback_date:'card_owner',
   chargeback_reference:'card_owner', chargeback_type:'card_owner', refund_received_amount:'card_owner', refund_received_date:'card_owner',
   // admin
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
-  collection_date:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_narrative:'admin',
+  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_narrative:'admin',
   refund_refused_date:'admin', invoice:'email_holder', delivery_name:'delivery',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
@@ -1540,7 +1542,7 @@ const METHOD_CHAINS = {
 };
 const CONTINGENT_TASKS = ['submit_chargeback','submit_small_claims_court'];
 // UK banks (high-street + app-based + main card issuers) for the structured card_used input.
-const UK_BANKS = ['Atom Bank','American Express','Bank of Scotland','Barclays','Capital One','Chase','Chip','Co-operative Bank','Coutts','Danske Bank','First Direct','Halifax','HSBC','Kroo','Lloyds','MBNA','Metro Bank','Monzo','Nationwide','NatWest','NewDay','RBS','Revolut','Santander','Starling Bank','Tide','TSB','Ulster Bank','Vanquis','Virgin Money','Yorkshire Bank','Zopa','Other'];
+const UK_BANKS = ['Atom Bank','American Express','Bank of Scotland','Barclays','Capital One','Chase','Chip','Co-operative Bank','Coutts','Danske Bank','First Direct','Halifax','HSBC','Kroo','Lloyds','MBNA','Metro Bank','Monzo','Nationwide','NatWest','NewDay','RBS','Revolut','Santander','Starling Bank','Tide','TSB','Ulster Bank','Vanquis','Virgin Money','Wise','Yorkshire Bank','Zopa','Other'];
 // card_used is stored as "Bank — Type" (e.g. "Monzo — Debit"). These compose/parse it.
 function composeCardUsed(bank, type){ bank=(bank||'').trim(); type=(type||'').trim(); if(!bank) return ''; return type ? (bank+' — '+type) : bank; }
 function parseCardUsed(v){ v=(v||'').trim(); if(!v) return {bank:'',type:''}; const m=v.split('—'); return {bank:(m[0]||'').trim(), type:(m[1]||'').trim()}; }
@@ -2002,7 +2004,14 @@ function normalizeDeliveryDates() {
   (DATA.orders||[]).forEach(o => { applyEvidenceAdvances(o); });
 }
 function loadData() {
-  DATA = { orders: (window.__HOSTED && window.__HOSTED.orders) ? window.__HOSTED.orders : [] };
+  DATA = { orders: (function(){
+    const base = (window.__HOSTED && window.__HOSTED.orders) ? window.__HOSTED.orders : [];
+    const del = (window.__HOSTED && window.__HOSTED.deletedOrders) ? window.__HOSTED.deletedOrders : [];
+    if(!del.length) return base;
+    const dset = {}; del.forEach(id => dset[id] = true);
+    return base.filter(o => !dset[o.order_id]);
+  })() };
+  DATA._deletedOrders = (window.__HOSTED && window.__HOSTED.deletedOrders) ? window.__HOSTED.deletedOrders.slice() : [];
   DATA._burndown = (window.__HOSTED && window.__HOSTED.burndown) ? window.__HOSTED.burndown : [];
   DATA._formTrack = (window.__HOSTED && window.__HOSTED.formTrack) ? window.__HOSTED.formTrack : {};
   DATA._taskStatus = (window.__HOSTED && window.__HOSTED.taskStatus) ? window.__HOSTED.taskStatus : {};
@@ -5043,7 +5052,7 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
@@ -5092,6 +5101,9 @@ function saveOrderEdit() {
   
   if (!order.triggers) order.triggers = {};
   triggerKeys.forEach(k => { order.triggers[k] = document.getElementById('t_' + k).checked; });
+  // A manually-added order means the order has already been placed, so the place-order task is
+  // done from the start (it's redundant to ask someone to "place" an order that exists).
+  if (isNew) order.triggers.item_ordered = true;
   
   // Commit any pending file uploads from the buffer
   if (window._fileBuffer) {
@@ -5144,7 +5156,11 @@ function deletedOrderSet(){
 function recordDeletedOrder(id){
   const s = deletedOrderSet();
   if(s.indexOf(id) < 0) s.push(id);
-  if(window.__HOSTED) window.__HOSTED.deletedOrders = s.slice();
+  if(window.__HOSTED){
+    window.__HOSTED.deletedOrders = s.slice();
+    // Strip from the in-memory hosted list now, so a blocked DB delete can't resurrect it on reload.
+    if(Array.isArray(window.__HOSTED.orders)) window.__HOSTED.orders = window.__HOSTED.orders.filter(o => o.order_id !== id);
+  }
   try { if (typeof sb !== 'undefined' && sb) { sb.from('app_state').upsert({ key:'deleted_orders', value: s }, { onConflict:'key' }); } } catch(e){}
 }
 
