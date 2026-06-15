@@ -2155,6 +2155,10 @@ function saveData() { if(typeof reconcileInfoRequests==='function') reconcileInf
 // COMPUTATIONS
 // ============================================================
 function computeStage(order) {
+  // MASTER RULE: the stage is derived from recorded outcomes. Sync triggers from the evidence
+  // actually present first, so any task whose outcome already exists auto-completes and the order
+  // advances to the next stage without waiting for a save. (Monotonic: only ever sets triggers true.)
+  if (typeof applyEvidenceAdvances === 'function') applyEvidenceAdvances(order);
   // Manual override takes precedence over trigger-based stage
   if (order.manual_stage && order.manual_stage !== '' && order.manual_stage !== null) {
     if (order.manual_stage === 'done') return 'done';
