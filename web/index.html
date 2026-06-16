@@ -790,6 +790,11 @@ async function hostedFetchAll() {
     const { data: dg } = await sb.from('app_state').select('value').eq('key', 'delegatees').maybeSingle();
     window.__HOSTED.delegatees = (dg && dg.value) ? dg.value : [];
   } catch (e) { window.__HOSTED.delegatees = []; }
+  // Learned email → person map (so a known email auto-fills the responsible person).
+  try {
+    const { data: ep } = await sb.from('app_state').select('value').eq('key', 'email_person').maybeSingle();
+    window.__HOSTED.emailPerson = (ep && ep.value) ? ep.value : {};
+  } catch (e) { window.__HOSTED.emailPerson = {}; }
   // Deleted-order IDs — so deletions stick across reloads and aren't re-seeded.
   try {
     const { data: del } = await sb.from('app_state').select('value').eq('key', 'deleted_orders').maybeSingle();
@@ -1110,6 +1115,10 @@ document.addEventListener('DOMContentLoaded', bootHosted);
       <h2>Orders Database</h2>
       <p>Every order. Click a row to view, edit, or advance through stages. Use <strong>Add new order</strong> to manually input one &mdash; equivalent to creating a record from a receipt or email confirmation.</p>
     </div>
+    <details class="bm-card" style="margin-bottom:14px" ontoggle="if(this.open) renderDelegationPanel()">
+      <summary>People &amp; emails <span style="color:var(--ink-faded);font-weight:400;font-size:12px;margin-left:8px">check which emails map to each person</span></summary>
+      <div id="delegationPanel" style="margin-top:8px"></div>
+    </details>
     <div class="queue-toolbar">
       <div class="filter-group">
         <label>Stage</label>
@@ -1863,6 +1872,50 @@ const PEOPLE = [
   { name:'Aris', email:'arispelekanos55@gmail.com', aliases:[], tg:'@AristonMetron' }
 ];
 function normEmail(e){ return (e||'').trim().toLowerCase().replace(/\.+$/,''); }
+function emailPersonMap(){ if(!DATA._emailPerson) DATA._emailPerson = {}; return DATA._emailPerson; }
+// Remember that an email belongs to a person, learned from what's been entered. Next time that
+// email is typed, the responsible person auto-fills from this.
+function recordEmailPerson(email, person){
+  const n = normEmail(email); if(!n || !person || !person.trim()) return;
+  const map = emailPersonMap();
+  if(map[n] !== person.trim()){ map[n] = person.trim(); }
+}
+// Build a person → emails view (hardcoded people, the learned map, and emails actually on orders),
+// so the admin can sanity-check which email belongs to whom and fix a wrong mapping.
+function buildPersonEmailIndex(){
+  const idx = {};   // personName → Set of emails
+  const add = (name, email)=>{ if(!name) return; const n=name.trim(); if(!idx[n]) idx[n]=new Set(); if(email) idx[n].add(normEmail(email)); };
+  // 1) hardcoded people + their aliases
+  (typeof allPeopleRecords==='function' ? allPeopleRecords() : []).forEach(p=>{
+    add(p.name, p.email); (p.aliases||[]).forEach(a=>add(p.name, a));
+  });
+  // 2) learned map
+  const map = (DATA && DATA._emailPerson) ? DATA._emailPerson : {};
+  Object.keys(map).forEach(em=> add(map[em], em));
+  // 3) emails actually used on orders (attributed via personByEmail / the order's person)
+  (DATA.orders||[]).forEach(o=>{
+    if(!o.email) return;
+    const p = (typeof personByEmail==='function') ? personByEmail(o.email) : null;
+    add((p&&p.name) || o.person, o.email);
+  });
+  return idx;
+}
+function renderDelegationPanel(){
+  const box = document.getElementById('delegationPanel'); if(!box) return;
+  const idx = buildPersonEmailIndex();
+  const names = Object.keys(idx).filter(n=>idx[n].size).sort((a,b)=>a.localeCompare(b));
+  if(!names.length){ box.innerHTML = '<div style="font-size:12px;color:var(--ink-faded)">No email mappings yet. They build up as you enter orders.</div>'; return; }
+  let h = '<div style="font-size:11px;color:var(--ink-faded);margin-bottom:8px">An email auto-fills the responsible person from this. To correct a mapping, open an order with that email and set the right person, then save.</div>';
+  h += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+  h += '<tr style="text-align:left;color:var(--ink-faded);font-size:10px;text-transform:uppercase;letter-spacing:.4px"><th style="padding:4px 6px">Person</th><th style="padding:4px 6px">Emails</th></tr>';
+  names.forEach(n=>{
+    const emails = [...idx[n]].filter(Boolean).sort();
+    h += '<tr style="border-top:1px solid var(--line)"><td style="padding:5px 6px;font-weight:600;vertical-align:top">'+escapeHtml(n)+'</td>'
+      + '<td style="padding:5px 6px">'+(emails.length? emails.map(e=>escapeHtml(e)).join('<br>') : '<span style="color:var(--ink-faded)">—</span>')+'</td></tr>';
+  });
+  h += '</table>';
+  box.innerHTML = h;
+}
 function personByEmail(email){
   const n = normEmail(email);
   if(!n) return null;
@@ -1870,6 +1923,9 @@ function personByEmail(email){
     if(normEmail(p.email)===n) return p;
     if((p.aliases||[]).some(a=>normEmail(a)===n)) return p;
   }
+  // Fall back to the learned map (emails associated with a person from past entries).
+  const map = (DATA && DATA._emailPerson) ? DATA._emailPerson : {};
+  if(map[n]){ return personByName(map[n]) || { name: map[n] }; }
   return null;
 }
 function personByName(name){
@@ -2016,6 +2072,7 @@ function loadData() {
   DATA._formTrack = (window.__HOSTED && window.__HOSTED.formTrack) ? window.__HOSTED.formTrack : {};
   DATA._taskStatus = (window.__HOSTED && window.__HOSTED.taskStatus) ? window.__HOSTED.taskStatus : {};
   DATA._delegatees = (window.__HOSTED && window.__HOSTED.delegatees) ? window.__HOSTED.delegatees : [];
+  DATA._emailPerson = (window.__HOSTED && window.__HOSTED.emailPerson) ? window.__HOSTED.emailPerson : {};
   normalizeDeliveryDates();
   (DATA.orders || []).forEach(o => stampRequiredFields(o));
   (DATA.orders || []).forEach(o => {
@@ -2140,13 +2197,15 @@ async function hostedSaveTrackers() {
     const ftStr = JSON.stringify(DATA._formTrack || {});
     const tsStr = JSON.stringify(DATA._taskStatus || {});
     const dgStr = JSON.stringify(DATA._delegatees || []);
-    const h = ftStr + '|' + tsStr + '|' + dgStr;
+    const epStr = JSON.stringify(DATA._emailPerson || {});
+    const h = ftStr + '|' + tsStr + '|' + dgStr + '|' + epStr;
     if (h === __trackersHash) return;
     __trackersHash = h;
-    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; window.__HOSTED.delegatees = DATA._delegatees || []; }
+    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; window.__HOSTED.delegatees = DATA._delegatees || []; window.__HOSTED.emailPerson = DATA._emailPerson || {}; }
     await sb.from('app_state').upsert({ key: 'formTrack', value: DATA._formTrack || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'taskStatus', value: DATA._taskStatus || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'delegatees', value: DATA._delegatees || [] }, { onConflict: 'key' });
+    await sb.from('app_state').upsert({ key: 'email_person', value: DATA._emailPerson || {} }, { onConflict: 'key' });
   } catch (e) {}
 }
 function saveData() { if(typeof reconcileInfoRequests==='function') reconcileInfoRequests(); hostedSave(); hostedSaveTrackers(); }
@@ -4794,7 +4853,8 @@ function openOrderModal(orderId) {
         <div id="filepreview_damage_photo">${order.damage_photo_file ? `<div class="file-attached-preview"><img src="${order.damage_photo_file}" alt="${escAttr(order.damage_photo_filename || '')}" onclick="window.open(this.src)"><div class="file-meta"><div class="file-name-line">${escapeHtml(order.damage_photo_filename || '')}</div><div class="file-meta-line">${escapeHtml(order.damage_photo_filetype || '')}</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="tiny" onclick="viewAttachedFile('damage_photo', 'order'); event.preventDefault();">View</button><button type="button" class="tiny" onclick="downloadAttachedFile('damage_photo', 'order'); event.preventDefault();">Download</button><button type="button" class="tiny danger" onclick="removeAttachedFile('damage_photo', 'order'); event.preventDefault();">Remove</button></div></div></div>` : ''}</div>
       </div>
       <div class="form-field"><label>Bought by mistake (BBM)? <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">manual flag</span></label><select id="f_bought_by_mistake"><option value="" ${!order.bought_by_mistake||order.bought_by_mistake==='no'?'selected':''}>no</option><option value="yes" ${order.bought_by_mistake==='yes'?'selected':''}>yes — runs LIT chain w/ collection option</option></select></div>
-      <div class="form-field full"><label>Method</label><select id="f_method"><option value="">(none)</option><option ${order.method === 'LIT' ? 'selected' : ''}>LIT</option><option ${order.method === 'LIT with pic' ? 'selected' : ''}>LIT with pic</option><option ${order.method === 'RTS' ? 'selected' : ''}>RTS</option><option ${order.method === 'DNA' ? 'selected' : ''}>DNA</option><option ${order.method === 'PEB' ? 'selected' : ''}>PEB</option><option ${order.method === 'EB' ? 'selected' : ''}>EB</option></select></div>
+      <div class="form-field full"><label>Method</label><select id="f_method" onchange="renderPebPanel()"><option value="">(none)</option><option ${order.method === 'LIT' ? 'selected' : ''}>LIT</option><option ${order.method === 'LIT with pic' ? 'selected' : ''}>LIT with pic</option><option ${order.method === 'RTS' ? 'selected' : ''}>RTS</option><option ${order.method === 'DNA' ? 'selected' : ''}>DNA</option><option ${order.method === 'PEB' ? 'selected' : ''}>PEB</option><option ${order.method === 'EB' ? 'selected' : ''}>EB</option></select></div>
+      <div class="form-field full" id="peb_panel">${renderPebPanelHtml(order)}</div>
     </div>
     <div class="form-section-title">Return execution</div>
     <div class="form-grid">
@@ -4995,26 +5055,27 @@ function highlightOrderFields(fieldKeys){
 }
 function ofInitItemsList(order){
   OF_ITEMS = Array.isArray(order.items_list) && order.items_list.length
-    ? order.items_list.map(it=>({name:it.name||'', qty:it.qty||1, weight:it.weight||'', volume:it.volume||''}))
-    : (order.items ? [{name:order.items, qty:parseInt(order.item_quantity)||1, weight:'', volume:''}] : [{name:'',qty:1,weight:'',volume:''}]);
+    ? order.items_list.map(it=>({name:it.name||'', qty:it.qty||1, weight:it.weight||'', volume:it.volume||'', price:(it.price!=null?it.price:'')}))
+    : (order.items ? [{name:order.items, qty:parseInt(order.item_quantity)||1, weight:'', volume:'', price:''}] : [{name:'',qty:1,weight:'',volume:'',price:''}]);
   ofRenderItems();
 }
 function ofRenderItems(){
   const box=document.getElementById('f_items_list'); if(!box) return;
   const header = '<div style="display:flex;gap:6px;margin-bottom:4px;font-size:10px;color:var(--ink-faded);text-transform:uppercase;letter-spacing:.4px">'
-    + '<span style="flex:1;min-width:120px">Item</span><span style="width:62px">Qty</span><span style="min-width:92px">Weight · volume</span><span style="width:24px"></span></div>';
+    + '<span style="flex:1;min-width:110px">Item</span><span style="width:50px">Qty</span><span style="width:70px">Price £</span><span style="min-width:88px">Weight · volume</span><span style="width:24px"></span></div>';
   box.innerHTML = header + OF_ITEMS.map((it,i)=>
     '<div style="display:flex;gap:6px;margin-bottom:5px;align-items:center">'
-    + '<input type="text" placeholder="item name" value="'+escAttr(it.name)+'" oninput="ofItemField('+i+',\'name\',this.value)" style="flex:1;min-width:120px">'
-    + '<input type="number" min="1" placeholder="qty" value="'+(it.qty||1)+'" oninput="ofItemField('+i+',\'qty\',this.value)" style="width:62px" title="quantity of this item">'
-    + '<span style="font-size:10px;color:var(--ink-faded);min-width:130px">'+(it.weight?(it.weight+'kg'):'?kg')+' · '+(it.volume?(it.volume+'L'):'?L')+(it.qty>1&&(it.weight||it.volume)?(' → ×'+it.qty+' = '+(it.weight?(Math.round(parseFloat(it.weight)*it.qty*100)/100)+'kg':'')+(it.weight&&it.volume?' · ':'')+(it.volume?(Math.round(parseFloat(it.volume)*it.qty)+'L'):'')):'')+'</span>'
+    + '<input type="text" placeholder="item name" value="'+escAttr(it.name)+'" oninput="ofItemField('+i+',\'name\',this.value)" style="flex:1;min-width:110px">'
+    + '<input type="number" min="1" placeholder="qty" value="'+(it.qty||1)+'" oninput="ofItemField('+i+',\'qty\',this.value)" style="width:50px" title="quantity of this item">'
+    + '<input type="number" min="0" step="0.01" placeholder="£ each" value="'+(it.price!=null&&it.price!==''?it.price:'')+'" oninput="ofItemField('+i+',\'price\',this.value)" style="width:70px" title="price per unit (£)">'
+    + '<span style="font-size:10px;color:var(--ink-faded);min-width:120px">'+(it.weight?(it.weight+'kg'):'?kg')+' · '+(it.volume?(it.volume+'L'):'?L')+(it.qty>1&&(it.weight||it.volume)?(' → ×'+it.qty+' = '+(it.weight?(Math.round(parseFloat(it.weight)*it.qty*100)/100)+'kg':'')+(it.weight&&it.volume?' · ':'')+(it.volume?(Math.round(parseFloat(it.volume)*it.qty)+'L'):'')):'')+'</span>'
     + (OF_ITEMS.length>1?'<button type="button" class="small" onclick="ofRemoveItem('+i+')" title="remove">×</button>':'<span style="width:24px"></span>')
     + '</div>'
   ).join('');
 }
 function ofItemField(i,k,v){ if(OF_ITEMS[i]){ OF_ITEMS[i][k]= (k==='qty'? (parseInt(v)||1) : v); } }
-function ofAddItemRow(){ OF_ITEMS.push({name:'',qty:1,weight:'',volume:''}); ofRenderItems(); }
-function ofRemoveItem(i){ OF_ITEMS.splice(i,1); if(!OF_ITEMS.length) OF_ITEMS=[{name:'',qty:1,weight:'',volume:''}]; ofRenderItems(); }
+function ofAddItemRow(){ OF_ITEMS.push({name:'',qty:1,weight:'',volume:'',price:''}); ofRenderItems(); }
+function ofRemoveItem(i){ OF_ITEMS.splice(i,1); if(!OF_ITEMS.length) OF_ITEMS=[{name:'',qty:1,weight:'',volume:'',price:''}]; ofRenderItems(); }
 function ofItemsSummary(){ return OF_ITEMS.filter(it=>it.name).map(it=>(it.qty>1?it.qty+'× ':'')+it.name).join(', '); }
 function ofSumWV(){
   let w=0,v=0,haveAny=false;
@@ -5084,14 +5145,17 @@ function saveOrderEdit() {
   if (Array.isArray(OF_ITEMS)) {
     const clean = OF_ITEMS.filter(it=>it.name && it.name.trim());
     if (clean.length) {
-      order.items_list = clean.map(it=>({name:it.name.trim(), qty:it.qty||1, weight:it.weight||'', volume:it.volume||''}));
+      order.items_list = clean.map(it=>({name:it.name.trim(), qty:it.qty||1, weight:it.weight||'', volume:it.volume||'', price:(it.price!=null&&it.price!==''?it.price:'')}));
       order.items = clean.map(it=>(it.qty>1?it.qty+'× ':'')+it.name.trim()).join(', ');
       order.item_quantity = clean.reduce((s,it)=>s+(it.qty||1),0);
       const sumW = clean.reduce((s,it)=> s + ((parseFloat(it.weight)||0)*(it.qty||1)), 0);
       const sumV = clean.reduce((s,it)=> s + ((parseFloat(it.volume)||0)*(it.qty||1)), 0);
+      const sumP = clean.reduce((s,it)=> s + ((parseFloat(it.price)||0)*(it.qty||1)), 0);
       // only auto-fill totals the user hasn't set on the form
       if (sumW>0 && !document.getElementById('f_total_weight_kg').value.trim()) order.total_weight_kg = String(Math.round(sumW*100)/100);
       if (sumV>0 && !document.getElementById('f_total_volume_l').value.trim()) order.total_volume_l = String(Math.round(sumV));
+      // total order price: sum of per-item (price × qty) when the user hasn't typed a price
+      if (sumP>0 && !document.getElementById('f_price').value.trim()) order.price = Math.round(sumP*100)/100;
     }
   }
   
@@ -5128,6 +5192,8 @@ function saveOrderEdit() {
   
   if (isNew) order.order_id = id;
   applyEvidenceAdvances(order);
+  // Learn this email → responsible-person association for future auto-fill.
+  if (typeof recordEmailPerson === 'function') recordEmailPerson(order.email, order.person);
   logAudit(order, isNew ? 'order_created' : 'order_edited', isNew ? 'Order created' : 'Order details edited');
   stampRequiredFields(order);
 
@@ -5683,6 +5749,60 @@ function applyRole(role) {
   }
 }
 function methodBadgeClass(m){ return ['DNA','PEB','EB'].includes(m)?'background:var(--red-soft);color:var(--red)':(m&&!m.startsWith('('))?'background:var(--green-soft);color:var(--green)':'background:var(--line-soft);color:var(--ink-faded)'; }
+// PEB ("partial empty box"): recommend WHICH items to claim as missing. The best candidates are
+// the highest-value items that are also the lightest / smallest — high £ maximises the refund, and
+// low weight + volume makes a "missing from the box" claim most plausible. Returns items ranked
+// best-first, each with a per-unit price and a score.
+// HTML for the PEB recommendation panel (only meaningful when method is PEB).
+function renderPebPanelHtml(order){
+  if(!order || order.method !== 'PEB') return '';
+  const rows = pebMissingItems(order);
+  if(!rows.length || !rows.some(r=>r.price>0)) return '<div style="font-size:11px;color:var(--ink-faded)">Add per-item prices (and weights/volumes) in the items list above to get a PEB missing-items recommendation.</div>';
+  const fmt = (n)=> (n||n===0) ? n : '?';
+  const best = rows.filter(r=>r.price>0).slice(0, Math.max(1, Math.min(rows.length, Math.ceil(rows.length/2))));
+  const bestNames = {}; best.forEach(r=>bestNames[r.name]=true);
+  let h = '<div style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--red-soft)">'
+    + '<div style="font-weight:600;font-size:12px;margin-bottom:4px">PEB — recommended items to claim missing</div>'
+    + '<div style="font-size:11px;color:var(--ink-faded);margin-bottom:8px">Best claims are high value but low weight &amp; volume (most refund, most believable as "missing from the box"). Ranked best first.</div>';
+  h += '<div style="display:flex;font-size:10px;color:var(--ink-faded);text-transform:uppercase;letter-spacing:.4px;gap:8px;padding:0 4px 3px"><span style="flex:1">Item</span><span style="width:60px">£ each</span><span style="width:110px">weight · volume</span><span style="width:54px">claim?</span></div>';
+  rows.forEach(r=>{
+    const claim = bestNames[r.name];
+    h += '<div style="display:flex;gap:8px;align-items:center;font-size:12px;padding:3px 4px;'+(claim?'background:rgba(255,255,255,.55);border-radius:4px':'')+'">'
+      + '<span style="flex:1">'+escapeHtml(r.name)+'</span>'
+      + '<span style="width:60px">£'+fmt(r.price)+'</span>'
+      + '<span style="width:110px;color:var(--ink-faded)">'+fmt(r.weight)+'kg · '+fmt(r.volume)+'L</span>'
+      + '<span style="width:54px">'+(claim?'<strong style="color:var(--red)">✓ claim</strong>':'<span style="color:var(--ink-faded)">keep</span>')+'</span>'
+      + '</div>';
+  });
+  h += '</div>';
+  return h;
+}
+function renderPebPanel(){
+  const order = DATA.orders.find(o=>o.order_id===editingOrderId);
+  const sel = document.getElementById('f_method');
+  const panel = document.getElementById('peb_panel');
+  if(!panel) return;
+  // reflect the currently-selected method (may differ from saved) for the live panel
+  const m = sel ? sel.value : (order?order.method:'');
+  panel.innerHTML = renderPebPanelHtml(Object.assign({}, order||{}, { method:m }));
+}
+function pebMissingItems(order){
+  const list = Array.isArray(order && order.items_list) ? order.items_list : [];
+  const rows = [];
+  list.forEach(it=>{
+    const price = parseFloat(it.price)||0;
+    const w = parseFloat(it.weight)||0;
+    const v = parseFloat(it.volume)||0;
+    if(!it.name) return;
+    // score favours high price and low bulk; +0.1 avoids divide-by-zero for unknown weight/volume
+    const bulk = w + v;
+    const score = price / (bulk + 0.1);
+    rows.push({ name: it.name, qty: it.qty||1, price, weight: w, volume: v, bulk, score });
+  });
+  // best £-per-bulk first; ties → higher price first
+  rows.sort((a,b)=> (b.score - a.score) || (b.price - a.price));
+  return rows;
+}
 
 const _STEP_ORDER = {BBM:0, Q1:1, Q2:2, Q3:3, Q4:4, Q5:5, Q6:6};
 function renderOrderFlowchart(o, flags) {
