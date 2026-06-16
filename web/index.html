@@ -4889,8 +4889,11 @@ function openOrderModal(orderId) {
     <div class="form-grid">
       <div class="form-field"><label>Order date</label><input type="text" id="f_order_date" value="${escAttr(order.order_date)}" placeholder="DD/MM/YYYY"></div>
       <div class="form-field"><label>Delivery date</label><input type="text" id="f_delivery_date_text" value="${escAttr(order.delivery_date_text)}" placeholder="DD/MM/YYYY" onchange="onDeliveryDateInput()"></div>
-      <div class="form-field"><label>Inbound tracking</label><input type="text" id="f_inbound_tracking" value="${escAttr(order.inbound_tracking)}" oninput="updateTrackingLinks()"><div id="f_inbound_tracking_link" style="font-size:11px;margin-top:3px">${(function(){const u=trackingLink(order.inbound_courier, order.inbound_tracking); return u?'<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(order.inbound_courier))+'</a>':'';})()}</div></div>
-      <div class="form-field"><label>Inbound courier <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">drives the collect-tracking proof steps</span></label><select id="f_inbound_courier" onchange="updateTrackingLinks()"><option value="">(none)</option>${COURIER_LIST.map(c=>`<option ${normCourier(order.inbound_courier)===c?'selected':''}>${c}</option>`).join('')}</select><div id="f_inbound_courier_proof" style="font-size:11px;margin-top:4px;color:var(--ink-faded)">${escapeHtml(courierProof(order.inbound_courier))}</div></div>
+      <div class="form-field full"><label>Tracking parcels <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">each parcel: tracking number + its courier + the items inside it. The first parcel's courier drives the collect-tracking proof steps.</span></label>
+        <div id="f_trackings_list"></div>
+        <button type="button" class="small" onclick="ofAddTracking()" style="margin-top:4px">+ Add tracking number</button>
+        <div id="f_inbound_courier_proof" style="font-size:11px;margin-top:6px;color:var(--ink-faded)">${escapeHtml(courierProof(order.inbound_courier))}</div>
+      </div>
       <div class="form-field full">
         <label>Delivery photo (image or URL) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">file or text</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
@@ -4980,6 +4983,7 @@ function openOrderModal(orderId) {
   });
   applyStageCollapsibles(computeStage(order));
   ofInitItemsList(order);
+  ofInitTrackings(order);
   document.getElementById('orderModal').classList.add('show');
   // Highlight the fields that are missing/needed for this order's current stage, so
   // opening an order from a blocked task shows exactly what to fill in.
@@ -5132,8 +5136,59 @@ function ofRenderItems(){
   ).join('');
 }
 function ofItemField(i,k,v){ if(OF_ITEMS[i]){ OF_ITEMS[i][k]= (k==='qty'? (parseInt(v)||1) : v); } }
-function ofAddItemRow(){ OF_ITEMS.push({name:'',qty:1,weight:'',volume:'',price:''}); ofRenderItems(); }
-function ofRemoveItem(i){ OF_ITEMS.splice(i,1); if(!OF_ITEMS.length) OF_ITEMS=[{name:'',qty:1,weight:'',volume:'',price:''}]; ofRenderItems(); }
+function ofAddItemRow(){ OF_ITEMS.push({name:'',qty:1,weight:'',volume:'',price:''}); ofRenderItems(); if(typeof ofRenderTrackings==='function') ofRenderTrackings(); }
+function ofRemoveItem(i){ OF_ITEMS.splice(i,1); if(!OF_ITEMS.length) OF_ITEMS=[{name:'',qty:1,weight:'',volume:'',price:''}]; ofRenderItems(); if(typeof ofRenderTrackings==='function') ofRenderTrackings(); }
+
+// ---- Multiple inbound tracking parcels (each: tracking number + courier + which items it holds) ----
+let OF_TRACKINGS = [];
+function ofInitTrackings(order){
+  if(Array.isArray(order.inbound_trackings) && order.inbound_trackings.length){
+    OF_TRACKINGS = order.inbound_trackings.map(t=>({ tracking:t.tracking||'', courier:t.courier||'', items:Array.isArray(t.items)?t.items.slice():[] }));
+  } else if(order.inbound_tracking || order.inbound_courier){
+    // seed a single parcel from the legacy single fields
+    OF_TRACKINGS = [{ tracking:order.inbound_tracking||'', courier:order.inbound_courier||'', items:[] }];
+  } else {
+    OF_TRACKINGS = [{ tracking:'', courier:'', items:[] }];
+  }
+  ofRenderTrackings();
+}
+function ofRenderTrackings(){
+  const box=document.getElementById('f_trackings_list'); if(!box) return;
+  const itemNames = (OF_ITEMS||[]).map(it=>it.name).filter(Boolean);
+  box.innerHTML = OF_TRACKINGS.map((tk,i)=>{
+    const link = trackingLink(tk.courier, tk.tracking);
+    const itemsUi = itemNames.length
+      ? '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px">'
+          + itemNames.map(nm=>{
+              const on = (tk.items||[]).indexOf(nm)>=0;
+              return '<label style="font-size:11px;display:inline-flex;align-items:center;gap:3px;background:'+(on?'var(--accent-soft)':'var(--line-soft)')+';padding:2px 7px;border-radius:10px;cursor:pointer">'
+                + '<input type="checkbox" '+(on?'checked':'')+' onchange="ofToggleTrackingItem('+i+',this.getAttribute(\'data-nm\'))" data-nm="'+escAttr(nm)+'" style="margin:0"> '+escapeHtml(nm)+'</label>';
+            }).join('')
+          + '</div>'
+      : '<div style="font-size:10px;color:var(--ink-faded);margin-top:4px">Add items in the items list above to tag which ones are in this parcel.</div>';
+    return '<div style="border:1px solid var(--line);border-radius:8px;padding:8px;margin-bottom:6px">'
+      + '<div style="display:flex;gap:6px;align-items:center">'
+      + '<input type="text" placeholder="tracking number" value="'+escAttr(tk.tracking)+'" oninput="ofTrackingField('+i+',\'tracking\',this.value)" style="flex:1;min-width:120px">'
+      + '<select onchange="ofTrackingField('+i+',\'courier\',this.value)" style="width:130px"><option value="">(courier)</option>'
+        + COURIER_LIST.map(c=>'<option '+(normCourier(tk.courier)===c?'selected':'')+'>'+c+'</option>').join('')
+      + '</select>'
+      + (OF_TRACKINGS.length>1?'<button type="button" class="small" onclick="ofRemoveTracking('+i+')" title="remove">×</button>':'<span style="width:24px"></span>')
+      + '</div>'
+      + (link?'<div style="font-size:11px;margin-top:4px"><a href="'+link+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(tk.courier))+'</a></div>':'')
+      + itemsUi
+      + '</div>';
+  }).join('');
+}
+function ofTrackingField(i,k,v){ if(OF_TRACKINGS[i]){ OF_TRACKINGS[i][k]=v; ofRenderTrackings(); } }
+function ofToggleTrackingItem(i,name){
+  if(!OF_TRACKINGS[i]) return;
+  const arr = OF_TRACKINGS[i].items || (OF_TRACKINGS[i].items=[]);
+  const idx = arr.indexOf(name);
+  if(idx>=0) arr.splice(idx,1); else arr.push(name);
+  ofRenderTrackings();
+}
+function ofAddTracking(){ OF_TRACKINGS.push({tracking:'',courier:'',items:[]}); ofRenderTrackings(); }
+function ofRemoveTracking(i){ OF_TRACKINGS.splice(i,1); if(!OF_TRACKINGS.length) OF_TRACKINGS=[{tracking:'',courier:'',items:[]}]; ofRenderTrackings(); }
 function ofItemsSummary(){ return OF_ITEMS.filter(it=>it.name).map(it=>(it.qty>1?it.qty+'× ':'')+it.name).join(', '); }
 function ofSumWV(){
   let w=0,v=0,haveAny=false;
@@ -5214,6 +5269,21 @@ function saveOrderEdit() {
       if (sumV>0 && !document.getElementById('f_total_volume_l').value.trim()) order.total_volume_l = String(Math.round(sumV));
       // total order price: sum of per-item (price × qty) when the user hasn't typed a price
       if (sumP>0 && !document.getElementById('f_price').value.trim()) order.price = Math.round(sumP*100)/100;
+    }
+  }
+
+  // Save the multiple tracking parcels (each: tracking number + courier + items inside).
+  if (Array.isArray(OF_TRACKINGS)) {
+    const cleanT = OF_TRACKINGS
+      .map(t=>({ tracking:(t.tracking||'').trim(), courier:(t.courier||'').trim(), items:Array.isArray(t.items)?t.items.slice():[] }))
+      .filter(t=> t.tracking || t.courier || (t.items && t.items.length));
+    if (cleanT.length) {
+      order.inbound_trackings = cleanT;
+      // First parcel stays the primary single-field value (drives completion, the link, and AI/advances).
+      order.inbound_tracking = cleanT[0].tracking;
+      order.inbound_courier = cleanT[0].courier;
+    } else {
+      delete order.inbound_trackings;
     }
   }
   
