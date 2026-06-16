@@ -23,9 +23,6 @@
   .filebtn{ display:inline-flex; align-items:center; gap:6px; padding:9px 12px; border:1px dashed var(--line); border-radius:9px; cursor:pointer; font-size:13px; background:var(--accent-soft); color:var(--accent); }
   .filebtn input{ display:none; }
   .filename{ font-size:12px; color:var(--green); margin-top:6px; }
-  .filepreview{ margin-top:8px; }
-  .fileok{ display:flex; gap:10px; align-items:center; background:#ebfbee; border:1px solid #b2f2bb; border-radius:9px; padding:8px 10px; }
-  .additem{ margin-top:4px; padding:7px 11px; border:1px dashed var(--line); border-radius:8px; background:var(--accent-soft); color:var(--accent); cursor:pointer; font-size:13px; }
   button.submit{ width:100%; padding:12px; border:none; border-radius:10px; background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer; margin-top:8px; }
   button.submit:disabled{ opacity:.5; cursor:default; }
   .msg{ padding:12px; border-radius:9px; font-size:13px; margin-top:14px; }
@@ -90,18 +87,7 @@ function renderFields(){
     if(f.kind === 'file'){
       input = '<label class="filebtn">📎 <span id="fbtn'+i+'">Choose file</span>'
             + '<input type="file" accept="'+(f.accept||'image/*,application/pdf')+'" onchange="onFile('+i+', this)"></label>'
-            + '<div class="filepreview" id="fprev'+i+'"></div>';
-    } else if(f.kind === 'card'){
-      input = '<div style="display:flex;gap:8px;flex-wrap:wrap">'
-            + '<select id="fldbank'+i+'" style="flex:2;min-width:140px"><option value="">(bank)</option>'
-            + (f.options||[]).map(o=>'<option value="'+esc(o)+'">'+esc(o)+'</option>').join('')
-            + '</select>'
-            + '<select id="fldtype'+i+'" style="flex:1;min-width:100px"><option value="">(type)</option><option>Credit</option><option>Debit</option></select>'
-            + '</div>';
-    } else if(f.kind === 'items'){
-      input = '<div id="items'+i+'"></div>'
-            + '<button type="button" class="additem" onclick="addItemRow('+i+')">+ Add item</button>'
-            + '<div class="help">Add each item with its quantity and a clear name (e.g. “2 × oak dining chair, solid wood”) so weight/size can be estimated.</div>';
+            + '<div class="filename" id="fname'+i+'"></div>';
     } else if(f.kind === 'select'){
       input = '<select id="fld'+i+'"><option value="">(select)</option>'
             + (f.options||[]).filter(Boolean).map(o=>'<option value="'+esc(o)+'">'+esc(o)+'</option>').join('')
@@ -113,27 +99,6 @@ function renderFields(){
     }
     return '<div class="field"><label>'+esc(f.label||f.key)+(f.required?' *':'')+'</label>'+input+help+'</div>';
   }).join('');
-  // init item rows for any items fields
-  DEF.fields.forEach((f,i)=>{ if(f.kind==='items'){ ITEMS[i]=[]; addItemRow(i); } });
-}
-
-// ---- per-item list (name + qty) ----
-const ITEMS = {};   // field index -> [{name, qty}]
-function addItemRow(i){
-  ITEMS[i] = ITEMS[i] || [];
-  ITEMS[i].push({name:'', qty:1});
-  renderItems(i);
-}
-function removeItemRow(i, idx){ ITEMS[i].splice(idx,1); renderItems(i); }
-function renderItems(i){
-  const box = document.getElementById('items'+i); if(!box) return;
-  box.innerHTML = ITEMS[i].map((it,idx)=>
-    '<div style="display:flex;gap:6px;margin-bottom:6px;align-items:center">'
-    + '<input type="text" placeholder="Item name / description" value="'+esc(it.name)+'" oninput="ITEMS['+i+']['+idx+'].name=this.value" style="flex:3">'
-    + '<input type="number" min="1" value="'+(it.qty||1)+'" oninput="ITEMS['+i+']['+idx+'].qty=this.value" style="flex:1;min-width:60px" title="Quantity">'
-    + '<button type="button" onclick="removeItemRow('+i+','+idx+')" style="border:none;background:none;color:var(--red);cursor:pointer;font-size:18px">×</button>'
-    + '</div>'
-  ).join('');
 }
 
 const FILES = {}; // index -> { dataUrl, name, type }
@@ -141,14 +106,7 @@ function onFile(i, input){
   const file = input.files[0]; if(!file) return;
   const r = new FileReader();
   r.onload = ()=>{ FILES[i] = { dataUrl:r.result, name:file.name, type:file.type };
-    const prev = document.getElementById('fprev'+i);
-    const isImg = (file.type||'').indexOf('image/')===0;
-    const isPdf = (file.type||'').indexOf('pdf')>=0;
-    let thumb;
-    if(isImg){ thumb = '<img src="'+r.result+'" alt="preview" style="width:48px;height:48px;object-fit:cover;border-radius:6px">'; }
-    else if(isPdf){ thumb = '<div style="width:48px;height:48px;border-radius:6px;background:#fff;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:22px">📄</div>'; }
-    else { thumb = '<div style="width:48px;height:48px;border-radius:6px;background:#fff;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:22px">📎</div>'; }
-    prev.innerHTML = '<div class="fileok">'+thumb+'<div><div style="font-weight:600;color:var(--green)">✓ Attached</div><div style="font-size:11px;color:var(--ink-faded)">'+esc(file.name)+'</div></div></div>';
+    document.getElementById('fname'+i).textContent = '✓ ' + file.name;
     document.getElementById('fbtn'+i).textContent = 'Replace file';
   };
   r.readAsDataURL(file);
@@ -166,16 +124,6 @@ async function submitForm(){
     if(f.kind === 'file'){
       if(FILES[i]) fileUploads.push(Object.assign({ key:f.key }, FILES[i]));
       else if(f.required){ return fail('Please attach: ' + (f.label||f.key)); }
-    } else if(f.kind === 'card'){
-      const bank = (document.getElementById('fldbank'+i)||{}).value || '';
-      const type = (document.getElementById('fldtype'+i)||{}).value || '';
-      if(f.required && !bank){ return fail('Please choose the bank for: ' + (f.label||f.key)); }
-      if(bank) answers[f.key] = type ? (bank + ' — ' + type) : bank;
-    } else if(f.kind === 'items'){
-      const rows = (ITEMS[i]||[]).filter(it=>(it.name||'').trim());
-      if(f.required && !rows.length){ return fail('Please add at least one item.'); }
-      if(rows.length) answers[f.key] = rows.map(it=>((it.qty||1)+' x '+it.name.trim())).join(', ');
-      if(rows.length) answers['items_list'] = JSON.stringify(rows.map(it=>({name:it.name.trim(), qty:Number(it.qty)||1})));
     } else {
       const el = document.getElementById('fld'+i);
       const v = el ? el.value.trim() : '';
@@ -205,7 +153,8 @@ async function submitForm(){
       submitted_by: DEF.person || '',
       answers: answers,
       files: filePaths,
-      token: DEF.token || ''
+      token: DEF.token || '',
+      processed: false
     };
     const ins = await SB.from('submissions').insert(payload);
     if(ins.error) throw ins.error;

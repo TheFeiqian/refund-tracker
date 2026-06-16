@@ -1731,12 +1731,15 @@ function buildFormLink(order, group, taskCode, taskLabel, mandSet){
 async function syncSubmissions(){
   if(typeof sb === 'undefined' || !sb) return 0;
   let rows;
-  try { const r = await sb.from('submissions').select('*').eq('processed', false); rows = r.data || []; }
+  // Match unprocessed rows whether `processed` is false OR null (older form submissions inserted
+  // before processed was set explicitly land as null, which `.eq('processed', false)` would miss).
+  try { const r = await sb.from('submissions').select('*').or('processed.is.null,processed.eq.false'); rows = r.data || []; }
   catch(e){ return 0; }
   let applied = 0;
+  const unmatched = [];
   for(const sub of rows){
     const o = DATA.orders.find(x=>x.order_id === sub.order_id);
-    if(!o){ continue; }
+    if(!o){ unmatched.push(sub.order_id); continue; }
     const touched = [];
     // text answers
     if(sub.answers){ Object.keys(sub.answers).forEach(k=>{ if(sub.answers[k]!=='' && sub.answers[k]!=null){ o[k] = sub.answers[k]; touched.push(k); } }); }
@@ -1760,6 +1763,7 @@ async function syncSubmissions(){
   // After merging, auto-complete any open info-request whose necessary fields are now all filled.
   if(typeof reconcileInfoRequests === 'function') reconcileInfoRequests();
   if(applied){ DATA.orders.forEach(o=>applyEvidenceAdvances(o)); if(typeof stampRequiredFields==='function') DATA.orders.forEach(o=>stampRequiredFields(o)); saveData(); renderAll(); showToast(applied+' external submission'+(applied>1?'s':'')+' received — order updated', 'success'); }
+  if(unmatched.length){ const ids=[...new Set(unmatched)]; showToast(ids.length+' submission'+(ids.length>1?'s':'')+' received for an order not found here (ID'+(ids.length>1?'s':'')+': '+ids.join(', ')+'). Check the order ID matches.', 'info'); }
   return applied;
 }
 
