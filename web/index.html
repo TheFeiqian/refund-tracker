@@ -1262,7 +1262,7 @@ const TASK_CATALOG = [
     completed_when: (o) => fieldFilled(o, 'inbound_tracking'),
     completed_via: 'inbound_tracking is filled',
     info_needed: 'Access to order placer’s email or phone to find confirmation',
-    instruction_template: 'Hi {person},\n\nThe order at {store} has been placed but we don’t have tracking yet. Please check {email} for the dispatch confirmation and reply with:\n\n  - Tracking number\n  - Courier (DPD / Royal Mail / etc)\n  - Estimated delivery date\n\nOrder ref: {order_id}\nItems: {items}\nValue: £{price}' },
+    instruction_template: 'Hi {person},\n\nThe order at {store} has been placed but we don’t have tracking yet. Please check {email} for the dispatch confirmation and reply with:\n\n  - Tracking number\n  - Courier (DPD / Royal Mail / etc)\n  - Estimated delivery date\n\nOnce delivered, we also need the proof-of-delivery photo. {courier_proof}\n\nOrder ref: {order_id}\nItems: {items}\nValue: £{price}' },
 
   { code: 'choose_method', name: 'Choose return method (admin)', stage: 3, sla: 24, owner_only: true, admin_only: true, info_only: true,
     appears_when: 'Item delivered ✓ (stage 3) — admin decides the method',
@@ -1394,7 +1394,7 @@ const FIELD_DEFS = {
   address: { label: 'Delivery address', required: true, type: 'textarea', help: 'Full address as entered at checkout', full: true },
   person: { label: 'Person responsible', required: true, type: 'text', help: 'Who placed and owns this order' },
   inbound_tracking: { label: 'Inbound tracking number', required: true, type: 'text', help: 'From order confirmation email' },
-  inbound_courier: { label: 'Inbound courier', required: true, type: 'text', help: 'DPD, Royal Mail, etc' },
+  inbound_courier: { label: 'Inbound courier', required: true, type: 'select', options: ['','Royal Mail','Evri','Parcelforce','DPD','DHL','FedEx','UPS','Yodel','Other'], help: 'Drives the collect-tracking proof-of-delivery steps' },
   order_date: { label: 'Order date', required: false, type: 'text', help: 'DD/MM/YYYY' },
   delivery_date_text: { label: 'Delivery date', required: true, type: 'text', help: 'DD/MM/YYYY when it actually arrived (or was marked delivered)' },
   delivery_photo: { label: 'Delivery photo URL', required: false, type: 'text', help: 'Link to courier-provided photo evidence' },
@@ -1552,6 +1552,51 @@ const METHOD_CHAINS = {
 const CONTINGENT_TASKS = ['submit_chargeback','submit_small_claims_court'];
 // UK banks (high-street + app-based + main card issuers) for the structured card_used input.
 const UK_BANKS = ['Atom Bank','American Express','Bank of Scotland','Barclays','Capital One','Chase','Chip','Co-operative Bank','Coutts','Danske Bank','First Direct','Halifax','HSBC','Kroo','Lloyds','MBNA','Metro Bank','Monzo','Nationwide','NatWest','NewDay','RBS','Revolut','Santander','Starling Bank','Tide','TSB','Ulster Bank','Vanquis','Virgin Money','Wise','Yorkshire Bank','Zopa','Other'];
+// Courier registry: tracking-page URL builder + how to get the proof-of-delivery photo.
+// "simple" couriers show the POD photo with just postcode + tracking number; the others need
+// specific steps. Used by the inbound-courier dropdown, the collect-tracking task, and tracking links.
+const COURIERS = {
+  'Royal Mail':  { track: t => 'https://www.royalmail.com/track-your-item#/tracking-results/' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: enter the tracking number on Royal Mail’s tracking page — the GPS/photo proof shows with just the postcode and tracking number.' },
+  'Evri':        { track: t => 'https://www.evri.com/track/parcel/' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: track on Evri with the tracking number and the delivery postcode — the photo appears on the tracking page.' },
+  'Parcelforce': { track: t => 'https://www.parcelforce.com/track-trace?trackNumber=' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: enter the tracking number on Parcelforce’s tracking page — the POD/photo shows with just the postcode and tracking number.' },
+  'DPD':         { track: t => 'https://track.dpd.co.uk/parcels/' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: the DPD tracking page shows the delivery photo automatically once you enter the tracking number.' },
+  'DHL':         { track: t => 'https://www.dhl.com/gb-en/home/tracking/tracking-parcel.html?tracking-id=' + encodeURIComponent(t), proof: 'Proof of delivery (DHL): open the tracking page, then use “Get Proof of Delivery” — you may need the receiver’s details/postcode. The signed/photo POD is downloadable or emailed.' },
+  'FedEx':       { track: t => 'https://www.fedex.com/fedextrack/?trknbr=' + encodeURIComponent(t), proof: 'Proof of delivery (FedEx): open the tracking page and choose “Obtain Proof of Delivery” — enter the destination postcode and submit; the POD is emailed/downloadable.' },
+  'UPS':         { track: t => 'https://www.ups.com/track?tracknum=' + encodeURIComponent(t), proof: 'Proof of delivery (UPS): open the tracking page and select “Proof of Delivery” — the photo/signature shows; you may need the postcode.' },
+  'Yodel':       { track: t => 'https://www.yodel.co.uk/tracking/' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: track on Yodel with the tracking number and postcode — the photo appears on the tracking page.' },
+  'Other':       { track: t => '', proof: 'Proof of delivery: use the retailer’s tracking link for this courier — steps vary, look for “proof of delivery” or a delivery photo.' },
+};
+const COURIER_LIST = ['Royal Mail','Evri','Parcelforce','DPD','DHL','FedEx','UPS','Yodel','Other'];
+function normCourier(c){
+  if(!c) return '';
+  const k = String(c).trim().toLowerCase();
+  const hit = COURIER_LIST.find(x=>x.toLowerCase()===k);
+  if(hit) return hit;
+  if(k==='fedex'||k==='fed ex') return 'FedEx';
+  if(k==='royalmail') return 'Royal Mail';
+  if(k==='hermes') return 'Evri';
+  return c; // unknown → leave as-is
+}
+function trackingLink(courier, number){
+  const c = COURIERS[normCourier(courier)];
+  if(!c || !number) return '';
+  try { return c.track(String(number).replace(/\s+/g,'')); } catch(e){ return ''; }
+}
+function courierProof(courier){
+  const c = COURIERS[normCourier(courier)];
+  return c ? c.proof : '';
+}
+// Live-update the tracking links + courier proof text as the editor fields change.
+function updateTrackingLinks(){
+  const ic = document.getElementById('f_inbound_courier');
+  const it = document.getElementById('f_inbound_tracking');
+  const oc = document.getElementById('f_outbound_courier');
+  const ot = document.getElementById('f_outbound_tracking');
+  const mk = (courier, num)=>{ const u=trackingLink(courier, num); return u? '<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(courier))+'</a>' : ''; };
+  if(ic && it){ const el=document.getElementById('f_inbound_tracking_link'); if(el) el.innerHTML = mk(ic.value, it.value); }
+  if(ic){ const pe=document.getElementById('f_inbound_courier_proof'); if(pe) pe.textContent = courierProof(ic.value); }
+  if(ot){ const el=document.getElementById('f_outbound_tracking_link'); if(el) el.innerHTML = mk(oc?oc.value:'', ot.value); }
+}
 // card_used is stored as "Bank — Type" (e.g. "Monzo — Debit"). These compose/parse it.
 function composeCardUsed(bank, type){ bank=(bank||'').trim(); type=(type||'').trim(); if(!bank) return ''; return type ? (bank+' — '+type) : bank; }
 function parseCardUsed(v){ v=(v||'').trim(); if(!v) return {bank:'',type:''}; const m=v.split('—'); return {bank:(m[0]||'').trim(), type:(m[1]||'').trim()}; }
@@ -2648,6 +2693,19 @@ function tplVal(order, key) {
   // store_contact pulls the retailer's contact details from the store record (not the order).
   if (key === 'store_contact') {
     return (typeof formatStoreContact === 'function') ? formatStoreContact(order) : null;
+  }
+  // Per-courier proof-of-delivery instructions for the inbound courier.
+  if (key === 'courier_proof') {
+    const p = (typeof courierProof === 'function') ? courierProof(order.inbound_courier) : '';
+    return p || null;
+  }
+  if (key === 'inbound_tracking_link') {
+    const u = (typeof trackingLink === 'function') ? trackingLink(order.inbound_courier, order.inbound_tracking) : '';
+    return u || null;
+  }
+  if (key === 'outbound_tracking_link') {
+    const u = (typeof trackingLink === 'function') ? trackingLink(order.outbound_courier, order.outbound_tracking) : '';
+    return u || null;
   }
   // address in retailer-facing messages uses the SPECIFIED (deliberately-imperfect) address
   // when one is set — the correct original stays internal for reference.
@@ -4831,8 +4889,8 @@ function openOrderModal(orderId) {
     <div class="form-grid">
       <div class="form-field"><label>Order date</label><input type="text" id="f_order_date" value="${escAttr(order.order_date)}" placeholder="DD/MM/YYYY"></div>
       <div class="form-field"><label>Delivery date</label><input type="text" id="f_delivery_date_text" value="${escAttr(order.delivery_date_text)}" placeholder="DD/MM/YYYY" onchange="onDeliveryDateInput()"></div>
-      <div class="form-field"><label>Inbound tracking</label><input type="text" id="f_inbound_tracking" value="${escAttr(order.inbound_tracking)}"></div>
-      <div class="form-field"><label>Inbound courier</label><input type="text" id="f_inbound_courier" value="${escAttr(order.inbound_courier)}"></div>
+      <div class="form-field"><label>Inbound tracking</label><input type="text" id="f_inbound_tracking" value="${escAttr(order.inbound_tracking)}" oninput="updateTrackingLinks()"><div id="f_inbound_tracking_link" style="font-size:11px;margin-top:3px">${(function(){const u=trackingLink(order.inbound_courier, order.inbound_tracking); return u?'<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(order.inbound_courier))+'</a>':'';})()}</div></div>
+      <div class="form-field"><label>Inbound courier <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">drives the collect-tracking proof steps</span></label><select id="f_inbound_courier" onchange="updateTrackingLinks()"><option value="">(none)</option>${COURIER_LIST.map(c=>`<option ${normCourier(order.inbound_courier)===c?'selected':''}>${c}</option>`).join('')}</select><div id="f_inbound_courier_proof" style="font-size:11px;margin-top:4px;color:var(--ink-faded)">${escapeHtml(courierProof(order.inbound_courier))}</div></div>
       <div class="form-field full">
         <label>Delivery photo (image or URL) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">file or text</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
@@ -4869,7 +4927,7 @@ function openOrderModal(orderId) {
         </div>
       </div>
       <div class="form-field"><label>Return label date</label><input type="text" id="f_return_label_date" value="${escAttr(order.return_label_date)}"></div>
-      <div class="form-field"><label>Outbound tracking <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_outbound_tracking" value="${escAttr(order.outbound_tracking)}"></div>
+      <div class="form-field"><label>Outbound tracking <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_outbound_tracking" value="${escAttr(order.outbound_tracking)}" oninput="updateTrackingLinks()"><div id="f_outbound_tracking_link" style="font-size:11px;margin-top:3px">${(function(){const u=trackingLink(order.outbound_courier, order.outbound_tracking); return u?'<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(order.outbound_courier))+'</a>':'';})()}</div></div>
       <div class="form-field"><label>Outbound courier <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_outbound_courier" value="${escAttr(order.outbound_courier)}"></div>
       <div class="form-field"><label>Postage date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_postage_date" value="${escAttr(order.postage_date)}" placeholder="DD/MM/YYYY"></div>
       <div class="form-field"><label>Posted from <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_posted_from" value="${escAttr(order.posted_from)}" placeholder="Post Office / parcelshop name"></div>
