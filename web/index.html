@@ -1693,7 +1693,9 @@ function buildFormLink(order, group, taskCode, taskLabel, mandSet){
     const isFile = FILE_FIELDS.indexOf(k) >= 0;
     // required is driven by the caller's mandatory set (current-stage-essential),
     // not the static FIELD_DEFS.required — so optional backfill fields stay optional.
-    const req = mandSet ? !!mandSet[k] : !!def.required;
+    // HARD RULE: the order-confirmation PDF is NEVER required to complete a form. It exists only
+    // to auto-fill other fields, and uploading it is always the submitter's choice.
+    const req = (k === 'order_confirmation') ? false : (mandSet ? !!mandSet[k] : !!def.required);
     let kind = isFile ? 'file' : (def.type === 'select' ? 'select' : (def.type === 'textarea' ? 'textarea' : (def.type === 'number' ? 'number' : 'text')));
     let options = def.options || undefined;
     if(k === 'card_used'){ kind = 'card'; options = UK_BANKS; }

@@ -40,6 +40,7 @@
     <form id="form" style="display:none" onsubmit="return false">
       <h1 id="title">Submit information</h1>
       <p class="sub" id="subtitle"></p>
+      <div id="autofill"></div>
       <div id="fields"></div>
       <button class="submit" id="submitBtn" onclick="submitForm()">Submit</button>
       <div id="msg"></div>
@@ -77,6 +78,61 @@ function init(){
   document.getElementById('title').textContent = DEF.title || ('Information needed for order ' + DEF.order);
   document.getElementById('subtitle').textContent = DEF.subtitle || ('Order #' + DEF.order + (DEF.store ? ' · ' + DEF.store : '') + (DEF.person ? ' · for ' + DEF.person : ''));
   renderFields();
+  renderAutofill();
+}
+
+// Optional: the submitter can upload the order confirmation email/PDF, and we read it with AI to
+// pre-fill the form. This is ALWAYS optional — the confirmation is never required to submit.
+function renderAutofill(){
+  const box = document.getElementById('autofill'); if(!box) return;
+  box.innerHTML =
+    '<div style="border:1px dashed var(--accent); background:var(--accent-soft); border-radius:10px; padding:12px; margin-bottom:16px">'
+    + '<div style="font-weight:600; font-size:13px; margin-bottom:4px">⚡ Fill this in automatically (optional)</div>'
+    + '<div style="font-size:12px; color:var(--ink-faded); margin-bottom:8px">Have the order confirmation email or PDF? Upload it and we’ll read the details and fill the form in for you. You can still edit anything afterwards — and you don’t have to use this.</div>'
+    + '<label class="filebtn">📎 <span id="acfBtn">Upload order confirmation</span><input type="file" accept="image/*,application/pdf" onchange="onConfirmationFile(this)"></label>'
+    + '<div class="filename" id="acfMsg" style="color:var(--ink-faded)"></div>'
+    + '</div>';
+}
+
+let CONFIRMATION_FILE = null;
+async function onConfirmationFile(input){
+  const file = input.files[0]; if(!file) return;
+  const msg = document.getElementById('acfMsg');
+  const btn = document.getElementById('acfBtn');
+  btn.textContent = 'Reading…'; msg.style.color = 'var(--ink-faded)'; msg.textContent = 'Reading the document…';
+  const r = new FileReader();
+  r.onload = async ()=>{
+    try {
+      const dataUrl = r.result;
+      const comma = dataUrl.indexOf(',');
+      const meta = dataUrl.slice(0, comma);
+      const b64 = dataUrl.slice(comma+1);
+      const mt = (meta.match(/data:([^;]+)/)||[])[1] || file.type || 'application/octet-stream';
+      // keep the file so it's attached as the order confirmation on submit (optional, never required)
+      CONFIRMATION_FILE = { dataUrl, name:file.name, type:mt };
+      const resp = await fetch('/api/ai', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ task:'parse_order', image_base64:b64, media_type:mt }) });
+      if(!resp.ok) throw new Error('parse failed');
+      const data = await resp.json();
+      const fields = (data && data.fields) || {};
+      let filled = 0;
+      DEF.fields.forEach((f,i)=>{
+        if(f.kind === 'file') return;
+        const val = fields[f.key];
+        if(val !== undefined && val !== null && val !== '' && val !== 0){
+          const el = document.getElementById('fld'+i);
+          if(el && !el.value){ el.value = (f.kind==='number') ? val : String(val); filled++; }
+        }
+      });
+      btn.textContent = '✓ ' + file.name;
+      msg.style.color = 'var(--green)';
+      msg.textContent = filled ? ('Filled in ' + filled + ' field' + (filled>1?'s':'') + ' — please check them and add anything still missing.') : 'Uploaded and attached. Couldn’t auto-read the fields — please fill the form in manually.';
+    } catch(e){
+      btn.textContent = 'Upload order confirmation';
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Couldn’t read that automatically — you can still fill the form in manually and submit.';
+    }
+  };
+  r.readAsDataURL(file);
 }
 
 function renderFields(){
@@ -119,6 +175,8 @@ async function submitForm(){
   // collect
   const answers = {};      // field key -> text value
   const fileUploads = [];  // { key, dataUrl, name, type }
+  // If the submitter uploaded the order confirmation for auto-fill, attach it too (optional).
+  if(CONFIRMATION_FILE){ fileUploads.push({ key:'order_confirmation', dataUrl:CONFIRMATION_FILE.dataUrl, name:CONFIRMATION_FILE.name, type:CONFIRMATION_FILE.type }); }
   for(let i=0;i<DEF.fields.length;i++){
     const f = DEF.fields[i];
     if(f.kind === 'file'){
