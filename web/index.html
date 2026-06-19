@@ -2244,6 +2244,103 @@ function onEvidenceProvided(fieldKey){
   const key=evidenceTriggerFor(fieldKey, mEl?mEl.value:'');
   if(key) tickTriggerLive(key);
 }
+
+// ---- Retailer-reply AI: read a pasted retailer message, fill the outcome fields for review ----
+let __lastRetailerExtraction = null;
+function todayDDMMYYYY(){ const d=new Date(); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'/'+p(d.getMonth()+1)+'/'+d.getFullYear(); }
+async function parseRetailerReply(){
+  const ta = document.getElementById('f_retailer_reply');
+  const text = ta ? ta.value.trim() : '';
+  const msg = document.getElementById('retailerReplyMsg');
+  const out = document.getElementById('retailerReplyResult');
+  if(!text){ if(msg) msg.textContent='Paste the retailer message first.'; return; }
+  if(msg) msg.textContent='Reading…'; if(out) out.innerHTML='';
+  const order = DATA.orders.find(o=>o.order_id===editingOrderId) || {};
+  try {
+    const res = await fetch((window.APP_CONFIG&&window.APP_CONFIG.aiProxyUrl)||'/api/ai', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ task:'parse_retailer_reply', text, context:{ store:order.store||'', method:order.method||'' } })
+    });
+    if(!res.ok) throw new Error('proxy '+res.status);
+    const data = await res.json();
+    const f = (data && data.fields) || {};
+    if(!f.outcome){ throw new Error('no outcome'); }
+    if(msg) msg.textContent='';
+    __lastRetailerExtraction = f;
+    renderRetailerExtraction(f);
+  } catch(e){
+    if(msg){ msg.style.color='var(--red)'; msg.textContent='Could not read that automatically — fill the fields manually.'; }
+  }
+}
+// Map an AI outcome to the concrete form fields it should fill (for review, not auto-save).
+function retailerSuggestions(f){
+  const today = todayDDMMYYYY();
+  const o = f.outcome || '';
+  const s = [];
+  if(o==='refund_issued'){
+    s.push({ label:'Refund received date', fieldId:'f_refund_received_date', value: (f.refund_date||today) });
+    if(f.refund_amount && parseFloat(f.refund_amount)>0) s.push({ label:'Refund amount (£)', fieldId:'f_refund_received_amount', value: String(f.refund_amount) });
+  } else if(o==='refund_refused'){
+    s.push({ label:'Refund refused date', fieldId:'f_refund_refused_date', value: today });
+  } else if(o==='investigation_opened'){
+    if(f.deadline) s.push({ label:'Investigation deadline', fieldId:'f_investigation_deadline', value: f.deadline });
+  }
+  return s;
+}
+function outcomeLabel(o){
+  return ({ refund_issued:'Refund issued', refund_refused:'Refund refused', return_approved:'Return approved',
+    label_provided:'Return label provided', investigation_opened:'Investigation opened',
+    more_info_requested:'More info requested', acknowledged_no_decision:'Acknowledged — no decision yet',
+    unclear:'Unclear' })[o] || o;
+}
+function renderRetailerExtraction(f){
+  const out = document.getElementById('retailerReplyResult'); if(!out) return;
+  const sugg = retailerSuggestions(f);
+  let h = '<div style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--line-soft)">';
+  h += '<div style="font-size:12px"><strong>'+escapeHtml(outcomeLabel(f.outcome))+'</strong></div>';
+  if(f.summary) h += '<div style="font-size:12px;color:var(--ink-faded);margin-top:3px">'+escapeHtml(f.summary)+'</div>';
+  const facts = [];
+  if(f.reference) facts.push('Ref: '+f.reference);
+  if(f.deadline) facts.push('Deadline: '+f.deadline);
+  if(f.refund_amount && parseFloat(f.refund_amount)>0) facts.push('Amount: £'+f.refund_amount);
+  if(f.refund_date) facts.push('Refunded: '+f.refund_date);
+  if(f.refusal_reason) facts.push('Reason: '+f.refusal_reason);
+  if(facts.length) h += '<div style="font-size:11px;font-family:var(--mono);margin-top:5px">'+escapeHtml(facts.join('  ·  '))+'</div>';
+  if(sugg.length){
+    h += '<div style="font-size:11px;color:var(--ink-faded);margin-top:8px;margin-bottom:3px">Will fill (review before saving):</div>';
+    h += sugg.map(s=>'<div style="font-size:12px">• '+escapeHtml(s.label)+' → <strong>'+escapeHtml(s.value)+'</strong></div>').join('');
+    h += '<button type="button" class="primary small" style="margin-top:8px" onclick="applyRetailerExtraction()">Apply to form</button>';
+  } else {
+    h += '<div style="font-size:12px;color:var(--ink-faded);margin-top:8px">No automatic field change for this outcome — handle it manually (e.g. upload the label, or chase). The reference and any notes are added below.</div>';
+    h += '<button type="button" class="small" style="margin-top:8px" onclick="applyRetailerExtraction()">Add reference to notes</button>';
+  }
+  h += '</div>';
+  out.innerHTML = h;
+}
+function applyRetailerExtraction(){
+  const f = __lastRetailerExtraction; if(!f) return;
+  const sugg = retailerSuggestions(f);
+  const filled = [];
+  sugg.forEach(s=>{
+    const el = document.getElementById(s.fieldId);
+    if(el){ el.value = s.value; el.style.outline='2px solid var(--accent)'; setTimeout(()=>{ if(el) el.style.outline=''; }, 2500);
+      const fieldKey = s.fieldId.replace(/^f_/,'');
+      if(typeof onEvidenceProvided==='function') onEvidenceProvided(fieldKey);
+      filled.push(s.label);
+    }
+  });
+  // Capture the reference and any refusal reason into notes so nothing is lost.
+  const note = [];
+  if(f.reference) note.push('Retailer ref: '+f.reference);
+  if(f.refusal_reason) note.push('Refusal reason: '+f.refusal_reason);
+  if(note.length){
+    const nEl = document.getElementById('f_notes');
+    if(nEl){ const sep = nEl.value.trim() ? '\n' : ''; nEl.value = nEl.value + sep + note.join('  |  '); }
+  }
+  if(typeof updateModalStageHint==='function') updateModalStageHint();
+  const msg = document.getElementById('retailerReplyMsg');
+  if(msg){ msg.style.color='var(--green)'; msg.textContent = filled.length ? ('Filled '+filled.length+' field'+(filled.length>1?'s':'')+' — review, then Save.') : 'Added to notes — review, then Save.'; }
+}
 function onDeliveryDateInput(){
   const el=document.getElementById('f_delivery_date_text');
   if(el && deliveryDatePassed({delivery_date_text:el.value})) tickTriggerLive('item_delivered');
@@ -5071,6 +5168,16 @@ function openOrderModal(orderId) {
       <div class="form-field"><label>Court outcome</label><select id="f_court_outcome">${['','won','lost','partial','settled'].map(o => `<option ${order.court_outcome === o ? 'selected' : ''}>${o}</option>`).join('')}</select></div>
       <div class="form-field"><label>Total recovered (£)</label><input type="number" step="0.01" id="f_total_recovered" value="${order.total_recovered || ''}" onchange="onEvidenceProvided('refund_received_date')"></div>
     </div>
+    <div class="form-section-title">Retailer reply (AI)</div>
+    <div class="form-grid full"><div class="form-field full">
+      <label>Paste the retailer's email or message <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">Claude reads it and fills the outcome fields for you to review before saving</span></label>
+      <textarea id="f_retailer_reply" rows="4" placeholder="Paste what the retailer said (return approved/refused, a reference, a deadline, a refund amount/date)…"></textarea>
+      <div style="display:flex;gap:8px;margin-top:6px;align-items:center">
+        <button type="button" class="small" onclick="parseRetailerReply()">✨ Read with AI</button>
+        <span id="retailerReplyMsg" style="font-size:12px;color:var(--ink-faded)"></span>
+      </div>
+      <div id="retailerReplyResult" style="margin-top:8px"></div>
+    </div></div>
     <div class="form-section-title">Notes</div>
     <div class="form-grid full"><div class="form-field full"><textarea id="f_notes" rows="3">${escapeHtml(order.notes)}</textarea></div></div>
     <div class="form-section-title">History</div>

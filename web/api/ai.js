@@ -197,6 +197,29 @@ module.exports = async (req, res) => {
       return res.status(200).json(jsonFromText(text) || {});
     }
 
+    if (task === 'parse_retailer_reply') {
+      const ctx = payload.context || {};
+      const text = await callAnthropic(apiKey, {
+        system: 'You read a reply from an online retailer to a customer who returned an item or asked for a refund. '
+          + 'Classify the outcome and extract the key facts for a returns-tracking tool. Reply with ONLY a JSON object, no prose. '
+          + 'Dates must be DD/MM/YYYY exactly as stated on the message; if a date is relative ("within 14 days") or absent, return an empty string — never compute or invent one. '
+          + 'Never invent a reference number or a refund amount; if it is not clearly stated, leave it empty / 0.',
+        userText: 'Retailer: ' + (ctx.store || 'unknown') + '. '
+          + (ctx.method ? ('Return method in progress: ' + ctx.method + '. ') : '')
+          + 'Here is the retailer\'s message:\n\n"""\n' + String(payload.text || '').slice(0, 6000) + '\n"""\n\n'
+          + 'Return ONLY this JSON: {'
+          + '"outcome":"exactly one of: refund_issued | refund_refused | return_approved | label_provided | investigation_opened | more_info_requested | acknowledged_no_decision | unclear",'
+          + '"reference":"any case / return / investigation / RMA reference number stated, else empty",'
+          + '"deadline":"a date the retailer says they will respond or complete by, DD/MM/YYYY exactly as written, else empty",'
+          + '"refund_amount":"the refund amount as a plain number with no currency symbol if one is stated, else 0",'
+          + '"refund_date":"the date a refund was actually issued/processed, DD/MM/YYYY, else empty",'
+          + '"refusal_reason":"if the return/refund was refused, their stated reason in a few words, else empty",'
+          + '"summary":"one plain-English sentence summarising what the retailer said"'
+          + '}.',
+      });
+      return res.status(200).json({ fields: jsonFromText(text) || {} });
+    }
+
     return res.status(400).json({ error: 'unknown task: ' + task });
   } catch (e) {
     return res.status(502).json({ error: String((e && e.message) || e) });
