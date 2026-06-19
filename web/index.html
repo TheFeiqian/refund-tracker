@@ -803,7 +803,15 @@ async function hostedFetchAll() {
   // Defensive: drop any deleted orders that may still be in the DB from before this fix.
   if (window.__HOSTED.deletedOrders.length) {
     const dset = {}; window.__HOSTED.deletedOrders.forEach(id => dset[id] = true);
+    // Which deleted IDs are STILL physically present in the table we just loaded?
+    const stillPresent = (window.__HOSTED.orders || []).filter(o => dset[o.order_id]).map(o => o.order_id);
+    // Filter them out of the in-memory set so they never display.
     window.__HOSTED.orders = (window.__HOSTED.orders || []).filter(o => !dset[o.order_id]);
+    // And physically remove them from the table so the "old database" stops re-serving them on
+    // every refresh. Best-effort; the filter above already guarantees they won't show regardless.
+    if (stillPresent.length) {
+      try { await sb.from('orders').delete().in('order_id', stillPresent); } catch (e) {}
+    }
   }
 }
 
@@ -2296,15 +2304,29 @@ function computeStage(order) {
 //   completed   = the task's completion artifact exists in the order data
 //   prereqs_met = all tasks listed in `requires` are currently completed
 //   waiting     = not completed AND prereqs not met (sequential placeholder)
+// Has this task been marked complete by a submission (public form) or a manual mark? Checks both
+// trackers: formTrack (orderId::code, set by markSubmissionComplete) and taskStatus (orderId__code).
+function taskMarkedComplete(orderId, taskCode){
+  try {
+    const ft = (DATA._formTrack || {})[orderId + '::' + (taskCode||'')];
+    if(ft && ft.completed_at) return true;
+    const ts = (DATA._taskStatus || {})[orderId + '__' + (taskCode||'')];
+    if(ts && ts.completed_at) return true;
+  } catch(e){}
+  return false;
+}
 function getAllTasksForOrder(order) {
   const stage = computeStage(order);
   if (stage === 'done') return [];
   const stageTasks = TASK_CATALOG.filter(tt => tt.stage === stage && (!tt.applies_when || tt.applies_when(order)));
   
-  // First pass: compute completion for every task at this stage
+  // First pass: compute completion for every task at this stage.
+  // A task counts as complete if its evidence says so OR a submission/manual-send marked it complete
+  // (master rule: if the outcome of a task is already recorded, the task auto-completes). This is
+  // what stops a form-completed task — e.g. one finished via the public form — from re-appearing.
   const completionMap = {};
   stageTasks.forEach(tt => {
-    completionMap[tt.code] = !!(tt.completed_when && tt.completed_when(order));
+    completionMap[tt.code] = !!(tt.completed_when && tt.completed_when(order)) || taskMarkedComplete(order.order_id, tt.code);
   });
   
   // Second pass: annotate with prereq status
@@ -4869,7 +4891,7 @@ function openOrderModal(orderId) {
       <div class="form-field"><label>Total volume (litres) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">BBM: &gt;60 L = collection</span></label><input type="number" step="1" id="f_total_volume_l" value="${order.total_volume_l || ''}" placeholder="e.g. 40"></div>
       <div class="form-field"><label>Card used <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">bank + type — chargeback bank derives from this</span></label>
         <div style="display:flex;gap:6px">
-          <select id="f_card_bank" style="flex:2">${['<option value="">(bank)</option>'].concat(UK_BANKS.map(b=>'<option '+((parseCardUsed(order.card_used).bank===b)?'selected':'')+'>'+escapeHtml(b)+'</option>')).join('')}</select>
+          <select id="f_card_bank" onchange="(function(){var cb=document.getElementById('f_chargeback_bank'); var v=document.getElementById('f_card_bank').value; if(cb && v && v!=='Other') cb.value=v;})()" style="flex:2">${['<option value="">(bank)</option>'].concat(UK_BANKS.map(b=>'<option '+((parseCardUsed(order.card_used).bank===b)?'selected':'')+'>'+escapeHtml(b)+'</option>')).join('')}</select>
           <select id="f_card_type" style="flex:1"><option value="">(type)</option><option ${parseCardUsed(order.card_used).type==='Credit'?'selected':''}>Credit</option><option ${parseCardUsed(order.card_used).type==='Debit'?'selected':''}>Debit</option></select>
         </div>
       </div>
@@ -5141,7 +5163,17 @@ function ofRenderItems(){
     + '</div>'
   ).join('');
 }
-function ofItemField(i,k,v){ if(OF_ITEMS[i]){ OF_ITEMS[i][k]= (k==='qty'? (parseInt(v)||1) : v); } }
+function ofItemField(i,k,v){
+  if(OF_ITEMS[i]){
+    OF_ITEMS[i][k]= (k==='qty'? (parseInt(v)||1) : v);
+    // Per-item prices total automatically into the order's total price field as they're entered.
+    if(k==='price' || k==='qty'){
+      const sumP = OF_ITEMS.reduce((s,it)=> s + ((parseFloat(it.price)||0)*(it.qty||1)), 0);
+      const pe = document.getElementById('f_price');
+      if(pe && sumP>0) pe.value = Math.round(sumP*100)/100;
+    }
+  }
+}
 function ofAddItemRow(){ OF_ITEMS.push({name:'',qty:1,weight:'',volume:'',price:''}); ofRenderItems(); if(typeof ofRenderTrackings==='function') ofRenderTrackings(); }
 function ofRemoveItem(i){ OF_ITEMS.splice(i,1); if(!OF_ITEMS.length) OF_ITEMS=[{name:'',qty:1,weight:'',volume:'',price:''}]; ofRenderItems(); if(typeof ofRenderTrackings==='function') ofRenderTrackings(); }
 
