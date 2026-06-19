@@ -2582,18 +2582,37 @@ function necessaryInfoFields(order, cls){
 // Auto-complete rule: any open info-request whose necessary fields are now ALL filled is marked done.
 function reconcileInfoRequests(){
   const s = formTrackStore();
+  // Build a quick lookup of task code -> catalog entry (for completed_when checks).
+  const byCode = {};
+  if(typeof TASK_CATALOG !== 'undefined'){ TASK_CATALOG.forEach(t => { byCode[t.code] = t; }); }
   Object.keys(s).forEach(k => {
     const rec = s[k];
     if(!rec || rec.completed_at) return;
-    const m = /^(.*)::info:(.*)$/.exec(k);
-    if(!m) return;
-    const orderId = m[1], cls = m[2];
-    const order = DATA.orders.find(o => o.order_id === orderId);
-    if(!order) return;
-    const need = necessaryInfoFields(order, cls);
-    // If there are no outstanding necessary fields for this class, the request is satisfied.
-    const allFilled = need.every(f => (typeof fieldFilled === 'function') ? fieldFilled(order, f) : !!order[f]);
-    if(allFilled){ rec.completed_at = Date.now(); }
+    // Info-request record: orderId::info:cls  → satisfied when its necessary fields are all filled.
+    const mi = /^(.*)::info:(.*)$/.exec(k);
+    if(mi){
+      const orderId = mi[1], cls = mi[2];
+      const order = DATA.orders.find(o => o.order_id === orderId);
+      if(!order) return;
+      const need = necessaryInfoFields(order, cls);
+      const allFilled = need.every(f => (typeof fieldFilled === 'function') ? fieldFilled(order, f) : !!order[f]);
+      if(allFilled){ rec.completed_at = Date.now(); }
+      return;
+    }
+    // Task record: orderId::taskCode → satisfied when that task's recorded outcome exists.
+    // (Master rule: if the outcome of a task is already recorded, the task auto-completes, so it
+    //  should leave the In Progress list without anyone marking it by hand.)
+    const mt = /^(.*)::(.*)$/.exec(k);
+    if(mt){
+      const orderId = mt[1], code = mt[2];
+      const tt = byCode[code];
+      const order = DATA.orders.find(o => o.order_id === orderId);
+      if(order && tt && tt.completed_when){
+        // make sure the order's triggers reflect any recorded evidence first
+        if(typeof applyEvidenceAdvances === 'function') applyEvidenceAdvances(order);
+        if(tt.completed_when(order)){ rec.completed_at = Date.now(); }
+      }
+    }
   });
 }
 function markSubmissionComplete(orderId, taskCode){
@@ -3376,6 +3395,9 @@ function ipUrgency(ms){ const d=ms/86400000; if(d>=3) return 'overdue'; if(d>=1)
 function initials(name){ const p=(name||'').trim().split(/\s+/); return ((p[0]||'?')[0]+(p[1]?p[1][0]:'')).toUpperCase(); }
 function renderInProgress(){
   const grid = document.getElementById('inProgressGrid'); if(!grid) return;
+  // Auto-close any sent task/info-request whose outcome is now recorded, so completed work doesn't
+  // linger here as "outstanding".
+  if(typeof reconcileInfoRequests === 'function') reconcileInfoRequests();
   const ft = (typeof formTrackStore==='function') ? formTrackStore() : {};
   let recs = Object.keys(ft).map(k=>Object.assign({_key:k}, ft[k])).filter(r=>r && r.sent_at);
   const openRecs = recs.filter(r=>!r.completed_at);
