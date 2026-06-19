@@ -629,6 +629,9 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 <script>
 // ============ Hosted persistence adapter (Supabase) ============
 const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
+// Fields that accept MULTIPLE files (kept in an array `${field}s`, with the first as the primary value).
+const MULTI_FILE_FIELDS = ['return_label_pdf','proof_of_postage'];
+function multiFileArrayKey(fieldKey){ return fieldKey + 's'; } // return_label_pdf -> return_label_pdfs, proof_of_postage -> proof_of_postages
 let sb = null;
 window.__HOSTED = { orders: [], storeFlags: {}, burndown: [] };
 let __orderHashes = {};
@@ -673,13 +676,17 @@ window.__visionCheckImpl = async function (field, dataUrl) {
   try {
     const { media_type, image_base64 } = __dataUrlParts(dataUrl);
     const kind = field === 'damage_photo' ? 'damage' : 'delivery';
-    const { data, error } = await sb.functions.invoke('analyze-photo', { body: { image_base64, media_type, kind } });
-    if (error || !data) return { ok: false, label: 'AI check unavailable' };
+    // Goes through the same /api/ai proxy as every other AI feature (the old sb.functions
+    // 'analyze-photo' edge function was never deployed).
+    const resp = await fetch('/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task: 'analyze_photo', image_base64, media_type, kind }) });
+    if (!resp.ok) return { ok: false, label: 'AI check unavailable' };
+    const data = await resp.json();
+    if (!data) return { ok: false, label: 'AI check unavailable' };
     if (kind === 'damage') {
       const visible = data.damage_visible === 'yes' || data.damage_visible === true;
       return { ok: visible, label: visible ? 'AI: damage visible' + (data.note ? ' — ' + data.note : '') : 'AI: damage not clearly visible — ask for a clearer shot' };
     }
-    const person = data.shows_person === 'yes';
+    const person = data.shows_person === 'yes' || data.shows_person === true;
     return { ok: !person, label: person ? 'AI: person visible in photo' : 'AI: no person detected → DNA candidate', showsPersonNo: !person };
   } catch (e) { return { ok: false, label: 'AI check failed' }; }
 };
@@ -1368,11 +1375,11 @@ const TASK_CATALOG = [
 
   { code: 'file_court_claim', name: 'File court claim', stage: 8, sla: 168, owner_only: false, info_only: false,
     appears_when: 'Manual stage = 8 (no trigger path)',
-    advances_when: '(close manually — no trigger defined yet)',
-    completed_when: (o) => false,
-    completed_via: '(stage 8 completion field TBD)',
+    advances_when: 'Refunded ✓ → Done',
+    completed_when: (o) => fieldFilled(o, 'court_claim_ref') || fieldFilled(o, 'court_claim_date'),
+    completed_via: 'court_claim_ref OR court_claim_date is filled (claim filed with the court)',
     info_needed: 'Defendant legal name, claim amount, evidence pack',
-    instruction_template: 'Hi {person},\n\nEscalating {store} order {order_id} (£{price}) to small claims court.\n\n  Defendant trading name: {store}\n  Defendant legal entity: (look up on Companies House)\n  Claim amount: £{price}\n\nEvidence pack: same as chargeback + bank refusal letter. Prepare court form N1 and reply with the claim reference.' },
+    instruction_template: 'Hi {person},\n\nEscalating {store} order {order_id} (£{price}) to small claims court.\n\n  Defendant trading name: {store}\n  Defendant legal entity: (look up on Companies House)\n  Claim amount: £{price}\n\nEvidence pack: same as chargeback + bank refusal letter. Prepare court form N1, file the claim, and reply with the claim reference once filed.' },
 ];
 
 // ============================================================
@@ -1386,7 +1393,7 @@ const STAGE_FIELDS = {
   5: { name: 'Investigation', desc: 'Retailer is processing - awaiting response', fields: ['investigation_deadline'] },
   6: { name: 'Refund Refused', desc: 'Preparing chargeback case', fields: ['refund_narrative', 'refund_refused_date'] },
   7: { name: 'Chargeback', desc: 'Filed with bank', fields: ['chargeback_bank', 'chargeback_amount', 'chargeback_date', 'invoice', 'refund_received_date', 'refund_received_amount'] },
-  8: { name: 'Court Claim', desc: 'Last resort - small claims court', fields: [] },
+  8: { name: 'Court Claim', desc: 'Last resort - small claims court', fields: ['court_claim_ref', 'court_claim_date', 'defendant_legal_entity', 'court_fee_paid', 'hearing_date', 'court_outcome', 'total_recovered'] },
 };
 
 const FIELD_DEFS = {
@@ -1424,6 +1431,7 @@ const FIELD_DEFS = {
   chargeback_reference: { label: 'Chargeback reference', required: false, type: 'text', help: 'Reference number from the bank' },
   retailer_rebuttal_received: { label: 'Retailer rebuttal received?', required: false, type: 'select', options: ['', 'yes', 'no'] },
   court_claim_ref: { label: 'Court claim reference', required: false, type: 'text', help: 'Returned by the HMCTS portal' },
+  court_claim_date: { label: 'Court claim filed date', required: false, type: 'text', help: 'Date the small-claims claim was filed' },
   court_fee_paid: { label: 'Court fee paid (£)', required: false, type: 'number' },
   defendant_legal_entity: { label: 'Defendant legal entity', required: false, type: 'text', help: 'Companies House legal name — not the trading name' },
   hearing_date: { label: 'Hearing date', required: false, type: 'text', help: 'DD/MM/YYYY' },
@@ -2849,8 +2857,11 @@ function fileSizeFmt(bytes) {
 // the filename under {field}_filename, and MIME under {field}_filetype.
 function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType, disabled, fid) {
   const order = DATA.orders.find(o => o.order_id === (typeof formOrderId !== 'undefined' && formOrderId ? formOrderId : editingOrderId));
-  const accept = fieldKey === 'return_label_pdf' ? 'image/*,application/pdf' : 'image/*';
-  const multiAttr = fieldKey === 'return_label_pdf' ? 'multiple' : '';
+  const isMulti = MULTI_FILE_FIELDS.indexOf(fieldKey) >= 0;
+  const accept = (fieldKey === 'return_label_pdf' || fieldKey === 'proof_of_postage') ? 'image/*,application/pdf' : 'image/*';
+  const multiAttr = isMulti ? 'multiple' : '';
+  const arrKey = multiFileArrayKey(fieldKey);
+  const list = (order && Array.isArray(order[arrKey])) ? order[arrKey] : null;
   const isImg = fileType && fileType.startsWith('image/');
   const isPdf = fileType === 'application/pdf';
   const icon = isImg ? '🖼️' : isPdf ? '📄' : '📎';
@@ -2860,7 +2871,7 @@ function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType
       <div style="display:flex;gap:8px;align-items:flex-start">
         <input type="text" id="${fid}" value="${escAttr(textValue || '')}" ${disabled} placeholder="Type a value, or attach a file →" style="flex:1">
         <label class="file-attach-btn ${disabled ? 'disabled' : ''}">
-          <span>📎 ${fieldKey === 'return_label_pdf' ? (hasFile ? 'Add more' : 'Attach') : (hasFile ? 'Replace' : 'Attach')}</span>
+          <span>📎 ${isMulti ? (hasFile ? 'Add more' : 'Attach') : (hasFile ? 'Replace' : 'Attach')}</span>
           <input type="file" accept="${accept}" ${multiAttr} onchange="onFormFieldFileUpload(this, '${escAttr(fieldKey)}')" ${disabled}>
         </label>
       </div>
@@ -2878,15 +2889,15 @@ function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType
           </div>
         </div>
       ` : ''}
-      ${fieldKey === 'return_label_pdf' && order && Array.isArray(order.return_label_pdfs) && order.return_label_pdfs.length > 1 ? `
+      ${isMulti && list && list.length > 1 ? `
         <div style="margin-top:8px;border-top:1px dashed var(--line);padding-top:8px">
-          <div style="font-size:11px;color:var(--ink-faded);margin-bottom:4px">All return labels (${order.return_label_pdfs.length}):</div>
-          ${order.return_label_pdfs.map((lbl, i) => `
+          <div style="font-size:11px;color:var(--ink-faded);margin-bottom:4px">All ${fieldKey === 'proof_of_postage' ? 'postage receipts' : 'return labels'} (${list.length}):</div>
+          ${list.map((lbl, i) => `
             <div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
               <span>${(lbl.filetype === 'application/pdf') ? '📄' : '🖼️'}</span>
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(lbl.filename || ('label ' + (i+1)))}</span>
-              <button type="button" class="tiny" onclick="downloadReturnLabelAt(${i}); event.preventDefault();">Download</button>
-              <button type="button" class="tiny danger" onclick="removeReturnLabelAt(${i}); event.preventDefault();">Remove</button>
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(lbl.filename || ('file ' + (i+1)))}</span>
+              <button type="button" class="tiny" onclick="downloadMultiFileAt('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Download</button>
+              <button type="button" class="tiny danger" onclick="removeMultiFileAt('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Remove</button>
             </div>
           `).join('')}
         </div>
@@ -2898,8 +2909,8 @@ function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType
 async function onFormFieldFileUpload(input, fieldKey) {
   const files = Array.from(input.files || []);
   if (!files.length) return;
-  // Return labels can be multiple; everything else is single.
-  const allowMultiple = (fieldKey === 'return_label_pdf');
+  // Return labels and postage receipts can be multiple; everything else is single.
+  const allowMultiple = (MULTI_FILE_FIELDS.indexOf(fieldKey) >= 0);
   const toProcess = allowMultiple ? files : [files[0]];
   for (const file of toProcess) {
     if (file.size > 4 * 1024 * 1024) {
@@ -2918,15 +2929,17 @@ async function __handleOneFormFileUpload(file, fieldKey) {
     if (!formOrderId) return;
     const order = DATA.orders.find(o => o.order_id === formOrderId);
     if (!order) return;
-    // Multiple return labels: keep every label in an array, plus the first as the primary field.
-    if (fieldKey === 'return_label_pdf') {
-      if (!Array.isArray(order.return_label_pdfs)) order.return_label_pdfs = [];
-      order.return_label_pdfs.push({ file: dataUrl, filename: file.name, filetype: file.type, added: Date.now() });
+    const isMulti = MULTI_FILE_FIELDS.indexOf(fieldKey) >= 0;
+    const arrKey = multiFileArrayKey(fieldKey);
+    // Multiple files (return labels / postage receipts): keep every file in an array, plus the first as the primary field.
+    if (isMulti) {
+      if (!Array.isArray(order[arrKey])) order[arrKey] = [];
+      order[arrKey].push({ file: dataUrl, filename: file.name, filetype: file.type, added: Date.now() });
     }
-    const isFirstLabel = (fieldKey === 'return_label_pdf') && order.return_label_pdfs.length === 1;
-    // The primary single-field value drives completion + AI parsing. For a return label, only the
-    // FIRST upload sets it; later labels are added to the list without disturbing the primary.
-    if (fieldKey !== 'return_label_pdf' || isFirstLabel || !order[fieldKey + '_file']) {
+    const isFirstOfMulti = isMulti && order[arrKey].length === 1;
+    // The primary single-field value drives completion + AI parsing. For a multi field, only the
+    // FIRST upload sets it; later files are added to the list without disturbing the primary.
+    if (!isMulti || isFirstOfMulti || !order[fieldKey + '_file']) {
       order[fieldKey + '_file'] = dataUrl;
       order[fieldKey + '_filename'] = file.name;
       order[fieldKey + '_filetype'] = file.type;
@@ -3180,7 +3193,42 @@ function removeAttachedFile(fieldKey, ctx) {
 }
 
 // Download / remove one of the multiple return labels by index.
-function downloadReturnLabelAt(i){
+function downloadReturnLabelAt(i){ downloadMultiFileAt('return_label_pdf', i); }
+function removeReturnLabelAt(i){ removeMultiFileAt('return_label_pdf', i); }
+// Generic versions for any multi-file field (return labels, postage receipts).
+function downloadMultiFileAt(fieldKey, i){
+  const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
+  const arr = order && order[multiFileArrayKey(fieldKey)];
+  if(!order || !Array.isArray(arr) || !arr[i]) return;
+  const lbl = arr[i];
+  const src = lbl.file || lbl.path;
+  if(!src){ showToast('No file data for this item', 'info'); return; }
+  const a = document.createElement('a'); a.href = src; a.download = lbl.filename || (fieldKey + '-' + (i+1)); a.target='_blank'; a.click();
+}
+function removeMultiFileAt(fieldKey, i){
+  const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
+  const arrKey = multiFileArrayKey(fieldKey);
+  const arr = order && order[arrKey];
+  if(!order || !Array.isArray(arr)) return;
+  if(!confirm('Remove this file?')) return;
+  arr.splice(i, 1);
+  // Re-point the primary single-field value at the first remaining file (or clear it).
+  if(arr.length){
+    const first = arr[0];
+    order[fieldKey + '_file'] = first.file || first.path || '';
+    order[fieldKey + '_filename'] = first.filename || '';
+    order[fieldKey + '_filetype'] = first.filetype || '';
+  } else {
+    delete order[arrKey];
+    order[fieldKey + '_file'] = ''; order[fieldKey + '_filename'] = ''; order[fieldKey + '_filetype'] = '';
+    if(order[fieldKey] && /\.(pdf|png|jpe?g|webp|gif)$/i.test(order[fieldKey])) order[fieldKey] = '';
+  }
+  saveData();
+  if(formOrderId && document.getElementById('formModal') && document.getElementById('formModal').classList.contains('show')) openMissingInfoForm(formOrderId);
+  else if(editingOrderId) openOrderModal(editingOrderId);
+  renderAll();
+}
+function __legacy_downloadReturnLabelAt_removed(i){
   const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
   if(!order || !Array.isArray(order.return_label_pdfs) || !order.return_label_pdfs[i]) return;
   const lbl = order.return_label_pdfs[i];
@@ -3188,7 +3236,7 @@ function downloadReturnLabelAt(i){
   if(!src){ showToast('No file data for this label', 'info'); return; }
   const a = document.createElement('a'); a.href = src; a.download = lbl.filename || ('return-label-'+(i+1)); a.target='_blank'; a.click();
 }
-function removeReturnLabelAt(i){
+function __legacy_removeReturnLabelAt_removed(i){
   const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
   if(!order || !Array.isArray(order.return_label_pdfs)) return;
   if(!confirm('Remove this return label?')) return;
@@ -5203,12 +5251,12 @@ function ofRemoveItem(i){ OF_ITEMS.splice(i,1); if(!OF_ITEMS.length) OF_ITEMS=[{
 let OF_TRACKINGS = [];
 function ofInitTrackings(order){
   if(Array.isArray(order.inbound_trackings) && order.inbound_trackings.length){
-    OF_TRACKINGS = order.inbound_trackings.map(t=>({ tracking:t.tracking||'', courier:t.courier||'', items:Array.isArray(t.items)?t.items.slice():[] }));
+    OF_TRACKINGS = order.inbound_trackings.map(t=>({ tracking:t.tracking||'', courier:t.courier||'', date:t.delivery_date||t.date||'', items:Array.isArray(t.items)?t.items.slice():[] }));
   } else if(order.inbound_tracking || order.inbound_courier){
     // seed a single parcel from the legacy single fields
-    OF_TRACKINGS = [{ tracking:order.inbound_tracking||'', courier:order.inbound_courier||'', items:[] }];
+    OF_TRACKINGS = [{ tracking:order.inbound_tracking||'', courier:order.inbound_courier||'', date:order.delivery_date_text||'', items:[] }];
   } else {
-    OF_TRACKINGS = [{ tracking:'', courier:'', items:[] }];
+    OF_TRACKINGS = [{ tracking:'', courier:'', date:'', items:[] }];
   }
   ofRenderTrackings();
 }
@@ -5228,18 +5276,22 @@ function ofRenderTrackings(){
       : '<div style="font-size:10px;color:var(--ink-faded);margin-top:4px">Add items in the items list above to tag which ones are in this parcel.</div>';
     return '<div style="border:1px solid var(--line);border-radius:8px;padding:8px;margin-bottom:6px">'
       + '<div style="display:flex;gap:6px;align-items:center">'
-      + '<input type="text" placeholder="tracking number" value="'+escAttr(tk.tracking)+'" oninput="ofTrackingField('+i+',\'tracking\',this.value)" style="flex:1;min-width:120px">'
+      + '<input type="text" placeholder="tracking number" value="'+escAttr(tk.tracking)+'" oninput="ofTrackingFieldNoRerender('+i+',\'tracking\',this.value)" style="flex:1;min-width:120px">'
       + '<select onchange="ofTrackingField('+i+',\'courier\',this.value)" style="width:130px"><option value="">(courier)</option>'
         + COURIER_LIST.map(c=>'<option '+(normCourier(tk.courier)===c?'selected':'')+'>'+c+'</option>').join('')
       + '</select>'
       + (OF_TRACKINGS.length>1?'<button type="button" class="small" onclick="ofRemoveTracking('+i+')" title="remove">×</button>':'<span style="width:24px"></span>')
       + '</div>'
+      + '<div style="display:flex;gap:6px;align-items:center;margin-top:5px"><span style="font-size:11px;color:var(--ink-faded);min-width:74px">Delivered:</span>'
+      + '<input type="text" placeholder="DD/MM/YYYY" value="'+escAttr(tk.date||'')+'" oninput="ofTrackingFieldNoRerender('+i+',\'date\',this.value)" style="width:130px" title="delivery date for this parcel"></div>'
       + (link?'<div style="font-size:11px;margin-top:4px"><a href="'+link+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(tk.courier))+'</a></div>':'')
       + itemsUi
       + '</div>';
   }).join('');
 }
 function ofTrackingField(i,k,v){ if(OF_TRACKINGS[i]){ OF_TRACKINGS[i][k]=v; ofRenderTrackings(); } }
+// Update a parcel field WITHOUT re-rendering (so a text input keeps focus while typing).
+function ofTrackingFieldNoRerender(i,k,v){ if(OF_TRACKINGS[i]){ OF_TRACKINGS[i][k]=v; } }
 function ofToggleTrackingItem(i,name){
   if(!OF_TRACKINGS[i]) return;
   const arr = OF_TRACKINGS[i].items || (OF_TRACKINGS[i].items=[]);
@@ -5247,8 +5299,8 @@ function ofToggleTrackingItem(i,name){
   if(idx>=0) arr.splice(idx,1); else arr.push(name);
   ofRenderTrackings();
 }
-function ofAddTracking(){ OF_TRACKINGS.push({tracking:'',courier:'',items:[]}); ofRenderTrackings(); }
-function ofRemoveTracking(i){ OF_TRACKINGS.splice(i,1); if(!OF_TRACKINGS.length) OF_TRACKINGS=[{tracking:'',courier:'',items:[]}]; ofRenderTrackings(); }
+function ofAddTracking(){ OF_TRACKINGS.push({tracking:'',courier:'',date:'',items:[]}); ofRenderTrackings(); }
+function ofRemoveTracking(i){ OF_TRACKINGS.splice(i,1); if(!OF_TRACKINGS.length) OF_TRACKINGS=[{tracking:'',courier:'',date:'',items:[]}]; ofRenderTrackings(); }
 function ofItemsSummary(){ return OF_ITEMS.filter(it=>it.name).map(it=>(it.qty>1?it.qty+'× ':'')+it.name).join(', '); }
 function ofSumWV(){
   let w=0,v=0,haveAny=false;
@@ -5290,7 +5342,7 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
@@ -5332,16 +5384,21 @@ function saveOrderEdit() {
     }
   }
 
-  // Save the multiple tracking parcels (each: tracking number + courier + items inside).
+  // Save the multiple tracking parcels (each: tracking number + courier + delivery date + items inside).
   if (Array.isArray(OF_TRACKINGS)) {
     const cleanT = OF_TRACKINGS
-      .map(t=>({ tracking:(t.tracking||'').trim(), courier:(t.courier||'').trim(), items:Array.isArray(t.items)?t.items.slice():[] }))
-      .filter(t=> t.tracking || t.courier || (t.items && t.items.length));
+      .map(t=>({ tracking:(t.tracking||'').trim(), courier:(t.courier||'').trim(), delivery_date:(t.date||'').trim(), items:Array.isArray(t.items)?t.items.slice():[] }))
+      .filter(t=> t.tracking || t.courier || t.delivery_date || (t.items && t.items.length));
     if (cleanT.length) {
       order.inbound_trackings = cleanT;
       // First parcel stays the primary single-field value (drives completion, the link, and AI/advances).
       order.inbound_tracking = cleanT[0].tracking;
       order.inbound_courier = cleanT[0].courier;
+      // If the order has no overall delivery date yet, take the earliest parcel date as it.
+      if(!String(order.delivery_date_text||'').trim()){
+        const firstDated = cleanT.map(t=>t.delivery_date).filter(Boolean)[0];
+        if(firstDated) order.delivery_date_text = firstDated;
+      }
     } else {
       delete order.inbound_trackings;
     }

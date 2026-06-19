@@ -181,6 +181,22 @@ module.exports = async (req, res) => {
       return res.status(200).json({ fields: jsonFromText(text) || {} });
     }
 
+    if (task === 'analyze_photo') {
+      const kind = payload.kind === 'damage' ? 'damage' : 'delivery';
+      const sys = kind === 'damage'
+        ? 'You inspect a photo a customer says shows a DAMAGED item being returned. Reply with ONLY a JSON object, no prose. Decide whether visible damage to the item is actually shown.'
+        : 'You inspect a parcel PROOF-OF-DELIVERY photo (the photo a courier takes when leaving a parcel). Reply with ONLY a JSON object, no prose. Decide whether a person (the recipient receiving/holding the parcel) is visible, versus just a doorstep / porch / package on the ground.';
+      const ask = kind === 'damage'
+        ? 'Return ONLY JSON: {"damage_visible":"yes" or "no","note":"a few words on what is or isn\'t visible"}.'
+        : 'Return ONLY JSON: {"shows_person":"yes" or "no","note":"a few words on what the photo shows"}.';
+      const text = await callAnthropic(apiKey, {
+        system: sys,
+        userText: ask,
+        image: { image_base64: payload.image_base64, media_type: payload.media_type },
+      });
+      return res.status(200).json(jsonFromText(text) || {});
+    }
+
     return res.status(400).json({ error: 'unknown task: ' + task });
   } catch (e) {
     return res.status(502).json({ error: String((e && e.message) || e) });
