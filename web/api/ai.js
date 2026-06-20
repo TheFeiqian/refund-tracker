@@ -5,7 +5,7 @@
 //   estimate_wv          -> { prompt }                 -> { result: [{weight,volume}, ...] }
 //   parse_postage        -> { image_base64, media_type } -> { fields: {postage_date, outbound_tracking, outbound_courier, posted_from} }
 //   parse_label          -> { image_base64, media_type } -> { fields: {outbound_tracking, outbound_courier, return_label_date} }
-//   parse_order          -> { image_base64, media_type } -> { fields: {store, items, store_order_number, price, email, phone, address, order_date} }
+//   parse_order          -> { image_base64, media_type } -> { fields: {store, items, item_quantity, store_order_number, price, delivery_name, email, phone, address, order_date, inbound_courier, inbound_tracking} }
 //   store_autofill       -> { store }                  -> { fields: {website, phone, email, portal, chat, returns_policy} }
 //
 // Configure in Vercel: Project → Settings → Environment Variables → ANTHROPIC_API_KEY.
@@ -131,13 +131,23 @@ module.exports = async (req, res) => {
 
     if (task === 'parse_order') {
       const text = await callAnthropic(apiKey, {
-        system: 'You read order confirmation emails / receipts. Extract fields exactly as printed and reply with ONLY a JSON object, no prose. '
-          + 'CRITICAL: "order_date" must be the order/purchase date PRINTED ON THE DOCUMENT (look for "Order date", "Ordered on", "Placed on", or the date next to the order number). '
-          + 'NEVER use today\'s date and NEVER guess — if no order date is visible on the document, return an empty string for order_date. '
-          + '"address" must be the FULL delivery address: every line plus the postcode, joined with ", " (not just the first line). '
-          + '"price" is the order total as a number (no currency symbol). "store" is the retailer/brand name.',
-        userText: 'Extract from this order confirmation. Return ONLY JSON (empty string / 0 if a value is genuinely not present): '
-          + '{"store":"","items":"","store_order_number":"","price":0,"email":"","phone":"","address":"full multi-line delivery address joined with commas","order_date":"DD/MM/YYYY exactly as printed on the document, else empty"}.',
+        system: 'You read order confirmation emails, receipts, and invoices (any retailer, any format, possibly a screenshot or a forwarded email). Extract the fields and reply with ONLY a JSON object, no prose. Read the document in whatever orientation/scroll makes the text legible.\n'
+          + 'FIELD RULES:\n'
+          + '- "store": the retailer / brand / shop name (from the logo, header, sender address, or footer). Just the name, not the legal suffix.\n'
+          + '- "items": EVERY product line in the order, each with its quantity, joined with ", " (e.g. "2x Oak shelf, 1x Bracket set, 3x Wall plug"). If a quantity is shown use it; if not, assume 1. Do not include prices in this field.\n'
+          + '- "item_quantity": the TOTAL number of units across all lines (sum of the quantities) as a number; if you cannot tell, return 0.\n'
+          + '- "store_order_number": the retailer\'s order / reference number (labelled "Order number", "Order #", "Order ref", "Your order", etc.). Keep any prefix letters/symbols exactly as printed.\n'
+          + '- "price": the amount actually PAID — the grand total / order total including delivery (look for "Total", "Order total", "Amount paid", "Grand total"; if several totals appear, take the final payable one). A plain number, no currency symbol or thousands separators.\n'
+          + '- "delivery_name": the name the parcel is addressed to (the recipient on the delivery/shipping address), if shown.\n'
+          + '- "email": the customer email shown on the confirmation, if any.\n'
+          + '- "phone": the customer contact phone shown, if any (not the retailer\'s helpline).\n'
+          + '- "address": the FULL delivery/shipping address — every line plus the postcode, joined with ", " (use the DELIVERY address, not the billing address, if both are shown).\n'
+          + '- "order_date": the order / purchase date PRINTED ON THE DOCUMENT (look for "Order date", "Ordered on", "Placed on", "Date", or the date next to the order number), formatted DD/MM/YYYY. NEVER use today\'s date and NEVER guess — if no order date is visible, return "".\n'
+          + '- "inbound_courier": if the confirmation names the DELIVERY courier (Royal Mail | Parcelforce | DPD | Evri | DHL | Yodel | UPS | FedEx | other), return it; else "".\n'
+          + '- "inbound_tracking": only if a genuine delivery TRACKING / consignment number is printed (NOT the order number, NOT a phone number) — else "".\n'
+          + 'Return "" (or 0 for numbers) for anything genuinely not present. Do not invent values.',
+        userText: 'Extract from this order confirmation. Return ONLY JSON: '
+          + '{"store":"","items":"every item with its quantity, comma-separated","item_quantity":0,"store_order_number":"","price":0,"delivery_name":"","email":"","phone":"","address":"full delivery address joined with commas","order_date":"DD/MM/YYYY as printed, else empty","inbound_courier":"named delivery courier or empty","inbound_tracking":"genuine tracking only, else empty"}.',
         image: { image_base64: payload.image_base64, media_type: payload.media_type },
       });
       return res.status(200).json({ fields: jsonFromText(text) || {} });
