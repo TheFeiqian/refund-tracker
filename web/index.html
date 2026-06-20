@@ -628,7 +628,7 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 
 <script>
 // ============ Hosted persistence adapter (Supabase) ============
-const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
+const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','rts_label_photo','box_photo'];
 // Fields that accept MULTIPLE files (kept in an array `${field}s`, with the first as the primary value).
 const MULTI_FILE_FIELDS = ['return_label_pdf','proof_of_postage'];
 function multiFileArrayKey(fieldKey){ return fieldKey + 's'; } // return_label_pdf -> return_label_pdfs, proof_of_postage -> proof_of_postages
@@ -1287,26 +1287,35 @@ const TASK_CATALOG = [
     info_needed: 'Whichever decision variable is still missing — courier, delivery-photo answer, or weight',
     instruction_template: 'ADMIN TASK — decide the return method for {store} order {order_id} ({items}, £{price}).\n\nThis decision is made in the Method Choice tab and is not delegated. If it can’t resolve yet it is blocked on one missing variable (inbound courier, whether the delivery photo shows the recipient, or the parcel weight) — delegate the fact-finding for that one field, then the method auto-resolves.\n\nDelivery date on file: {delivery_date_text}' },
 
-  { code: 'damage_photo_check', name: 'Provide a picture of the damaged item', stage: 3, sla: 6, owner_only: false, info_only: false,
-    applies_when: (o)=> (o.method === 'LIT with pic') || (!o.method && o.item_damaged === 'yes'),
-    appears_when: 'Stage 3 AND method = LIT with pic — retailer requires a damage photo to approve the return.',
-    advances_when: 'damage photo uploaded',
-    completed_when: (o) => fieldFilled(o, 'damage_photo') || !!o.damage_photo_file,
-    completed_via: 'damage_photo filled OR damage photo file uploaded',
-    info_needed: 'A photo of the damage',
-    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}) is returning as damaged. Please send a picture of the damaged item — specific guidance for what to capture is tailored to this item and will be sent alongside this task.' },
+  { code: 'damage_photo_check', name: 'Damage photo/video + get return label', stage: 4, sla: 6, owner_only: false, info_only: false,
+    applies_when: (o)=> o.method === 'LIT with pic',
+    appears_when: 'Method = LIT with pic (as soon as the method is chosen)',
+    advances_when: 'Both the damage media AND the return label are uploaded',
+    completed_when: (o) => (fieldFilled(o, 'damage_photo') || !!o.damage_photo_file) && (fieldFilled(o, 'return_label_pdf') || !!o.return_label_pdf_file),
+    completed_via: 'damage photo/video uploaded AND return label uploaded',
+    info_needed: 'A photo or short video of the damage, plus the return label from the retailer',
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}) is being returned as damaged (LIT with pic). This is ONE task with two parts — upload BOTH here and it completes:\n\n  1. Capture the damage. Take clear photos from a few angles. If the fault only shows in movement (a loose or rattling part, something that only appears when the item is used or powered on), record a short video instead of a photo.\n  2. Contact {store} and request a return label — use their return portal or customer service. Identify the order with: name {person}, email {email}, order no. {store_order_number}.\n\nUpload the damage photo/video AND the return label (PDF or a photo of the label).' },
 
-  { code: 'generate_return_label', name: 'Generate return label', stage: 4, sla: 6, owner_only: false, info_only: false,
-    applies_when: (o)=> o.bought_by_mistake!=='yes' && !isCollectionPath(o),
-    appears_when: 'LIT created ✓ OR RTS created ✓ (stage 4, non-BBM)',
+  { code: 'generate_return_label', name: 'Contact retailer for a return label', stage: 4, sla: 6, owner_only: false, info_only: false,
+    applies_when: (o)=> o.method==='LIT' && o.bought_by_mistake!=='yes' && !isCollectionPath(o),
+    appears_when: 'Method = LIT (as soon as the method is chosen)',
     advances_when: 'LIT/RTS sent ✓ → Stage 5',
     completed_when: (o) => fieldFilled(o, 'return_label_pdf') || !!o.return_label_pdf_file,
     completed_via: 'return_label_pdf filled OR a return label file is attached',
     info_needed: 'Order ref, identification, retailer return portal or contact',
     instruction_template: 'Hi {person},\n\nPlease request a return label from {store} for order {order_id} ({items}).\n\nIdentification to use:\n  Customer name: {person}\n  Email used: {email}\n  Delivery address used: {address}\n  Store order number: {store_order_number}\n  Method: {method}\n\nUse the retailer’s return portal or email customer service. Reply with the return label PDF (or photo of the label).' },
 
+  { code: 'rts_photograph_label', name: 'Photograph the return label on the package', stage: 4, sla: 6, owner_only: false, info_only: false,
+    applies_when: (o)=> o.method === 'RTS',
+    appears_when: 'Method = RTS (as soon as the method is chosen)',
+    advances_when: 'Photo of the return label on the package uploaded → RTS created (stage 4); then post the parcel to mark it sent',
+    completed_when: (o) => fieldFilled(o, 'rts_label_photo') || !!o.rts_label_photo_file,
+    completed_via: 'rts_label_photo uploaded (photo of the return-to-sender label on the parcel)',
+    info_needed: 'A clear photo of the return label already on the package',
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}) is going back Return-To-Sender (RTS). Take a clear, readable photo of the return label already printed on the package — the whole label — and upload it here. Once it is uploaded, the next step (posting the parcel) will appear.' },
+
   { code: 'post_return_label', name: 'Take the parcel to the post office', stage: 4, sla: 48, owner_only: false, info_only: false,
-    applies_when: (o)=> ((o.bought_by_mistake!=='yes' && !isCollectionPath(o)) || (o.bought_by_mistake==='yes' && bbmRoute(o)==='label' && bbmBooked(o))) && (fieldFilled(o,'return_label_pdf') || !!o.return_label_pdf_file),
+    applies_when: (o)=> ((o.bought_by_mistake!=='yes' && !isCollectionPath(o)) || (o.bought_by_mistake==='yes' && bbmRoute(o)==='label' && bbmBooked(o))) && (fieldFilled(o,'return_label_pdf') || !!o.return_label_pdf_file || (o.method==='RTS' && (fieldFilled(o,'rts_label_photo') || !!o.rts_label_photo_file))),
     appears_when: 'Return label obtained (non-BBM, or BBM-label after booking)',
     advances_when: 'LIT/RTS sent ✓ → Stage 5',
     completed_when: (o) => fieldFilled(o, 'proof_of_postage') || !!o.proof_of_postage_file,
@@ -1349,13 +1358,13 @@ const TASK_CATALOG = [
     info_needed: 'Items packed, collection slot, anyone present at the address',
     instruction_template: 'Hi {person},\n\nCollection is booked for {store} order {order_id} ({items}).\n\n  Collection date: {collection_date}\n  Collection time: {collection_time}\n  Address: {address}\n\nPlease have the items packed and ready, hand them to the courier, and reply with a photo of the collection receipt / driver confirmation (we need proof the items left, in case we have to chargeback).' },
 
-  { code: 'contact_retailer_investigation', name: 'Open formal investigation', stage: 5, sla: 4, owner_only: false, info_only: false,
-    appears_when: 'LIT/RTS sent ✓ OR DNA email sent ✓ (stage 5)',
-    advances_when: 'Refund successful ✓ → Done  |  Refund unsuccessful ✓ → Stage 7',
-    completed_when: (o) => fieldFilled(o, 'investigation_deadline'),
-    completed_via: 'investigation_deadline is set (retailer gave a response date)',
+  { code: 'contact_retailer_investigation', name: 'Notify retailer & open investigation', stage: 5, sla: 4, owner_only: false, info_only: false,
+    appears_when: 'A method has been chosen and the return is in progress (DNA → stage 5; LIT/RTS → after the return is sent)',
+    advances_when: 'Investigation deadline set → task complete  |  Refund confirmation received ✓ → Done  |  Refund refused ✓ → Stage 7',
+    completed_when: (o) => fieldFilled(o, 'investigation_deadline') || fieldFilled(o, 'refund_received_date') || !!o.refund_confirmation_pdf_file,
+    completed_via: 'investigation_deadline is set (retailer gave a response date) OR a refund confirmation is recorded',
     info_needed: 'Retailer contact, order ref, return tracking status, days since movement',
-    instruction_template: 'Hi {person},\n\nThe return parcel for {store} order {order_id} ({items}, £{price}) has been with {outbound_courier} for 5+ working days with no movement.\n\nPlease contact {store} and formally open an investigation.\n  Retailer contact: {store_contact}\n\nInclude:\n\n  - Name on delivery: {delivery_name}\n  - Contact phone: {phone}\n  - Contact email: {email}\n  - Order ref: {store_order_number}\n  - Method used: {method}\n  - Outbound tracking: {outbound_tracking}\n  - Proof of postage: {proof_of_postage}\n\nAsk for an investigation reference and target completion date. Reply with both.' },
+    instruction_template: 'Hi {person},\n\nThis is the FIRST contact with {store} about order {order_id} ({items}, £{price}) — email or call them to notify them of the issue and formally open an investigation.\n  Retailer contact: {store_contact}\n\n{box_photo_instructions}\n\nSEND THIS to the retailer (adjust names/refs as needed):\n"""\n{retailer_narrative}\n"""\n\nAlso give them, if asked:\n  - Name on delivery: {delivery_name}\n  - Contact phone: {phone}\n  - Contact email: {email}\n  - Order ref: {store_order_number}\n  - Method used: {method}\n  - Outbound tracking: {outbound_tracking}\n\nAsk for an investigation reference and a target completion date (the deadline), and reply with both. IMPORTANT: if they do NOT give a deadline, we assume 5 working days from today — tick the "no deadline given" box on the form and it is set automatically.\n\nIf the retailer confirms the refund at any point, record it on the form: enter the refund date under "refund confirmation received" and upload the confirmation email (PDF). That closes the order.' },
 
   { code: 'chase_investigation', name: 'Follow up on investigation', stage: 6, sla: 4, owner_only: false, info_only: false,
     appears_when: 'Manual stage = 6 (no trigger path naturally reaches 6 — refund_unsuccessful skips to 7)',
@@ -1389,8 +1398,8 @@ const STAGE_FIELDS = {
   1: { name: 'Pre-Order', desc: 'Information needed before the order is placed', fields: ['order_id', 'store', 'items', 'item_quantity', 'total_weight_kg', 'total_volume_l', 'store_order_number', 'card_used', 'price', 'phone', 'email', 'address', 'person'] },
   2: { name: 'Awaiting Delivery', desc: 'Once the order is placed and being shipped', fields: ['inbound_tracking', 'inbound_courier', 'order_date'] },
   3: { name: 'Delivered', desc: 'Item arrived; choose return method', fields: ['delivery_date_text', 'delivery_photo', 'delivery_photo_shows_person', 'item_damaged', 'damage_photo', 'bought_by_mistake', 'method'] },
-  4: { name: 'Return Sent', desc: 'Label generated AND parcel posted (or collection booked + handed over for BBM)', fields: ['return_label_pdf', 'return_label_date', 'outbound_tracking', 'outbound_courier', 'proof_of_postage', 'postage_date', 'posted_from', 'collection_date', 'collection_time', 'collection_handover'] },
-  5: { name: 'Investigation', desc: 'Retailer is processing - awaiting response', fields: ['investigation_deadline'] },
+  4: { name: 'Return Sent', desc: 'Label generated AND parcel posted (or collection booked + handed over for BBM)', fields: ['return_label_pdf', 'return_label_date', 'outbound_tracking', 'outbound_courier', 'proof_of_postage', 'postage_date', 'posted_from', 'collection_date', 'collection_time', 'collection_handover', 'rts_label_photo'] },
+  5: { name: 'Investigation', desc: 'Retailer is processing - awaiting response', fields: ['investigation_deadline', 'box_photo', 'refund_received_date', 'refund_confirmation_pdf'] },
   6: { name: 'Refund Refused', desc: 'Preparing chargeback case', fields: ['refund_narrative', 'refund_refused_date'] },
   7: { name: 'Chargeback', desc: 'Filed with bank', fields: ['chargeback_bank', 'chargeback_amount', 'chargeback_date', 'invoice', 'refund_received_date', 'refund_received_amount'] },
   8: { name: 'Court Claim', desc: 'Last resort - small claims court', fields: ['court_claim_ref', 'court_claim_date', 'defendant_legal_entity', 'court_fee_paid', 'hearing_date', 'court_outcome', 'total_recovered'] },
@@ -1450,6 +1459,9 @@ const FIELD_DEFS = {
   refund_refused_date: { label: 'Refund refused date', required: false, type: 'text', help: 'Date of the refusal email (starts the chargeback-owner clock)' },
   refund_received_date: { label: 'Refund received date', required: false, type: 'text', help: 'Date of the refund confirmation email (the real completion date)' },
   refund_received_amount: { label: 'Refund received (£)', required: false, type: 'number', help: 'Amount actually refunded' },
+  refund_confirmation_pdf: { label: 'Refund confirmation email (PDF)', required: false, type: 'file', help: 'Upload the retailer email confirming the refund' },
+  rts_label_photo: { label: 'Return label on package (photo)', required: false, type: 'file', help: 'RTS only: photo of the return-to-sender label already on the parcel' },
+  box_photo: { label: 'Box photo (PEB/EB evidence)', required: false, type: 'file', help: 'PEB/EB: photo of the opened box after removing the claimed-missing items' },
 };
 
 const STAGE_NAMES = { 1: 'Pre-Order', 2: 'Awaiting Delivery', 3: 'Delivered', 4: 'Return Sent', 5: 'Investigation', 6: 'Refund Refused', 7: 'Chargeback', 8: 'Court Claim', 'done': 'Done' };
@@ -1475,7 +1487,7 @@ const FIELD_ACCESS = {
   // admin
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
-  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_narrative:'admin',
+  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_confirmation_pdf:'email_holder', rts_label_photo:'email_holder', box_photo:'email_holder', refund_narrative:'admin',
   refund_refused_date:'admin', invoice:'email_holder', delivery_name:'delivery',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
@@ -1542,7 +1554,10 @@ const FIELD_MODEL = {
   chargeback_reference:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},
   invoice:{avail:1, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},  // available early; required only at chargeback
   // outcome-recording — never auto-requested
-  refund_received_date:{avail:8, methods:'ALL', inForm:false, task:null},
+  refund_received_date:{avail:5, methods:'ALL', inForm:true, task:'contact_retailer_investigation'},
+  refund_confirmation_pdf:{avail:5, methods:'ALL', inForm:true, task:'contact_retailer_investigation'},
+  rts_label_photo:{avail:4, methods:['RTS'], inForm:true, task:'rts_photograph_label'},
+  box_photo:{avail:5, methods:['PEB','EB'], inForm:true, task:'contact_retailer_investigation'},
   refund_received_amount:{avail:8, methods:'ALL', inForm:false, task:null},
   // stage 8 — court (escalating only; contingent)
   court_claim_ref:{avail:8, methods:M_ESCALATE, inForm:true, task:'submit_small_claims_court'},
@@ -1572,15 +1587,15 @@ const UK_BANKS = ['Atom Bank','American Express','Bank of Scotland','Barclays','
 // "simple" couriers show the POD photo with just postcode + tracking number; the others need
 // specific steps. Used by the inbound-courier dropdown, the collect-tracking task, and tracking links.
 const COURIERS = {
-  'Royal Mail':  { track: t => 'https://www.royalmail.com/track-your-item#/tracking-results/' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: enter the tracking number on Royal Mail’s tracking page — the GPS/photo proof shows with just the postcode and tracking number.' },
-  'Evri':        { track: t => 'https://www.evri.com/track/parcel/' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: track on Evri with the tracking number and the delivery postcode — the photo appears on the tracking page.' },
-  'Parcelforce': { track: t => 'https://www.parcelforce.com/track-trace?trackNumber=' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: enter the tracking number on Parcelforce’s tracking page — the POD/photo shows with just the postcode and tracking number.' },
-  'DPD':         { track: t => 'https://track.dpd.co.uk/parcels/' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: the DPD tracking page shows the delivery photo automatically once you enter the tracking number.' },
-  'DHL':         { track: t => 'https://www.dhl.com/gb-en/home/tracking/tracking-parcel.html?tracking-id=' + encodeURIComponent(t), proof: 'Proof of delivery (DHL): open the tracking page, then use “Get Proof of Delivery” — you may need the receiver’s details/postcode. The signed/photo POD is downloadable or emailed.' },
-  'FedEx':       { track: t => 'https://www.fedex.com/fedextrack/?trknbr=' + encodeURIComponent(t), proof: 'Proof of delivery (FedEx): open the tracking page and choose “Obtain Proof of Delivery” — enter the destination postcode and submit; the POD is emailed/downloadable.' },
-  'UPS':         { track: t => 'https://www.ups.com/track?tracknum=' + encodeURIComponent(t), proof: 'Proof of delivery (UPS): open the tracking page and select “Proof of Delivery” — the photo/signature shows; you may need the postcode.' },
-  'Yodel':       { track: t => 'https://www.yodel.co.uk/tracking/' + encodeURIComponent(t), proof: 'Proof-of-delivery photo: track on Yodel with the tracking number and postcode — the photo appears on the tracking page.' },
-  'Other':       { track: t => '', proof: 'Proof of delivery: use the retailer’s tracking link for this courier — steps vary, look for “proof of delivery” or a delivery photo.' },
+  'Royal Mail':  { track: t => 'https://www.royalmail.com/track-your-item#/tracking-results/' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below. Royal Mail shows the proof-of-delivery photo there using just the delivery postcode and the tracking number — screenshot it and upload it.' },
+  'Evri':        { track: t => 'https://www.evri.com/track/parcel/' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below. Evri shows the delivery photo there using just the delivery postcode and the tracking number — screenshot it and upload it.' },
+  'Parcelforce': { track: t => 'https://www.parcelforce.com/track-trace?trackNumber=' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below. Parcelforce shows the proof-of-delivery photo there using just the delivery postcode and the tracking number — screenshot it and upload it.' },
+  'DPD':         { track: t => 'https://track.dpd.co.uk/parcels/' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below — DPD shows the delivery photo on the tracking page once you enter the tracking number. Screenshot it and upload it.' },
+  'DHL':         { track: t => 'https://www.dhl.com/gb-en/home/tracking/tracking-parcel.html?tracking-id=' + encodeURIComponent(t), proof: 'Delivery photo: DHL does NOT show it on the tracking page — call DHL, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
+  'FedEx':       { track: t => 'https://www.fedex.com/fedextrack/?trknbr=' + encodeURIComponent(t), proof: 'Delivery photo: FedEx does NOT show it on the tracking page — call FedEx, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
+  'UPS':         { track: t => 'https://www.ups.com/track?tracknum=' + encodeURIComponent(t), proof: 'Delivery photo: UPS does NOT reliably show it on the tracking page — call UPS, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
+  'Yodel':       { track: t => 'https://www.yodel.co.uk/tracking/' + encodeURIComponent(t), proof: 'Delivery photo: if it is not on the Yodel tracking page, call Yodel, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
+  'Other':       { track: t => '', proof: 'Delivery photo: if it is not on the courier’s tracking page, call the courier, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
 };
 const COURIER_LIST = ['Royal Mail','Evri','Parcelforce','DPD','DHL','FedEx','UPS','Yodel','Other'];
 function normCourier(c){
@@ -2103,7 +2118,7 @@ function mergeOrdersWithInitial(saved) {
   if (!(saved && Array.isArray(saved.orders))) return { orders: initial.filter(io => !deleted[io.order_id]) };
   const savedById = {};
   saved.orders.forEach(o => { if (o && o.order_id) savedById[o.order_id] = o; });
-  const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
+  const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','rts_label_photo','box_photo'];
   const merged = initial.filter(io => !deleted[io.order_id]).map(io => {
     const so = savedById[io.order_id];
     if (!so) return io;
@@ -2201,6 +2216,7 @@ function evidenceTriggerFor(fieldKey, methodVal){
     case 'store_order_number': return 'item_ordered';
     case 'delivery_photo': return 'item_delivered';
     case 'return_label_pdf': return (methodVal==='RTS') ? 'rts_created' : 'lit_created';
+    case 'rts_label_photo': return 'rts_created';
     case 'proof_of_postage': case 'collection_handover': return 'lit_rts_sent';
     case 'refund_refused_date': return 'refund_unsuccessful';
     case 'refund_received_date': return 'refunded';
@@ -2224,7 +2240,7 @@ function applyEvidenceAdvances(order){
   // order_confirmation is intentionally NOT here — it's a parsing aid only and must never
   // advance the order or complete a task. Only store_order_number proves the order exists.
   ['store_order_number','delivery_photo','return_label_pdf',
-   'proof_of_postage','collection_handover','refund_refused_date','refund_received_date'
+   'proof_of_postage','collection_handover','rts_label_photo','refund_refused_date','refund_received_date'
   ].forEach(f=>{
     if(present(f)){ const tk = evidenceTriggerFor(f, m); if(tk) t[tk] = true; }
   });
@@ -2399,6 +2415,13 @@ function computeStage(order) {
   // A BBM order that's been delivered is in the return-execution stage (4) regardless
   // of how it was flagged — so its "call to book" task always surfaces.
   if (order.bought_by_mistake === 'yes' && t.item_delivered) return 4;
+  // A method has been chosen → the return/contact process has begun, so surface its first task
+  // immediately instead of waiting at "Delivered" for the first evidence to arrive.
+  // DNA / PEB / EB go straight to the retailer-contact stage (5); the return methods go to stage 4.
+  if (t.item_delivered && order.method) {
+    if (order.method === 'DNA' || order.method === 'PEB' || order.method === 'EB') return 5;
+    return 4; // LIT, LIT with pic, RTS
+  }
   if (t.item_delivered) return 3;
   if (t.item_ordered) return 2;
   return 1;
@@ -2842,6 +2865,27 @@ function addWorkingDays(fromDate, n){
   return pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear();
 }
 function tplVal(order, key) {
+  // Method-specific narrative to send to the retailer (DNA / PEB / EB).
+  if (key === 'retailer_narrative') {
+    const m = order.method || '';
+    if (m === 'DNA') return 'According to the tracking information, my parcel has been marked as delivered; however, I have not received it. I have checked around my property, contacted my neighbours, and contacted the courier directly to investigate the delivery. Unfortunately, the parcel cannot be located and the courier has been unable to provide any further information regarding its whereabouts. As I have still not received my order, I would appreciate your assistance in resolving this issue.';
+    if (m === 'PEB') return 'I received my parcel, but upon opening it, I discovered that some of the items from my order were missing. I have checked the packaging thoroughly and can confirm that the missing items were not included in the parcel. I would like to request a refund for the items that were not received. Please let me know if you require any additional information to process my request.';
+    if (m === 'EB') return 'I received the parcel associated with my order; however, when I opened it, there were no items inside. The package arrived empty and did not contain any of the products I purchased. I would like to report this issue and request a refund or replacement for the missing items. Please advise on the next steps required to resolve this matter.';
+    return null;
+  }
+  // Box-photo evidence steps for PEB / EB (told to the individual; included in the instructions).
+  if (key === 'box_photo_instructions') {
+    const m = order.method || '';
+    if (m === 'PEB') {
+      let items = '';
+      try { const rows = pebMissingItems(order); if (rows && rows.length) items = rows.map(r => r.name).join(', '); } catch (e) {}
+      return 'EVIDENCE — photograph the box. Remove the following items from the parcel first (these are the ones we are claiming as missing, highest value first — remove the top ones)' + (items ? ': ' + items : ' (see the order items)') + '. Then take clear photos of the opened box and packaging showing those items are not inside, and upload them here.';
+    }
+    if (m === 'EB') {
+      return 'EVIDENCE — photograph the empty box. Remove ALL items from the parcel first, then take clear photos of the completely empty box and its packaging, and upload them here.';
+    }
+    return '';
+  }
   // store_contact pulls the retailer's contact details from the store record (not the order).
   if (key === 'store_contact') {
     return (typeof formatStoreContact === 'function') ? formatStoreContact(order) : null;
@@ -5329,27 +5373,46 @@ function ofInitItemsList(order){
 function ofRenderItems(){
   const box=document.getElementById('f_items_list'); if(!box) return;
   const header = '<div style="display:flex;gap:6px;margin-bottom:4px;font-size:10px;color:var(--ink-faded);text-transform:uppercase;letter-spacing:.4px">'
-    + '<span style="flex:1;min-width:110px">Item</span><span style="width:50px">Qty</span><span style="width:70px">Price £</span><span style="min-width:88px">Weight · volume</span><span style="width:24px"></span></div>';
-  box.innerHTML = header + OF_ITEMS.map((it,i)=>
-    '<div style="display:flex;gap:6px;margin-bottom:5px;align-items:center">'
-    + '<input type="text" placeholder="item name" value="'+escAttr(it.name)+'" oninput="ofItemField('+i+',\'name\',this.value)" style="flex:1;min-width:110px">'
-    + '<input type="number" min="1" placeholder="qty" value="'+(it.qty||1)+'" oninput="ofItemField('+i+',\'qty\',this.value)" style="width:50px" title="quantity of this item">'
-    + '<input type="number" min="0" step="0.01" placeholder="£ each" value="'+(it.price!=null&&it.price!==''?it.price:'')+'" oninput="ofItemField('+i+',\'price\',this.value)" style="width:70px" title="price per unit (£)">'
-    + '<span style="font-size:10px;color:var(--ink-faded);min-width:120px">'+(it.weight?(it.weight+'kg'):'?kg')+' · '+(it.volume?(it.volume+'L'):'?L')+(it.qty>1&&(it.weight||it.volume)?(' → ×'+it.qty+' = '+(it.weight?(Math.round(parseFloat(it.weight)*it.qty*100)/100)+'kg':'')+(it.weight&&it.volume?' · ':'')+(it.volume?(Math.round(parseFloat(it.volume)*it.qty)+'L'):'')):'')+'</span>'
+    + '<span style="flex:1;min-width:96px">Item</span><span style="width:44px">Qty</span><span style="width:62px">£ / unit</span><span style="width:70px">Line total £</span><span style="min-width:84px">Wt · vol</span><span style="width:24px"></span></div>';
+  box.innerHTML = header + OF_ITEMS.map((it,i)=>{
+    const line = (parseFloat(it.price)||0) * (it.qty||1);
+    return '<div style="display:flex;gap:6px;margin-bottom:5px;align-items:center">'
+    + '<input type="text" placeholder="item name" value="'+escAttr(it.name)+'" oninput="ofItemField('+i+',\'name\',this.value)" style="flex:1;min-width:96px">'
+    + '<input id="of_qty_'+i+'" type="number" min="1" placeholder="qty" value="'+(it.qty||1)+'" oninput="ofItemField('+i+',\'qty\',this.value)" style="width:44px" title="quantity of this item">'
+    + '<input id="of_price_'+i+'" type="number" min="0" step="0.01" placeholder="each" value="'+(it.price!=null&&it.price!==''?it.price:'')+'" oninput="ofItemField('+i+',\'price\',this.value)" style="width:62px" title="price per unit (£)">'
+    + '<input id="of_line_'+i+'" type="number" min="0" step="0.01" placeholder="total" value="'+(line>0?Math.round(line*100)/100:'')+'" oninput="ofItemLineTotal('+i+',this.value)" style="width:70px" title="line total = price per unit × qty. Edit either this or £/unit and the other fills in automatically.">'
+    + '<span style="font-size:10px;color:var(--ink-faded);min-width:84px">'+(it.weight?(it.weight+'kg'):'?kg')+' · '+(it.volume?(it.volume+'L'):'?L')+'</span>'
     + (OF_ITEMS.length>1?'<button type="button" class="small" onclick="ofRemoveItem('+i+')" title="remove">×</button>':'<span style="width:24px"></span>')
-    + '</div>'
-  ).join('');
+    + '</div>';
+  }).join('');
+}
+// Sum of every line total (price/unit × qty) → the order's overall total price.
+function ofSyncTotalPrice(){
+  const sumP = OF_ITEMS.reduce((s,it)=> s + ((parseFloat(it.price)||0)*(it.qty||1)), 0);
+  const pe = document.getElementById('f_price');
+  if(pe && sumP>0) pe.value = Math.round(sumP*100)/100;
 }
 function ofItemField(i,k,v){
   if(OF_ITEMS[i]){
     OF_ITEMS[i][k]= (k==='qty'? (parseInt(v)||1) : v);
-    // Per-item prices total automatically into the order's total price field as they're entered.
+    // Editing price-per-unit or qty refreshes this row's line total, then the overall total.
     if(k==='price' || k==='qty'){
-      const sumP = OF_ITEMS.reduce((s,it)=> s + ((parseFloat(it.price)||0)*(it.qty||1)), 0);
-      const pe = document.getElementById('f_price');
-      if(pe && sumP>0) pe.value = Math.round(sumP*100)/100;
+      const line = (parseFloat(OF_ITEMS[i].price)||0) * (OF_ITEMS[i].qty||1);
+      const le = document.getElementById('of_line_'+i);
+      if(le) le.value = line>0 ? Math.round(line*100)/100 : '';
+      ofSyncTotalPrice();
     }
   }
+}
+// Editing the line total back-fills price-per-unit (= line total ÷ qty), then the overall total.
+function ofItemLineTotal(i,v){
+  if(!OF_ITEMS[i]) return;
+  const qty = OF_ITEMS[i].qty||1;
+  const line = parseFloat(v)||0;
+  OF_ITEMS[i].price = line>0 ? Math.round((qty>0 ? line/qty : line)*100)/100 : '';
+  const pe = document.getElementById('of_price_'+i);
+  if(pe) pe.value = OF_ITEMS[i].price;
+  ofSyncTotalPrice();
 }
 function ofAddItemRow(){ OF_ITEMS.push({name:'',qty:1,weight:'',volume:'',price:''}); ofRenderItems(); if(typeof ofRenderTrackings==='function') ofRenderTrackings(); }
 function ofRemoveItem(i){ OF_ITEMS.splice(i,1); if(!OF_ITEMS.length) OF_ITEMS=[{name:'',qty:1,weight:'',volume:'',price:''}]; ofRenderItems(); if(typeof ofRenderTrackings==='function') ofRenderTrackings(); }
@@ -5449,7 +5512,7 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_confirmation_pdf','rts_label_photo','box_photo','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
