@@ -630,7 +630,7 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 // ============ Hosted persistence adapter (Supabase) ============
 const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','rts_label_photo','box_photo'];
 // Fields that accept MULTIPLE files (kept in an array `${field}s`, with the first as the primary value).
-const MULTI_FILE_FIELDS = ['return_label_pdf','proof_of_postage'];
+const MULTI_FILE_FIELDS = ['return_label_pdf','proof_of_postage','order_confirmation'];
 function multiFileArrayKey(fieldKey){ return fieldKey + 's'; } // return_label_pdf -> return_label_pdfs, proof_of_postage -> proof_of_postages
 let sb = null;
 window.__HOSTED = { orders: [], storeFlags: {}, burndown: [] };
@@ -4053,7 +4053,7 @@ function buildTaskFormLinks(order, taskCode, taskLabel){
     if(def && def.aiDerived) return false;     // AI extracts these from the upload — not on the form
     if(def && def.inForm === false) return false;
     // method-specific fields only appear for their methods (e.g. box_photo only for PEB/EB)
-    if(def && Array.isArray(def.methods)){ const mk = (typeof methodKey==='function') ? methodKey(order) : ''; if(def.methods.indexOf(mk) < 0) return false; }
+    if(def && Array.isArray(def.methods)){ const mk = (typeof methodKey==='function') ? methodKey(order) : ''; if(mk && def.methods.indexOf(mk) < 0) return false; }  // only filter once a method is chosen
     return true;
   });
   if(!fields.length) return [];
@@ -4067,12 +4067,28 @@ function buildTaskFormLinks(order, taskCode, taskLabel){
 }
 function sendAsForm(rowKey, taskCode, orderId) { openTaskForm(taskCode, orderId); }
 // Popup: show the access-split completion-form links for a task in the queue.
+// Manual override: clear a task from In Progress when its completion form has nothing left to
+// request (e.g. evidence was filled via the editor, the method doesn't need those fields, or the
+// record is from an old task code). Marking it done records completion so it leaves the list.
+function markTaskCompleteManual(orderId, taskCode){
+  if(typeof markSubmissionComplete === 'function') markSubmissionComplete(orderId, taskCode);
+  if(typeof saveData === 'function') saveData();
+  var ov = document.getElementById('taskFormOv'); if(ov) ov.remove();
+  if(typeof renderAll === 'function') renderAll();
+  if(typeof showToast === 'function') showToast('Task marked complete \u2014 cleared from In Progress.');
+}
 function showTaskFormLinks(orderId, taskCode, taskLabel){
   const order = DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
   const groups = buildTaskFormLinks(order, taskCode, taskLabel);
   let body;
   if(!groups.length){
-    body = '<div style="font-size:13px;color:var(--ink-faded)">All fields that complete this task are already filled — nothing to request.</div>';
+    const alreadyDone = (typeof taskMarkedComplete==='function') && taskMarkedComplete(orderId, taskCode);
+    if(alreadyDone){
+      body = '<div style="font-size:13px;color:var(--ink-faded)">This task is already complete — nothing to request.</div>';
+    } else {
+      body = '<div style="font-size:13px;color:var(--ink-faded);margin-bottom:8px">There\u2019s nothing left to collect for this task \u2014 everything it needs is already on the order, or doesn\u2019t apply to this method. If the work is done, mark it complete to clear it from In Progress.</div>'
+           + '<button class="primary small" onclick="markTaskCompleteManual(\''+escAttr(orderId)+'\',\''+escAttr(taskCode)+'\')">\u2713 Mark this task complete</button>';
+    }
   } else {
     body = '<div style="font-size:12px;color:var(--ink-faded);margin-bottom:8px">A link for the assignee to submit what marks <strong>'+escapeHtml(taskLabel||taskCode)+'</strong> done. Photos/PDFs upload straight into the order.</div>';
     groups.forEach(g=>{
