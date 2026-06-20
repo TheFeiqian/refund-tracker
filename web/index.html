@@ -630,8 +630,51 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 // ============ Hosted persistence adapter (Supabase) ============
 const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','rts_label_photo','box_photo'];
 // Fields that accept MULTIPLE files (kept in an array `${field}s`, with the first as the primary value).
-const MULTI_FILE_FIELDS = ['return_label_pdf','proof_of_postage','order_confirmation'];
+const MULTI_FILE_FIELDS = FILE_FIELDS.slice(); // every file field allows multiple uploads
 function multiFileArrayKey(fieldKey){ return fieldKey + 's'; } // return_label_pdf -> return_label_pdfs, proof_of_postage -> proof_of_postages
+// Make sure a field has its multi-file array, migrating any pre-existing single file into it
+// (so adding a second file never silently drops the first).
+function ensureFileArray(order, fieldKey){
+  const arrKey = multiFileArrayKey(fieldKey);
+  if(!Array.isArray(order[arrKey])){
+    order[arrKey] = [];
+    if(order[fieldKey + '_file']){
+      order[arrKey].push({ file: order[fieldKey+'_file'], filename: order[fieldKey+'_filename']||'', filetype: order[fieldKey+'_filetype']||'', added: order[fieldKey+'_added']||0 });
+    }
+  }
+  return order[arrKey];
+}
+// Render every attached file for a field in the order editor (with download / remove per file).
+function editorFileListHtml(order, fieldKey){
+  const arrKey = multiFileArrayKey(fieldKey);
+  let arr = (order && Array.isArray(order[arrKey])) ? order[arrKey] : [];
+  if(!arr.length && order && order[fieldKey+'_file']){
+    arr = [{ file: order[fieldKey+'_file'], filename: order[fieldKey+'_filename']||'', filetype: order[fieldKey+'_filetype']||'' }];
+  }
+  if(!arr.length) return '';
+  const rows = arr.map((fl,i)=>{
+    const isImg = (fl.filetype||'').startsWith('image/');
+    const thumb = isImg ? `<img src="${fl.file||fl.path||''}" alt="" style="width:34px;height:34px;object-fit:cover;border-radius:4px;cursor:pointer" onclick="window.open(this.src)">` : `<div style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-size:18px">📄</div>`;
+    return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--line)">${thumb}<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(fl.filename||('file '+(i+1)))}</span><button type="button" class="tiny" onclick="downloadMultiFileAt('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Download</button><button type="button" class="tiny danger" onclick="removeEditorMultiFileAt('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Remove</button></div>`;
+  }).join('');
+  return `<div style="margin-top:6px">${rows}<div style="font-size:10.5px;color:var(--green);font-family:var(--mono);margin-top:4px">${arr.length} file${arr.length>1?'s':''} attached · saved</div></div>`;
+}
+// Remove one attached file from a field in the editor, then refresh that field's list.
+function removeEditorMultiFileAt(fieldKey, i){
+  const oid = (typeof editingOrderId!=='undefined' && editingOrderId) ? editingOrderId : (typeof formOrderId!=='undefined' ? formOrderId : null);
+  const order = DATA.orders.find(o => o.order_id === oid);
+  if(!order) return;
+  const arrKey = multiFileArrayKey(fieldKey);
+  if(Array.isArray(order[arrKey]) && order[arrKey].length){
+    if(typeof removeMultiFileAt === 'function') removeMultiFileAt(fieldKey, i); // confirms + saveData + re-points primary
+  } else {
+    if(!confirm('Remove this file?')) return;
+    order[fieldKey+'_file']=''; order[fieldKey+'_filename']=''; order[fieldKey+'_filetype']='';
+    if(typeof saveData==='function') saveData();
+  }
+  const prev = document.getElementById('filepreview_' + fieldKey);
+  if(prev) prev.innerHTML = editorFileListHtml(order, fieldKey);
+}
 let sb = null;
 window.__HOSTED = { orders: [], storeFlags: {}, burndown: [] };
 let __orderHashes = {};
@@ -3068,7 +3111,7 @@ function renderFileFieldInline(fieldKey, textValue, fileData, fileName, fileType
       ` : ''}
       ${isMulti && list && list.length > 1 ? `
         <div style="margin-top:8px;border-top:1px dashed var(--line);padding-top:8px">
-          <div style="font-size:11px;color:var(--ink-faded);margin-bottom:4px">All ${fieldKey === 'proof_of_postage' ? 'postage receipts' : 'return labels'} (${list.length}):</div>
+          <div style="font-size:11px;color:var(--ink-faded);margin-bottom:4px">All files (${list.length}):</div>
           ${list.map((lbl, i) => `
             <div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
               <span>${(lbl.filetype === 'application/pdf') ? '📄' : '🖼️'}</span>
@@ -3178,8 +3221,9 @@ async function __handleOneFormFileUpload(file, fieldKey) {
 }
 
 async function onOrderFieldFileUpload(input, fieldKey) {
-  const file = input.files[0];
-  if (!file) return;
+  const files = Array.from(input.files || []);
+  if (!files.length) return;
+  const file = files[0];
   if (file.size > 4 * 1024 * 1024) {
     if (!confirm(`This file is ${fileSizeFmt(file.size)}. Large files may exceed your browser’s storage limit. Continue?`)) {
       input.value = '';
@@ -3187,32 +3231,33 @@ async function onOrderFieldFileUpload(input, fieldKey) {
     }
   }
   try {
+    const order = editingOrderId ? DATA.orders.find(x => x.order_id === editingOrderId) : null;
     const dataUrl = await readFileAsDataURL(file);
-    // Stash on a per-edit buffer (so it commits when the user clicks Save)
-    if (!window._fileBuffer) window._fileBuffer = {};
-    window._fileBuffer[fieldKey] = { data: dataUrl, name: file.name, type: file.type };
-    onEvidenceProvided(fieldKey);
-    // Update preview area
-    const previewEl = document.getElementById('filepreview_' + fieldKey);
-    const isImg = file.type.startsWith('image/');
-    const icon = isImg ? '🖼️' : '📄';
-    if (previewEl) {
-      previewEl.innerHTML = `
-        <div class="file-attached-preview">
-          ${isImg ? `<img src="${dataUrl}" alt="${escAttr(file.name)}" onclick="window.open(this.src)">` : `<div class="file-icon-large">${icon}</div>`}
-          <div class="file-meta">
-            <div class="file-name-line">${icon} ${escapeHtml(file.name)}</div>
-            <div class="file-meta-line">${escapeHtml(file.type)} · ${fileSizeFmt(file.size)}</div>
-            <div style="font-size:10.5px;color:var(--green);font-family:var(--mono);margin-top:4px">Will save with the order</div>
-          </div>
-        </div>
-      `;
+    // Save straight onto the order in a per-field array so multiple files accumulate (none are lost).
+    // The first file stays the "primary" that drives completion + AI parsing.
+    if (order) {
+      const arr = ensureFileArray(order, fieldKey);
+      arr.push({ file: dataUrl, filename: file.name, filetype: file.type, added: Date.now() });
+      for (const extra of files.slice(1)) {
+        if (extra.size > 4 * 1024 * 1024 && !confirm(`This file is ${fileSizeFmt(extra.size)}. Continue?`)) continue;
+        const ed = await readFileAsDataURL(extra);
+        arr.push({ file: ed, filename: extra.name, filetype: extra.type, added: Date.now() });
+      }
+      const prim = arr[0];
+      order[fieldKey + '_file'] = prim.file; order[fieldKey + '_filename'] = prim.filename; order[fieldKey + '_filetype'] = prim.filetype;
+      if (!order[fieldKey]) order[fieldKey] = prim.filename;
+      saveData();
     }
+    input.value = '';
+    onEvidenceProvided(fieldKey);
+    // Update preview area — list every attached file (with download / remove)
+    const previewEl = document.getElementById('filepreview_' + fieldKey);
+    if (previewEl && order) previewEl.innerHTML = editorFileListHtml(order, fieldKey);
     // Mirror the filename into the text input if empty
     const textEl = document.getElementById('f_' + fieldKey);
     if (textEl && !textEl.value) textEl.value = file.name;
-    showToast(`${file.name} ready to save`, 'success');
-    if (editingOrderId) { const o = DATA.orders.find(x => x.order_id === editingOrderId); if (o) logAudit(o, 'file_uploaded', fieldKey + ': ' + file.name); }
+    showToast(files.length > 1 ? `${files.length} files attached` : `${file.name} attached`, 'success');
+    if (order) logAudit(order, 'file_uploaded', fieldKey + ': ' + files.map(f => f.name).join(', '));
 
     // AI vision verdict for photo evidence. Default = simulated; hosted overrides
     // window.__visionCheckImpl to call the analyze-photo edge function.
@@ -4154,7 +4199,7 @@ function openAdminUploadForm(orderId){
     if(isFile){
       h += '<div style="display:flex;gap:8px;align-items:center">'
          + '<input type="text" id="tf_' + f + '" value="'+escAttr(order[f]||'')+'" placeholder="Describe or paste a link" style="flex:1">'
-         + '<label class="file-attach-btn"><span>📎 Attach</span><input type="file" accept="image/*,application/pdf" onchange="taskFormFileUpload(this, \'' + f + '\')"></label>'
+         + '<label class="file-attach-btn"><span>📎 Attach</span><input type="file" accept="image/*,application/pdf" multiple onchange="taskFormFileUpload(this, \'' + f + '\')"></label>'
          + '</div><div id="tf_preview_' + f + '" style="font-size:11px;color:var(--ink-faded);margin-top:4px"></div>';
     } else if(def.type === 'select'){
       h += '<select id="tf_' + f + '"><option value="">(choose)</option>' + (def.options||[]).filter(Boolean).map(o=>'<option '+((order[f]===o)?'selected':'')+'>'+escapeHtml(o)+'</option>').join('') + '</select>';
@@ -4194,7 +4239,7 @@ function openTaskForm(taskCode, orderId) {
     if (isFile) {
       h += '<div style="display:flex;gap:8px;align-items:center">'
          + '<input type="text" id="tf_' + f + '" placeholder="Describe or paste a link" style="flex:1">'
-         + '<label class="file-attach-btn"><span>📎 Attach</span><input type="file" onchange="taskFormFileUpload(this, \'' + f + '\')"></label>'
+         + '<label class="file-attach-btn"><span>📎 Attach</span><input type="file" multiple onchange="taskFormFileUpload(this, \'' + f + '\')"></label>'
          + '</div><div id="tf_preview_' + f + '" style="font-size:11px;color:var(--ink-faded);margin-top:4px"></div>';
     } else if (def.type === 'select') {
       h += '<select id="tf_' + f + '"><option value="">(choose)</option>' + (def.options || []).filter(Boolean).map(o => '<option>' + escapeHtml(o) + '</option>').join('') + '</select>';
@@ -4215,19 +4260,21 @@ function openTaskForm(taskCode, orderId) {
   document.getElementById('taskFormModal').classList.add('show');
 }
 function taskFormFileUpload(input, field) {
-  const file = input.files[0]; if (!file || !_taskFormState) return;
-  readFileAsDataURL(file).then(dataUrl => {
-    _taskFormState.fileBuf[field] = { data: dataUrl, name: file.name, type: file.type };
+  const files = Array.from(input.files || []); if (!files.length || !_taskFormState) return;
+  if (!Array.isArray(_taskFormState.fileBuf[field])) _taskFormState.fileBuf[field] = [];
+  Promise.all(files.map(fl => readFileAsDataURL(fl).then(d => ({ data: d, name: fl.name, type: fl.type })))).then(items => {
+    items.forEach(it => _taskFormState.fileBuf[field].push(it));
+    const count = _taskFormState.fileBuf[field].length;
+    const last = items[items.length - 1];
     const prev = document.getElementById('tf_preview_' + field);
     if (prev) {
-      let note = '✓ ' + file.name;
-      // Simulated AI vision check on photo evidence
+      let note = (count > 1 ? ('✓ ' + count + ' files attached') : ('✓ ' + last.name));
       if (field === 'damage_photo') note += ' — running damage check…';
       if (field === 'delivery_photo') note += ' — running delivery check…';
       prev.textContent = note;
       if (field === 'damage_photo' || field === 'delivery_photo') {
-        runVisionCheck(field, _taskFormState.fileBuf[field].data).then(res => {
-          if (prev) prev.innerHTML = '✓ ' + escapeHtml(file.name) + ' <span style="color:' + (res.ok ? 'var(--green)' : 'var(--amber)') + '">· ' + escapeHtml(res.label) + '</span>';
+        runVisionCheck(field, last.data).then(res => {
+          if (prev) prev.innerHTML = '✓ ' + escapeHtml(count > 1 ? (count + ' files') : last.name) + ' <span style="color:' + (res.ok ? 'var(--green)' : 'var(--amber)') + '">· ' + escapeHtml(res.label) + '</span>';
         });
       }
     }
@@ -4263,11 +4310,14 @@ function submitTaskForm() {
   fields.forEach(f => {
     const el = document.getElementById('tf_' + f);
     if (el && el.value) { order[f] = el.value; filled.push(f); }
-    if (fileBuf[f]) {
-      order[f + '_file'] = fileBuf[f].data;
-      order[f + '_filename'] = fileBuf[f].name;
-      order[f + '_filetype'] = fileBuf[f].type;
-      if (!order[f]) order[f] = fileBuf[f].name;
+    const fb = fileBuf[f];
+    if (fb && (Array.isArray(fb) ? fb.length : true)) {
+      const list = Array.isArray(fb) ? fb : [fb];
+      const arr = ensureFileArray(order, f);
+      list.forEach(one => arr.push({ file: one.data, filename: one.name, filetype: one.type, added: Date.now() }));
+      const prim = arr[0];
+      order[f + '_file'] = prim.file; order[f + '_filename'] = prim.filename; order[f + '_filetype'] = prim.filetype;
+      if (!order[f]) order[f] = prim.filename;
       if (filled.indexOf(f) < 0) filled.push(f);
       // simulated vision sets the DNA flag when a delivery photo shows no person
       if (f === 'delivery_photo' && !order.delivery_photo_shows_person) order.delivery_photo_shows_person = 'no';
@@ -5151,7 +5201,7 @@ function openOrderModal(orderId) {
         <label>Order confirmation <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">file or text · ticks Item ordered</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
           <input type="text" id="f_order_confirmation" value="${escAttr(order.order_confirmation)}" placeholder="Confirmation email/number, URL, or attach the PDF" style="flex:1" onchange="onEvidenceProvided('order_confirmation')">
-          <label class="file-attach-btn"><span>📎 ${order.order_confirmation_file ? 'Replace' : 'Attach'}</span><input type="file" accept="image/*,application/pdf" onchange="onOrderFieldFileUpload(this, 'order_confirmation')"></label>
+          <label class="file-attach-btn"><span>📎 Attach files</span><input type="file" accept="image/*,application/pdf" multiple onchange="onOrderFieldFileUpload(this, 'order_confirmation')"></label>
         </div>
         <div id="filepreview_order_confirmation">
           ${order.order_confirmation_file ? `<div class="file-attached-preview">${(order.order_confirmation_filetype || '').startsWith('image/') ? `<img src="${order.order_confirmation_file}" alt="${escAttr(order.order_confirmation_filename || '')}" onclick="window.open(this.src)">` : `<div class="file-icon-large">📄</div>`}<div class="file-meta"><div class="file-name-line">${escapeHtml(order.order_confirmation_filename || '')}</div><div class="file-meta-line">${escapeHtml(order.order_confirmation_filetype || '')}</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="tiny" onclick="viewAttachedFile('order_confirmation', 'order'); event.preventDefault();">View</button><button type="button" class="tiny" onclick="downloadAttachedFile('order_confirmation', 'order'); event.preventDefault();">Download</button><button type="button" class="tiny danger" onclick="removeAttachedFile('order_confirmation', 'order'); event.preventDefault();">Remove</button></div></div></div>` : ''}
@@ -5198,7 +5248,7 @@ function openOrderModal(orderId) {
         <label>Delivery photo (image or URL) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">file or text</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
           <input type="text" id="f_delivery_photo" value="${escAttr(order.delivery_photo)}" placeholder="Paste URL or attach a file" style="flex:1" onchange="onEvidenceProvided('delivery_photo')">
-          <label class="file-attach-btn"><span>📎 ${order.delivery_photo_file ? 'Replace' : 'Attach'}</span><input type="file" accept="image/*" onchange="onOrderFieldFileUpload(this, 'delivery_photo')"></label>
+          <label class="file-attach-btn"><span>📎 Attach files</span><input type="file" accept="image/*" multiple onchange="onOrderFieldFileUpload(this, 'delivery_photo')"></label>
         </div>
         <div id="filepreview_delivery_photo">
           ${order.delivery_photo_file ? `<div class="file-attached-preview"><img src="${order.delivery_photo_file}" alt="${escAttr(order.delivery_photo_filename || '')}" onclick="window.open(this.src)"><div class="file-meta"><div class="file-name-line">🖼️ ${escapeHtml(order.delivery_photo_filename || '')}</div><div class="file-meta-line">${escapeHtml(order.delivery_photo_filetype || '')}</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="tiny danger" onclick="removeAttachedFile('delivery_photo', 'order'); event.preventDefault();">Remove</button></div></div></div>` : ''}
@@ -5209,7 +5259,7 @@ function openOrderModal(orderId) {
       <div class="form-field full"><label>Damage photo <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">LIT with pic</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
           <input type="text" id="f_damage_photo" value="${escAttr(order.damage_photo)}" placeholder="Filename or URL of the damage photo" style="flex:1" onchange="onEvidenceProvided('damage_photo')">
-          <label class="file-attach-btn"><span>📎 ${order.damage_photo_file ? 'Replace' : 'Attach'}</span><input type="file" accept="image/*" onchange="onOrderFieldFileUpload(this, 'damage_photo')"></label>
+          <label class="file-attach-btn"><span>📎 Attach files</span><input type="file" accept="image/*" multiple onchange="onOrderFieldFileUpload(this, 'damage_photo')"></label>
         </div>
         <div id="filepreview_damage_photo">${order.damage_photo_file ? `<div class="file-attached-preview"><img src="${order.damage_photo_file}" alt="${escAttr(order.damage_photo_filename || '')}" onclick="window.open(this.src)"><div class="file-meta"><div class="file-name-line">${escapeHtml(order.damage_photo_filename || '')}</div><div class="file-meta-line">${escapeHtml(order.damage_photo_filetype || '')}</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="tiny" onclick="viewAttachedFile('damage_photo', 'order'); event.preventDefault();">View</button><button type="button" class="tiny" onclick="downloadAttachedFile('damage_photo', 'order'); event.preventDefault();">Download</button><button type="button" class="tiny danger" onclick="removeAttachedFile('damage_photo', 'order'); event.preventDefault();">Remove</button></div></div></div>` : ''}</div>
       </div>
@@ -5223,7 +5273,7 @@ function openOrderModal(orderId) {
         <label>Return label PDF or image <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">file or text</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
           <input type="text" id="f_return_label_pdf" value="${escAttr(order.return_label_pdf)}" placeholder="Filename, URL, or attach" style="flex:1" onchange="onEvidenceProvided('return_label_pdf')">
-          <label class="file-attach-btn"><span>📎 ${order.return_label_pdf_file ? 'Replace' : 'Attach'}</span><input type="file" accept="image/*,application/pdf" onchange="onOrderFieldFileUpload(this, 'return_label_pdf')"></label>
+          <label class="file-attach-btn"><span>📎 Attach files</span><input type="file" accept="image/*,application/pdf" multiple onchange="onOrderFieldFileUpload(this, 'return_label_pdf')"></label>
         </div>
         <div id="filepreview_return_label_pdf">
           ${order.return_label_pdf_file ? `<div class="file-attached-preview">${(order.return_label_pdf_filetype || '').startsWith('image/') ? `<img src="${order.return_label_pdf_file}" alt="${escAttr(order.return_label_pdf_filename || '')}" onclick="window.open(this.src)">` : `<div class="file-icon-large">📄</div>`}<div class="file-meta"><div class="file-name-line">${escapeHtml(order.return_label_pdf_filename || '')}</div><div class="file-meta-line">${escapeHtml(order.return_label_pdf_filetype || '')}</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="tiny" onclick="viewAttachedFile('return_label_pdf', 'order'); event.preventDefault();">View</button><button type="button" class="tiny danger" onclick="removeAttachedFile('return_label_pdf', 'order'); event.preventDefault();">Remove</button></div></div></div>` : ''}
@@ -5241,7 +5291,7 @@ function openOrderModal(orderId) {
         <label>Proof of postage <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">file or text</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
           <input type="text" id="f_proof_of_postage" value="${escAttr(order.proof_of_postage)}" placeholder="Receipt number, URL, or attach a photo" style="flex:1" onchange="onEvidenceProvided('proof_of_postage')">
-          <label class="file-attach-btn"><span>📎 ${order.proof_of_postage_file ? 'Replace' : 'Attach'}</span><input type="file" accept="image/*,application/pdf" onchange="onOrderFieldFileUpload(this, 'proof_of_postage')"></label>
+          <label class="file-attach-btn"><span>📎 Attach files</span><input type="file" accept="image/*,application/pdf" multiple onchange="onOrderFieldFileUpload(this, 'proof_of_postage')"></label>
         </div>
         <div id="filepreview_proof_of_postage">
           ${order.proof_of_postage_file ? `<div class="file-attached-preview">${(order.proof_of_postage_filetype || '').startsWith('image/') ? `<img src="${order.proof_of_postage_file}" alt="${escAttr(order.proof_of_postage_filename || '')}" onclick="window.open(this.src)">` : `<div class="file-icon-large">📄</div>`}<div class="file-meta"><div class="file-name-line">${escapeHtml(order.proof_of_postage_filename || '')}</div><div class="file-meta-line">${escapeHtml(order.proof_of_postage_filetype || '')}</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="tiny" onclick="viewAttachedFile('proof_of_postage', 'order'); event.preventDefault();">View</button><button type="button" class="tiny" onclick="downloadAttachedFile('proof_of_postage', 'order'); event.preventDefault();">Download</button><button type="button" class="tiny danger" onclick="removeAttachedFile('proof_of_postage', 'order'); event.preventDefault();">Remove</button></div></div></div>` : ''}
@@ -5295,6 +5345,8 @@ function openOrderModal(orderId) {
   ofInitItemsList(order);
   ofInitTrackings(order);
   document.getElementById('orderModal').classList.add('show');
+  // Show every attached file (not just the primary) for each file field.
+  try{ FILE_FIELDS.forEach(fk=>{ const el=document.getElementById('filepreview_'+fk); if(el){ const o=DATA.orders.find(x=>x.order_id===editingOrderId); if(o) el.innerHTML=editorFileListHtml(o, fk); } }); }catch(e){}
   // Highlight the fields that are missing/needed for this order's current stage, so
   // opening an order from a blocked task shows exactly what to fill in.
   setTimeout(()=>{ try{ highlightOrderFields((missingFieldsFor(order)||[]).map(m=>m.field)); }catch(e){} }, 50);
@@ -5662,15 +5714,11 @@ function saveOrderEdit() {
   if (window._fileBuffer) {
     Object.keys(window._fileBuffer).forEach(key => {
       const buf = window._fileBuffer[key];
-      if (key === 'order_confirmation') {
-        order.order_confirmation_file = buf.data;
-        order.order_confirmation_filename = buf.name;
-        order.order_confirmation_filetype = buf.type;
-      } else {
-        order[key + '_file'] = buf.data;
-        order[key + '_filename'] = buf.name;
-        order[key + '_filetype'] = buf.type;
-      }
+      const arr = ensureFileArray(order, key);
+      arr.push({ file: buf.data, filename: buf.name, filetype: buf.type, added: Date.now() });
+      const prim = arr[0];
+      order[key + '_file'] = prim.file; order[key + '_filename'] = prim.filename; order[key + '_filetype'] = prim.filetype;
+      if (!order[key]) order[key] = prim.filename;
     });
     window._fileBuffer = {};
   }
