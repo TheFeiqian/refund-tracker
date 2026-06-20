@@ -5559,23 +5559,38 @@ function saveOrderEdit() {
   renderAll();
 }
 
-function deleteCurrentOrder() {
+async function deleteCurrentOrder() {
   if (!editingOrderId) return;
   if (!confirm('Delete this order? This cannot be undone (unless you re-import).')) return;
   const id = editingOrderId;
   DATA.orders = DATA.orders.filter(o => o.order_id !== id);
-  // Record the deletion so it survives reloads/updates and is never re-seeded from INITIAL_ORDERS.
-  recordDeletedOrder(id);
+  // Persist the deletion to the shared "deleted" list — THIS is what makes it stick across reloads.
+  const recorded = await recordDeletedOrder(id);
   // Remove the row from the database too (hostedSave only upserts, it never deletes).
-  try { if (typeof sb !== 'undefined' && sb) { sb.from('orders').delete().eq('order_id', id); } } catch(e){}
+  let dbDeleteFailed = false;
+  if (typeof sb !== 'undefined' && sb) {
+    try {
+      const { error } = await sb.from('orders').delete().eq('order_id', id);
+      if (error) dbDeleteFailed = true;
+    } catch(e) { dbDeleteFailed = true; }
+  }
   saveData(); closeOrderModal(); renderAll();
+  if (!recorded) {
+    showToast('Deleted on screen, but the database WRITE was blocked — it may reappear on refresh until delete permissions are set (see the fix).', 'error');
+  } else if (dbDeleteFailed) {
+    // The deletion still sticks (it's in the deleted list and will be filtered + purged on load),
+    // but the row couldn't be physically removed. Hidden permanently, just not erased.
+    showToast('Order deleted and will stay hidden. (The row could not be erased from the database yet — that needs the delete policy, but it no longer shows either way.)', 'success');
+  } else {
+    showToast('Order deleted.', 'success');
+  }
 }
 // Persistent set of deleted order IDs (app_state key 'deleted_orders'), so deletions stick.
 function deletedOrderSet(){
   if(!DATA._deletedOrders) DATA._deletedOrders = (window.__HOSTED && window.__HOSTED.deletedOrders) ? window.__HOSTED.deletedOrders.slice() : [];
   return DATA._deletedOrders;
 }
-function recordDeletedOrder(id){
+async function recordDeletedOrder(id){
   const s = deletedOrderSet();
   if(s.indexOf(id) < 0) s.push(id);
   if(window.__HOSTED){
@@ -5583,7 +5598,15 @@ function recordDeletedOrder(id){
     // Strip from the in-memory hosted list now, so a blocked DB delete can't resurrect it on reload.
     if(Array.isArray(window.__HOSTED.orders)) window.__HOSTED.orders = window.__HOSTED.orders.filter(o => o.order_id !== id);
   }
-  try { if (typeof sb !== 'undefined' && sb) { sb.from('app_state').upsert({ key:'deleted_orders', value: s }, { onConflict:'key' }); } } catch(e){}
+  // The deleted list lives in app_state. If this write is blocked by row-level security, the deletion
+  // will NOT survive a refresh — so we await it and report back rather than failing silently.
+  if (typeof sb !== 'undefined' && sb) {
+    try {
+      const { error } = await sb.from('app_state').upsert({ key:'deleted_orders', value: s }, { onConflict:'key' });
+      if (error) return false;
+    } catch(e) { return false; }
+  }
+  return true;
 }
 
 document.getElementById('orderModal').addEventListener('click', e => { if (e.target.id === 'orderModal') closeOrderModal(); });
