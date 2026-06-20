@@ -1358,13 +1358,23 @@ const TASK_CATALOG = [
     info_needed: 'Items packed, collection slot, anyone present at the address',
     instruction_template: 'Hi {person},\n\nCollection is booked for {store} order {order_id} ({items}).\n\n  Collection date: {collection_date}\n  Collection time: {collection_time}\n  Address: {address}\n\nPlease have the items packed and ready, hand them to the courier, and reply with a photo of the collection receipt / driver confirmation (we need proof the items left, in case we have to chargeback).' },
 
+  { code: 'bbm_confirm_refund', name: 'Confirm refund received', stage: 5, sla: 24, owner_only: false, info_only: false,
+    applies_when: (o)=> o.bought_by_mistake === 'yes',
+    appears_when: 'BBM return sent (collection handed over / parcel posted) — refund expected 5 working days after the collection date.',
+    advances_when: 'Refund confirmation received ✓ → Done',
+    completed_when: (o) => fieldFilled(o, 'refund_received_date') || !!o.refund_confirmation_pdf_file,
+    completed_via: 'refund_received_date is set OR a refund confirmation email is uploaded',
+    info_needed: 'The refund date and the confirmation email',
+    instruction_template: 'Hi {person},\n\n{store} order {order_id} ({items}, £{price}) was returned (bought by mistake). The refund is due within 5 working days of the collection date{bbm_refund_due_clause}.\n\nPlease check the card/account for the refund. Once it arrives, record it on the form: enter the refund date under "refund confirmation received" and upload the confirmation email (PDF). That closes the order.\n\nIf it has NOT arrived by the expected date, chase {store} — contact: {store_contact}.' },
+
   { code: 'contact_retailer_investigation', name: 'Notify retailer & open investigation', stage: 5, sla: 4, owner_only: false, info_only: false,
-    appears_when: 'A method has been chosen and the return is in progress (DNA → stage 5; LIT/RTS → after the return is sent)',
+    applies_when: (o)=> o.bought_by_mistake !== 'yes',
+    appears_when: 'A method has been chosen and the return is in progress (DNA → stage 5; LIT/RTS → after the return is sent). BBM excluded — it has its own chain (M_ESCALATE excludes BBM).',
     advances_when: 'Investigation deadline set → task complete  |  Refund confirmation received ✓ → Done  |  Refund refused ✓ → Stage 7',
     completed_when: (o) => fieldFilled(o, 'investigation_deadline') || fieldFilled(o, 'refund_received_date') || !!o.refund_confirmation_pdf_file,
     completed_via: 'investigation_deadline is set (retailer gave a response date) OR a refund confirmation is recorded',
     info_needed: 'Retailer contact, order ref, return tracking status, days since movement',
-    instruction_template: 'Hi {person},\n\nThis is the FIRST contact with {store} about order {order_id} ({items}, £{price}) — email or call them to notify them of the issue and formally open an investigation.\n  Retailer contact: {store_contact}\n\n{box_photo_instructions}\n\nSEND THIS to the retailer (adjust names/refs as needed):\n"""\n{retailer_narrative}\n"""\n\nAlso give them, if asked:\n  - Name on delivery: {delivery_name}\n  - Contact phone: {phone}\n  - Contact email: {email}\n  - Order ref: {store_order_number}\n  - Method used: {method}\n  - Outbound tracking: {outbound_tracking}\n\nAsk for an investigation reference and a target completion date (the deadline), and reply with both. IMPORTANT: if they do NOT give a deadline, we assume 5 working days from today — tick the "no deadline given" box on the form and it is set automatically.\n\nIf the retailer confirms the refund at any point, record it on the form: enter the refund date under "refund confirmation received" and upload the confirmation email (PDF). That closes the order.' },
+    instruction_template: 'Hi {person},\n\nThis is the FIRST contact with {store} about order {order_id} ({items}, £{price}) — email or call them to notify them of the issue and formally open an investigation.\n  Retailer contact: {store_contact}\n\n{box_photo_instructions}\n\nSEND THIS to the retailer (adjust names/refs as needed):\n"""\n{retailer_narrative}\n"""\n\nAlso give them, if asked:\n  - Name on delivery: {delivery_name}\n  - Contact phone: {phone}\n  - Contact email: {email}\n  - Order ref: {store_order_number}{outbound_tracking_line}\n\nAsk for an investigation reference and a target completion date (the deadline), and reply with both. IMPORTANT: if they do NOT give a deadline, we assume 5 working days from today — tick the "no deadline given" box on the form and it is set automatically.\n\nIf the retailer confirms the refund at any point, record it on the form: enter the refund date under "refund confirmation received" and upload the confirmation email (PDF). That closes the order.' },
 
   { code: 'chase_investigation', name: 'Follow up on investigation', stage: 6, sla: 4, owner_only: false, info_only: false,
     appears_when: 'Manual stage = 6 (no trigger path naturally reaches 6 — refund_unsuccessful skips to 7)',
@@ -1399,7 +1409,7 @@ const STAGE_FIELDS = {
   2: { name: 'Awaiting Delivery', desc: 'Once the order is placed and being shipped', fields: ['inbound_tracking', 'inbound_courier', 'order_date'] },
   3: { name: 'Delivered', desc: 'Item arrived; choose return method', fields: ['delivery_date_text', 'delivery_photo', 'delivery_photo_shows_person', 'item_damaged', 'damage_photo', 'bought_by_mistake', 'method'] },
   4: { name: 'Return Sent', desc: 'Label generated AND parcel posted (or collection booked + handed over for BBM)', fields: ['return_label_pdf', 'return_label_date', 'outbound_tracking', 'outbound_courier', 'proof_of_postage', 'postage_date', 'posted_from', 'collection_date', 'collection_time', 'collection_handover', 'rts_label_photo'] },
-  5: { name: 'Investigation', desc: 'Retailer is processing - awaiting response', fields: ['investigation_deadline', 'box_photo', 'refund_received_date', 'refund_confirmation_pdf'] },
+  5: { name: 'Investigation', desc: 'Retailer is processing - awaiting response', fields: ['investigation_deadline', 'box_photo', 'refund_received_date', 'refund_confirmation_pdf', 'issue_notes'] },
   6: { name: 'Refund Refused', desc: 'Preparing chargeback case', fields: ['refund_narrative', 'refund_refused_date'] },
   7: { name: 'Chargeback', desc: 'Filed with bank', fields: ['chargeback_bank', 'chargeback_amount', 'chargeback_date', 'invoice', 'refund_received_date', 'refund_received_amount'] },
   8: { name: 'Court Claim', desc: 'Last resort - small claims court', fields: ['court_claim_ref', 'court_claim_date', 'defendant_legal_entity', 'court_fee_paid', 'hearing_date', 'court_outcome', 'total_recovered'] },
@@ -1461,6 +1471,7 @@ const FIELD_DEFS = {
   refund_received_amount: { label: 'Refund received (£)', required: false, type: 'number', help: 'Amount actually refunded' },
   refund_confirmation_pdf: { label: 'Refund confirmation email (PDF)', required: false, type: 'file', help: 'Upload the retailer email confirming the refund' },
   rts_label_photo: { label: 'Return label on package (photo)', required: false, type: 'file', help: 'RTS only: photo of the return-to-sender label already on the parcel' },
+  issue_notes: { label: 'Notes (optional) — flag any issues', required: false, type: 'textarea', help: 'Anything the team should know: trouble reaching the retailer, a partial response, anything unusual.' },
   box_photo: { label: 'Box photo (PEB/EB evidence)', required: false, type: 'file', help: 'PEB/EB: photo of the opened box after removing the claimed-missing items' },
 };
 
@@ -1487,7 +1498,7 @@ const FIELD_ACCESS = {
   // admin
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
-  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_confirmation_pdf:'email_holder', rts_label_photo:'email_holder', box_photo:'email_holder', refund_narrative:'admin',
+  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_confirmation_pdf:'email_holder', rts_label_photo:'email_holder', box_photo:'email_holder', issue_notes:'email_holder', refund_narrative:'admin',
   refund_refused_date:'admin', invoice:'email_holder', delivery_name:'delivery',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
@@ -1572,13 +1583,13 @@ const FIELD_MODEL = {
 // (only happen if it escalates) → never auto-priority until the order actually reaches them.
 const METHOD_CHAINS = {
   LIT:   ['place_order','upload_tracking','choose_method','generate_return_label','post_return_label','contact_retailer_investigation','chase_investigation'],
-  LITPIC:['place_order','upload_tracking','choose_method','damage_photo_check','generate_return_label','post_return_label','contact_retailer_investigation','chase_investigation'],
-  RTS:   ['place_order','upload_tracking','choose_method','contact_retailer_investigation','chase_investigation'],
+  LITPIC:['place_order','upload_tracking','choose_method','damage_photo_check','post_return_label','contact_retailer_investigation','chase_investigation'],
+  RTS:   ['place_order','upload_tracking','choose_method','rts_photograph_label','post_return_label','contact_retailer_investigation','chase_investigation'],
   DNA:   ['place_order','upload_tracking','choose_method','contact_retailer_investigation','chase_investigation'],
   PEB:   ['place_order','upload_tracking','choose_method','contact_retailer_investigation','chase_investigation'],
   EB:    ['place_order','upload_tracking','choose_method','contact_retailer_investigation','chase_investigation'],
-  BBML:  ['place_order','upload_tracking','choose_method','contact_retailer_investigation','post_return_label'],
-  BBMC:  ['place_order','upload_tracking','choose_method','contact_retailer_investigation','hand_over_collection'],
+  BBML:  ['place_order','upload_tracking','choose_method','bbm_book_label','post_return_label','bbm_confirm_refund'],
+  BBMC:  ['place_order','upload_tracking','choose_method','bbm_book_collection','hand_over_collection','bbm_confirm_refund'],
 };
 const CONTINGENT_TASKS = ['submit_chargeback','submit_small_claims_court'];
 // UK banks (high-street + app-based + main card issuers) for the structured card_used input.
@@ -1635,10 +1646,10 @@ function parseCardUsed(v){ v=(v||'').trim(); if(!v) return {bank:'',type:''}; co
 function deriveChargebackBank(order){ const {bank}=parseCardUsed(order.card_used); if(bank && bank!=='Other') order.chargeback_bank = bank; return order.chargeback_bank||''; }
 // Which stage each task executes at — used for the 1b rule (priority = current stage or next step).
 const TASK_STAGE = {
-  place_order:1, upload_tracking:2, choose_method:3, damage_photo_check:3,
-  generate_return_label:4, post_return_label:4, bbm_book_label:4, bbm_book_collection:4,
+  place_order:1, upload_tracking:2, choose_method:3,
+  damage_photo_check:4, rts_photograph_label:4, generate_return_label:4, post_return_label:4, bbm_book:4, bbm_book_label:4, bbm_book_collection:4,
   get_collection_date:4, hand_over_collection:4,
-  contact_retailer_investigation:5, chase_investigation:5,
+  contact_retailer_investigation:5, bbm_confirm_refund:5, chase_investigation:5,
   submit_chargeback:7, submit_small_claims_court:8,
 };
 
@@ -1763,6 +1774,13 @@ function buildFormLink(order, group, taskCode, taskLabel, mandSet){
 // text answers are written straight onto the order fields. Idempotent by submission id.
 async function syncSubmissions(){
   if(typeof sb === 'undefined' || !sb) return 0;
+  // Don't disturb an open editor. If the order editor (or the in-app form) is open, skip this poll
+  // cycle — otherwise it would mutate the order being edited and renderAll() under the user's hands,
+  // which looks like the editor closing/losing progress. Submissions sync on the next cycle (and the
+  // server-side function is a backstop), so nothing is lost.
+  if(editingOrderId) return 0;
+  const __om = document.getElementById('orderModal'); if(__om && __om.classList.contains('show')) return 0;
+  const __fm = document.getElementById('formModal'); if(__fm && __fm.classList.contains('show')) return 0;
   let rows;
   // Match unprocessed rows whether `processed` is false OR null (older form submissions inserted
   // before processed was set explicitly land as null, which `.eq('processed', false)` would miss).
@@ -2886,6 +2904,24 @@ function tplVal(order, key) {
     }
     return '';
   }
+  // BBM: refund expected 5 working days after the collection date (or posting, for the label route).
+  if (key === 'bbm_refund_due_clause') {
+    const base = order.collection_date || order.postage_date || '';
+    if (base && typeof parseDateLoose === 'function') {
+      const d = parseDateLoose(base);
+      if (d && !isNaN(d.getTime())) return ' (expected by ' + addWorkingDays(d, 5) + ')';
+    }
+    return '';
+  }
+  // Outbound (return) tracking line — included in retailer messages ONLY for LIT / LIT with pic.
+  // For RTS / DNA / PEB / EB it is omitted (per the message rules).
+  if (key === 'outbound_tracking_line') {
+    const m = order.method || '';
+    if ((m === 'LIT' || m === 'LIT with pic') && order.outbound_tracking) {
+      return '\n  - Outbound tracking: ' + order.outbound_tracking;
+    }
+    return '';
+  }
   // store_contact pulls the retailer's contact details from the store record (not the order).
   if (key === 'store_contact') {
     return (typeof formatStoreContact === 'function') ? formatStoreContact(order) : null;
@@ -3968,18 +4004,20 @@ function togglePriorityExpand(rowKey) {
 // ticks the matching trigger, logs to the audit trail.
 // ============================================================
 const TASK_FORM_FIELDS = {
-  place_order:            ['store_order_number', 'order_confirmation', 'price'],
+  place_order:            ['store_order_number', 'order_confirmation', 'price', 'delivery_name', 'email', 'phone', 'address', 'order_date', 'items'],
   upload_tracking:        ['inbound_tracking', 'inbound_courier', 'delivery_date_text'],
   choose_method:          ['delivery_date_text', 'delivery_photo', 'delivery_photo_shows_person', 'item_damaged', 'bought_by_mistake', 'method'],
-  damage_photo_check:     ['damage_photo'],
+  damage_photo_check:     ['damage_photo', 'return_label_pdf'],
   generate_return_label:  ['return_label_pdf', 'outbound_tracking', 'outbound_courier'],
   post_return_label:      ['proof_of_postage', 'posted_from'],
   bbm_book:               ['return_label_pdf', 'collection_date'],
   bbm_book_label:         ['return_label_pdf'],
   bbm_book_collection:    ['collection_date'],
   get_collection_date:    ['collection_date'],
+  rts_photograph_label:   ['rts_label_photo'],
   hand_over_collection:   ['collection_handover'],
-  contact_retailer_investigation: ['investigation_deadline'],
+  contact_retailer_investigation: ['investigation_deadline', 'refund_received_date', 'refund_confirmation_pdf', 'box_photo', 'issue_notes'],
+  bbm_confirm_refund:     ['refund_received_date', 'refund_confirmation_pdf'],
   chase_investigation:    ['investigation_deadline'],
   submit_chargeback:      ['chargeback_bank', 'chargeback_amount', 'chargeback_reference', 'chargeback_type', 'invoice'],
 };
@@ -4004,17 +4042,23 @@ let _taskFormState = null;
 // All task-completion fields are required (the task isn't done until they're provided).
 // Returns [{cls, holder, fields, link}] (+ unresolved groups flagged).
 function buildTaskFormLinks(order, taskCode, taskLabel){
-  // completion fields for this task, minus already-filled, minus AI-derived (extracted from the upload)
+  // Fields that may appear on a completion form but must NEVER block it (supplementary evidence /
+  // notes). The task's completed_when does not depend on these, so the form stays submittable without
+  // them — e.g. the optional "flag any issues" notes, and the refund-confirmation fields.
+  const OPTIONAL_FORM_FIELDS = ['issue_notes','refund_received_date','refund_received_amount','refund_confirmation_pdf','box_photo'];
+  // completion fields for this task, minus already-filled, minus AI-derived, minus method-inapplicable
   const fields = (TASK_FORM_FIELDS[taskCode] || []).filter(f => {
     if(fieldFilled(order, f)) return false;
     const def = FIELD_MODEL[f];
     if(def && def.aiDerived) return false;     // AI extracts these from the upload — not on the form
     if(def && def.inForm === false) return false;
+    // method-specific fields only appear for their methods (e.g. box_photo only for PEB/EB)
+    if(def && Array.isArray(def.methods)){ const mk = (typeof methodKey==='function') ? methodKey(order) : ''; if(def.methods.indexOf(mk) < 0) return false; }
     return true;
   });
   if(!fields.length) return [];
   const groups = splitFieldsByAccess(order, fields);
-  const mandSet = {}; fields.forEach(f=>mandSet[f]=true);   // all required
+  const mandSet = {}; fields.forEach(f=>{ if(OPTIONAL_FORM_FIELDS.indexOf(f) < 0) mandSet[f]=true; });   // optional fields stay optional
   return groups.map(g=>{
     const out = { cls:g.cls, holder:g.holder, fields:g.fields };
     if(g.holder.resolved) out.link = buildFormLink(order, g, taskCode, taskLabel||'', mandSet);
@@ -4959,6 +5003,7 @@ function openOrderModal(orderId) {
   // close form modal if open
   if (document.getElementById('formModal').classList.contains('show')) closeMissingInfoForm();
   editingOrderId = orderId;
+  __orderEditDirty = false;
   const isNew = orderId === null;
   let order;
   if (isNew) {
@@ -5316,7 +5361,16 @@ function renderOrderHistory(order) {
   }).join('') + '</div>';
 }
 
-function closeOrderModal() { document.getElementById('orderModal').classList.remove('show'); editingOrderId = null; window._fileBuffer = {}; }
+let __orderEditDirty = false;
+function closeOrderModal(force) {
+  const m = document.getElementById('orderModal');
+  // If the user has typed unsaved changes, confirm before discarding them (prevents an accidental
+  // backdrop click or Cancel from wiping in-progress edits). `force` skips the prompt (used by Save/Delete).
+  if(!force && __orderEditDirty && m && m.classList.contains('show')){
+    if(!confirm('You have unsaved changes to this order. Close without saving?')) return;
+  }
+  m.classList.remove('show'); editingOrderId = null; window._fileBuffer = {}; __orderEditDirty = false;
+}
 
 function ofEmailAutofill(){
   const emailEl=document.getElementById('f_email'); const personEl=document.getElementById('f_person'); const hint=document.getElementById('f_email_hint');
@@ -5512,7 +5566,7 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_confirmation_pdf','rts_label_photo','box_photo','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_confirmation_pdf','rts_label_photo','box_photo','issue_notes','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
@@ -5618,7 +5672,7 @@ function saveOrderEdit() {
     showToast('Save failed - file too large for browser storage?', 'error');
     return;
   }
-  closeOrderModal();
+  closeOrderModal(true);
   renderAll();
 }
 
@@ -5637,7 +5691,7 @@ async function deleteCurrentOrder() {
       if (error) dbDeleteFailed = true;
     } catch(e) { dbDeleteFailed = true; }
   }
-  saveData(); closeOrderModal(); renderAll();
+  saveData(); closeOrderModal(true); renderAll();
   if (!recorded) {
     showToast('Deleted on screen, but the database WRITE was blocked — it may reappear on refresh until delete permissions are set (see the fix).', 'error');
   } else if (dbDeleteFailed) {
@@ -5673,6 +5727,8 @@ async function recordDeletedOrder(id){
 }
 
 document.getElementById('orderModal').addEventListener('click', e => { if (e.target.id === 'orderModal') closeOrderModal(); });
+document.getElementById('orderModal').addEventListener('input', () => { if (editingOrderId !== null) __orderEditDirty = true; });
+document.getElementById('orderModal').addEventListener('change', () => { if (editingOrderId !== null) __orderEditDirty = true; });
 document.getElementById('formModal').addEventListener('click', e => { if (e.target.id === 'formModal') closeMissingInfoForm(); });
 
 // ============================================================
