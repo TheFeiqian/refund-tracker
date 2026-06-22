@@ -798,6 +798,18 @@ async function hostedFetchAll() {
           if (signed) o[f + '_file'] = signed.signedUrl;
         } catch (e) {}
       }
+      // resolve each file in the multi-file array (public-form files arrive as durable .path entries)
+      const arrKey = f + 's';
+      if (Array.isArray(o[arrKey])) {
+        for (const entry of o[arrKey]) {
+          if (entry && entry.path && !entry.file) {
+            try {
+              const { data: signed } = await sb.storage.from('labels').createSignedUrl(entry.path, 3600);
+              if (signed) entry.file = signed.signedUrl;
+            } catch (e) {}
+          }
+        }
+      }
     }
   }
   window.__HOSTED.orders = list;
@@ -886,7 +898,11 @@ function hostedSave() {
       for (const o of dirty) {
         await __persistFiles(o);
         const dbCopy = JSON.parse(JSON.stringify(o));
-        FILE_FIELDS.forEach(f => { delete dbCopy[f + '_file']; }); // keep only the durable _path
+        FILE_FIELDS.forEach(f => {
+          delete dbCopy[f + '_file']; // keep only the durable _path
+          const arrKey = f + 's';
+          if (Array.isArray(dbCopy[arrKey])) dbCopy[arrKey].forEach(e => { if (e && e.path) delete e.file; }); // keep durable .path, drop ephemeral signed-url/base64
+        });
         const { error } = await sb.from('orders').upsert({ order_id: o.order_id, data: dbCopy });
         if (error) throw error;
         __orderHashes[o.order_id] = __hash(o);
@@ -901,6 +917,28 @@ function hostedSave() {
 
 async function __persistFiles(o) {
   for (const f of FILE_FIELDS) {
+    // 1) multi-file array: upload any base64 entries (from the editor) to unique durable paths.
+    const arrKey = f + 's';
+    if (Array.isArray(o[arrKey])) {
+      for (let n = 0; n < o[arrKey].length; n++) {
+        const entry = o[arrKey][n];
+        const ev = entry && entry.file;
+        if (typeof ev === 'string' && ev.startsWith('data:')) {
+          const [meta, b64] = ev.split(',');
+          const type = (meta.match(/data:([^;]+)/) || [])[1] || 'application/octet-stream';
+          const ext = type.includes('pdf') ? 'pdf' : (type.split('/')[1] || 'bin');
+          const path = o.order_id + '/' + f + (n === 0 ? '' : ('_' + (n + 1))) + '.' + ext;
+          const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+          const up = await sb.storage.from('labels').upload(path, bytes, { contentType: type, upsert: true });
+          if (!up.error) {
+            entry.path = path;
+            const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, 3600);
+            if (signed) entry.file = signed.signedUrl;
+          }
+        }
+      }
+    }
+    // 2) primary single field (drives completion + AI; also the back-compat single-file path).
     const v = o[f + '_file'];
     if (typeof v === 'string' && v.startsWith('data:')) {
       const [meta, b64] = v.split(',');
@@ -1484,6 +1522,8 @@ const FIELD_DEFS = {
   postage_date: { label: 'Postage date', required: true, type: 'text', help: 'When the parcel was actually dropped off (auto-extracted from receipt)' },
   posted_from: { label: 'Posted from (drop-off location)', required: false, type: 'text', help: 'Post office / parcelshop where you dropped it off (auto-extracted from receipt)' },
   investigation_deadline: { label: 'Investigation deadline', required: true, type: 'text', help: 'When the retailer said they’d respond' },
+  contact_retailer_date: { label: 'Date to contact retailer', required: false, type: 'text', help: 'Auto: 5 working days after the proof-of-postage postage date' },
+  retailer_contacted_date: { label: 'Date you contacted the retailer', required: false, type: 'text', help: 'DD/MM/YYYY — when you first contacted them (drives the assumed deadline)' },
   refund_narrative: { label: 'Refund narrative', required: true, type: 'textarea', help: 'Full story of what happened - for chargeback evidence', full: true },
   chargeback_bank: { label: 'Chargeback bank', required: true, type: 'text', help: 'Which bank is processing it' },
   chargeback_amount: { label: 'Chargeback amount', required: true, type: 'text', help: 'May differ from order value' },
@@ -1541,7 +1581,7 @@ const FIELD_ACCESS = {
   // admin
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
-  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', refund_confirmation_pdf:'email_holder', rts_label_photo:'email_holder', box_photo:'email_holder', issue_notes:'email_holder', refund_narrative:'admin',
+  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', retailer_contacted_date:'email_holder', refund_confirmation_pdf:'email_holder', rts_label_photo:'email_holder', box_photo:'email_holder', issue_notes:'email_holder', refund_narrative:'admin',
   refund_refused_date:'admin', invoice:'email_holder', delivery_name:'delivery',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
@@ -1838,7 +1878,17 @@ async function syncSubmissions(){
     // text answers
     if(sub.answers){ Object.keys(sub.answers).forEach(k=>{ if(sub.answers[k]!=='' && sub.answers[k]!=null){ o[k] = sub.answers[k]; touched.push(k); } }); }
     // files → set the durable _path + metadata so the loader shows them
-    if(sub.files){ Object.keys(sub.files).forEach(k=>{ const f=sub.files[k]; if(f && f.path){ o[k+'_path']=f.path; o[k+'_filename']=f.filename||''; o[k+'_filetype']=f.filetype||''; if(!o[k]) o[k]=f.filename||k; touched.push(k); } }); }
+    if(sub.files){ Object.keys(sub.files).forEach(k=>{
+      const fv=sub.files[k];
+      const fl=Array.isArray(fv)?fv:(fv?[fv]:[]);
+      if(!fl.length) return;
+      const arrKey=k+'s';
+      if(!Array.isArray(o[arrKey])) o[arrKey]=[];
+      fl.forEach(f=>{ if(f && f.path && !o[arrKey].some(e=>e && e.path===f.path)){ o[arrKey].push({ path:f.path, filename:f.filename||'', filetype:f.filetype||'' }); } });
+      const prim=o[arrKey][0];
+      if(prim){ o[k+'_path']=prim.path; o[k+'_filename']=prim.filename||''; o[k+'_filetype']=prim.filetype||''; if(!o[k]) o[k]=prim.filename||k; }
+      touched.push(k);
+    }); }
     // derive chargeback_bank from card_used (never asked directly)
     if(o.card_used) deriveChargebackBank(o);
     // advance the order: flip the trigger each provided field maps to (same as in-app completion)
@@ -2281,6 +2331,7 @@ function evidenceTriggerFor(fieldKey, methodVal){
     case 'proof_of_postage': case 'collection_handover': return 'lit_rts_sent';
     case 'refund_refused_date': return 'refund_unsuccessful';
     case 'refund_received_date': return 'refunded';
+    case 'refund_confirmation_pdf': return 'refunded';
     default: return null;
   }
 }
@@ -2289,6 +2340,8 @@ function evidenceTriggerFor(fieldKey, methodVal){
 // files, and entered dates. Run on load (corrects existing orders) and after any data entry.
 function applyEvidenceAdvances(order){
   if(!order) return;
+  // Derived: date to contact retailer = 5 working days after the proof-of-postage postage date.
+  if(order.postage_date){ const _cd = contactRetailerDateFrom(order.postage_date); if(_cd) order.contact_retailer_date = _cd; }
   order.triggers = order.triggers || {};
   const t = order.triggers;
   const present = (f)=> (typeof fieldFilled==='function' ? fieldFilled(order, f) : !!order[f]) || !!order[f+'_path'] || !!order[f+'_file'];
@@ -2925,6 +2978,44 @@ function addWorkingDays(fromDate, n){
   const pad = x => String(x).padStart(2,'0');
   return pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear();
 }
+// Date to contact the retailer = 5 working days after the proof-of-postage postage date.
+// (This is the postage date parsed from the proof-of-postage receipt, not the label/collection date.)
+function contactRetailerDateFrom(postageStr){
+  const d = parseDateLoose(postageStr);
+  if(!d || isNaN(d.getTime())) return '';
+  return addWorkingDays(d, 5);
+}
+// Editor: live-update the read-only "date to contact retailer" when the postage date is edited.
+function updateContactRetailerDate(){
+  const p = document.getElementById('f_postage_date');
+  const o = document.getElementById('f_contact_retailer_date');
+  if(p && o) o.value = contactRetailerDateFrom(p.value.trim());
+}
+// Editor: render one extra outbound-tracking input per ADDITIONAL return label PDF (row 0 is the
+// primary f_outbound_tracking field). Total rows follow the number of return label PDFs uploaded.
+function obRenderExtraTrackings(order){
+  const box = document.getElementById('f_outbound_tracking_extra'); if(!box || !order) return;
+  const nLabels = Array.isArray(order.return_label_pdfs) ? order.return_label_pdfs.length : 0;
+  const arr = Array.isArray(order.outbound_trackings) ? order.outbound_trackings : [];
+  const n = Math.max(nLabels, arr.length);
+  if(n < 2){ box.innerHTML = ''; return; }
+  let h = '<div style="font-size:11px;color:var(--ink-faded);margin:5px 0 3px">Additional return labels — one outbound tracking each:</div>';
+  for(let i=1;i<n;i++){
+    const v = (arr[i] && arr[i].tracking) || '';
+    h += '<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">'
+      + '<span style="font-size:11px;color:var(--ink-faded);min-width:58px">Label '+(i+1)+'</span>'
+      + '<input type="text" placeholder="tracking number (auto from receipt)" value="'+escAttr(v)+'" oninput="obSetExtraTracking('+i+', this.value)" style="flex:1">'
+      + '</div>';
+  }
+  box.innerHTML = h;
+}
+function obSetExtraTracking(i, v){
+  const order = (typeof editingOrderId!=='undefined' && editingOrderId) ? DATA.orders.find(o=>o.order_id===editingOrderId) : null; if(!order) return;
+  if(!Array.isArray(order.outbound_trackings)) order.outbound_trackings = [];
+  const prim = document.getElementById('f_outbound_tracking');
+  order.outbound_trackings[0] = { tracking: (prim ? prim.value.trim() : (order.outbound_tracking||'')) };
+  order.outbound_trackings[i] = { tracking: (v||'').trim() };
+}
 function tplVal(order, key) {
   // Method-specific narrative to send to the retailer (DNA / PEB / EB).
   if (key === 'retailer_narrative') {
@@ -3182,7 +3273,10 @@ async function __handleOneFormFileUpload(file, fieldKey) {
       // A receipt may only set tracking if a label hasn't already provided one.
       if (isLabel) {
         if (updates.outbound_tracking) {
-          order.outbound_tracking = updates.outbound_tracking;       // label always wins
+          // One outbound tracking per return label: collect them in outbound_trackings[]; row 0 is primary.
+          if (!Array.isArray(order.outbound_trackings)) order.outbound_trackings = order.outbound_tracking ? [{ tracking: order.outbound_tracking }] : [];
+          if (!order.outbound_trackings.some(r => r && r.tracking === updates.outbound_tracking)) order.outbound_trackings.push({ tracking: updates.outbound_tracking });
+          order.outbound_tracking = order.outbound_trackings[0].tracking;   // primary = first label
           order.outbound_tracking_source = 'label';
         }
       } else {
@@ -3253,6 +3347,8 @@ async function onOrderFieldFileUpload(input, fieldKey) {
     // Update preview area — list every attached file (with download / remove)
     const previewEl = document.getElementById('filepreview_' + fieldKey);
     if (previewEl && order) previewEl.innerHTML = editorFileListHtml(order, fieldKey);
+    // Adding/removing return labels changes how many outbound-tracking rows to show.
+    if (fieldKey === 'return_label_pdf' && order) obRenderExtraTrackings(order);
     // Mirror the filename into the text input if empty
     const textEl = document.getElementById('f_' + fieldKey);
     if (textEl && !textEl.value) textEl.value = file.name;
@@ -4061,9 +4157,9 @@ const TASK_FORM_FIELDS = {
   get_collection_date:    ['collection_date'],
   rts_photograph_label:   ['rts_label_photo'],
   hand_over_collection:   ['collection_handover'],
-  contact_retailer_investigation: ['investigation_deadline', 'refund_received_date', 'refund_confirmation_pdf', 'box_photo', 'issue_notes'],
+  contact_retailer_investigation: ['retailer_contacted_date', 'investigation_deadline', 'box_photo'],
   bbm_confirm_refund:     ['refund_received_date', 'refund_confirmation_pdf'],
-  chase_investigation:    ['investigation_deadline'],
+  chase_investigation:    ['investigation_deadline', 'issue_notes', 'refund_received_date', 'refund_confirmation_pdf'],
   submit_chargeback:      ['chargeback_bank', 'chargeback_amount', 'chargeback_reference', 'chargeback_type', 'invoice'],
 };
 
@@ -4233,8 +4329,15 @@ function openTaskForm(taskCode, orderId) {
   }
   h += '<div class="form-grid" style="margin-top:14px">';
   fields.forEach(f => {
+    // Refund confirmation: keep the refund fields behind a tick box (chase / bbm-confirm forms).
+    if (f === 'refund_received_date') {
+      h += '<label style="display:flex;align-items:center;gap:8px;margin:12px 0 6px;font-size:13px;cursor:pointer;font-weight:600">'
+         + '<input type="checkbox" id="tf_refund_confirmed" onchange="var b=document.getElementById(\'tf_refund_block\'); if(b) b.style.display=this.checked?\'block\':\'none\';" style="width:auto;margin:0">'
+         + '<span>Refund confirmed by the retailer — upload the confirmation email to close the order</span></label>'
+         + '<div id="tf_refund_block" style="display:none">';
+    }
     const def = FIELD_DEFS[f] || { label: f, type: 'text' };
-    const isFile = ['order_confirmation','delivery_photo','damage_photo','return_label_pdf','proof_of_postage','invoice','collection_handover'].includes(f);
+    const isFile = ['order_confirmation','delivery_photo','damage_photo','return_label_pdf','proof_of_postage','invoice','collection_handover','refund_confirmation_pdf'].includes(f);
     h += '<div class="form-field full"><label>' + escapeHtml(def.label) + (def.required ? ' <span style="color:var(--red)">*</span>' : '') + '</label>';
     if (isFile) {
       h += '<div style="display:flex;gap:8px;align-items:center">'
@@ -4251,9 +4354,10 @@ function openTaskForm(taskCode, orderId) {
     if (f === 'investigation_deadline') {
       h += '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;cursor:pointer">'
          + '<input type="checkbox" id="tf_no_deadline" onchange="var d=document.getElementById(\'tf_investigation_deadline\'); if(d){ d.disabled=this.checked; if(this.checked) d.value=\'\'; }" style="width:auto;margin:0">'
-         + '<span>No investigation deadline given — assume 5 working days from today</span></label>';
+         + '<span>No investigation deadline given — assume 5 working days from the date you contacted them</span></label>';
     }
     h += '</div>';
+    if (f === 'refund_confirmation_pdf') h += '</div>'; // close tf_refund_block
   });
   h += '</div>';
   document.getElementById('taskFormBody').innerHTML = h;
@@ -4309,7 +4413,11 @@ function submitTaskForm() {
   const filled = [];
   fields.forEach(f => {
     const el = document.getElementById('tf_' + f);
-    if (el && el.value) { order[f] = el.value; filled.push(f); }
+    if (el && el.value) {
+      if (f === 'issue_notes') { order.issue_notes = (order.issue_notes ? order.issue_notes + '\n' : '') + el.value; } // running internal log
+      else { order[f] = el.value; }
+      filled.push(f);
+    }
     const fb = fileBuf[f];
     if (fb && (Array.isArray(fb) ? fb.length : true)) {
       const list = Array.isArray(fb) ? fb : [fb];
@@ -4323,10 +4431,14 @@ function submitTaskForm() {
       if (f === 'delivery_photo' && !order.delivery_photo_shows_person) order.delivery_photo_shows_person = 'no';
     }
   });
-  // "No investigation deadline given" → assume 5 working days from today so the chase task regenerates.
+  // "No investigation deadline given" → assume 5 working days from the date the retailer was contacted
+  // (entered by the person on the form), falling back to today if that date is blank.
   const noDeadlineEl = document.getElementById('tf_no_deadline');
   if (noDeadlineEl && noDeadlineEl.checked) {
-    order.investigation_deadline = addWorkingDays(new Date(), 5);
+    const cdEl = document.getElementById('tf_retailer_contacted_date');
+    const contactStr = (cdEl && cdEl.value.trim()) || order.retailer_contacted_date || '';
+    const base = parseDateLoose(contactStr) || new Date();
+    order.investigation_deadline = addWorkingDays(base, 5);
     order.investigation_deadline_assumed = true;
     if (filled.indexOf('investigation_deadline') < 0) filled.push('investigation_deadline');
   }
@@ -5281,8 +5393,10 @@ function openOrderModal(orderId) {
       </div>
       <div class="form-field"><label>Return label date</label><input type="text" id="f_return_label_date" value="${escAttr(order.return_label_date)}"></div>
       <div class="form-field"><label>Outbound tracking <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_outbound_tracking" value="${escAttr(order.outbound_tracking)}" oninput="updateTrackingLinks()"><div id="f_outbound_tracking_link" style="font-size:11px;margin-top:3px">${(function(){const u=trackingLink(order.outbound_courier, order.outbound_tracking); return u?'<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(order.outbound_courier))+'</a>':'';})()}</div></div>
+      <div class="form-field full" id="f_outbound_tracking_extra"></div>
       <div class="form-field"><label>Outbound courier <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_outbound_courier" value="${escAttr(order.outbound_courier)}"></div>
-      <div class="form-field"><label>Postage date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_postage_date" value="${escAttr(order.postage_date)}" placeholder="DD/MM/YYYY"></div>
+      <div class="form-field"><label>Postage date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_postage_date" value="${escAttr(order.postage_date)}" placeholder="DD/MM/YYYY" oninput="updateContactRetailerDate()"></div>
+      <div class="form-field"><label>Date to contact retailer <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto · postage + 5 working days</span></label><input type="text" id="f_contact_retailer_date" value="${escAttr(order.contact_retailer_date||'')}" readonly title="Auto-calculated from the proof-of-postage postage date" style="background:var(--line-soft);color:var(--ink-soft)"></div>
       <div class="form-field"><label>Posted from <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_posted_from" value="${escAttr(order.posted_from)}" placeholder="Post Office / parcelshop name"></div>
       <div class="form-field"><label>Collection date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">BBM collection path</span></label><input type="text" id="f_collection_date" value="${escAttr(order.collection_date)}" placeholder="DD/MM/YYYY — if collected, not posted"></div>
       <div class="form-field"><label>Handed over for collection <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">BBM collection path</span></label><input type="text" id="f_collection_handover" value="${escAttr(order.collection_handover)}" placeholder="Driver/receipt confirmation" onchange="onEvidenceProvided('collection_handover')"></div>
@@ -5347,6 +5461,7 @@ function openOrderModal(orderId) {
   document.getElementById('orderModal').classList.add('show');
   // Show every attached file (not just the primary) for each file field.
   try{ FILE_FIELDS.forEach(fk=>{ const el=document.getElementById('filepreview_'+fk); if(el){ const o=DATA.orders.find(x=>x.order_id===editingOrderId); if(o) el.innerHTML=editorFileListHtml(o, fk); } }); }catch(e){}
+  try{ const o=DATA.orders.find(x=>x.order_id===editingOrderId); if(o) obRenderExtraTrackings(o); }catch(e){}
   // Highlight the fields that are missing/needed for this order's current stage, so
   // opening an order from a blocked task shows exactly what to fill in.
   setTimeout(()=>{ try{ highlightOrderFields((missingFieldsFor(order)||[]).map(m=>m.field)); }catch(e){} }, 50);
@@ -5640,6 +5755,14 @@ function saveOrderEdit() {
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
   else { order = DATA.orders.find(o => o.order_id === editingOrderId); }
   fields.forEach(f => { const el = document.getElementById('f_' + f); if (el) order[f] = el.value.trim(); });
+  // Outbound tracking rows: row 0 mirrors the primary field; keep any extra rows that have a value.
+  if (order.outbound_tracking || (Array.isArray(order.outbound_trackings) && order.outbound_trackings.length)) {
+    if (!Array.isArray(order.outbound_trackings)) order.outbound_trackings = [];
+    order.outbound_trackings[0] = { tracking: order.outbound_tracking || '' };
+    order.outbound_trackings = order.outbound_trackings.filter((r, idx) => idx === 0 || (r && r.tracking));
+  }
+  // Derived: date to contact retailer = 5 working days after the proof-of-postage postage date.
+  if (order.postage_date) { const _cd = contactRetailerDateFrom(order.postage_date); if (_cd) order.contact_retailer_date = _cd; }
   // Specified (edited) delivery address toggle.
   const useSpecEl = document.getElementById('f_use_specified_address');
   if (useSpecEl) order.use_specified_address = useSpecEl.checked;
