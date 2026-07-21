@@ -622,6 +622,43 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 .ip-card .progress > i{ display:block; height:100%; border-radius:3px; }
 .ip-card.fresh .progress > i{ background:#4263eb; } .ip-card.aging .progress > i{ background:#f59f00; } .ip-card.overdue .progress > i{ background:#e03131; }
 .ip-empty{ grid-column:1/-1; text-align:center; padding:40px; color:var(--ink-faded); border:1px dashed var(--line); border-radius:12px; }
+/* Delegation tab */
+.delg-filter-bar{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
+.delg-filter-label{ font-size:11px; color:var(--ink-faded); font-family:var(--mono); text-transform:uppercase; letter-spacing:0.5px; }
+.delg-chip{ font-family:var(--sans); font-size:13px; padding:6px 13px; border:1px solid var(--line); background:var(--bg-card); color:var(--ink-soft); border-radius:16px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+.delg-chip:hover{ border-color:var(--accent); }
+.delg-chip.on{ background:var(--accent); color:#fff; border-color:var(--accent); }
+.delg-chip-n{ font-family:var(--mono); font-size:10px; background:rgba(0,0,0,0.14); padding:0 6px; border-radius:8px; }
+.delg-board{ display:flex; flex-direction:column; gap:20px; }
+.delg-group-h{ font-family:var(--serif); font-weight:600; font-size:15px; padding:8px 0; border-bottom:2px solid var(--accent); margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+.delg-group-h.delg-group-unassigned{ border-color:var(--amber); color:#8a5a00; }
+.delg-group-h.delg-group-other{ border-color:var(--ink-faded); }
+.delg-group-n{ font-family:var(--mono); font-size:11px; color:var(--ink-faded); font-weight:400; }
+.delg-group-body{ display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:12px; }
+.delg-card{ background:var(--bg-card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; box-shadow:var(--shadow); display:flex; flex-direction:column; gap:10px; }
+.delg-card-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+.delg-card-title{ display:flex; flex-direction:column; gap:2px; min-width:0; }
+.delg-task-name{ font-weight:600; font-size:13.5px; }
+.delg-order{ font-family:var(--mono); font-size:11px; color:var(--accent-deep); cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.delg-order:hover{ text-decoration:underline; }
+.delg-overdue{ background:var(--red-soft); color:var(--red); font-family:var(--mono); font-size:10px; padding:2px 8px; border-radius:8px; white-space:nowrap; }
+.delg-card-assign{ display:flex; align-items:center; gap:8px; }
+.delg-lbl{ font-size:10px; color:var(--ink-faded); font-family:var(--mono); text-transform:uppercase; letter-spacing:0.5px; }
+.delg-person-sel{ flex:1; font-size:13px; padding:5px 8px; }
+.delg-notes{ display:flex; flex-direction:column; gap:6px; max-height:180px; overflow-y:auto; }
+.delg-note{ background:var(--bg-soft,#faf9f7); border:1px solid var(--line-soft); border-radius:6px; padding:6px 22px 6px 8px; font-size:12px; display:flex; flex-direction:column; gap:2px; position:relative; }
+.delg-note-meta{ font-family:var(--mono); font-size:10px; color:var(--ink-faded); }
+.delg-note-txt{ white-space:pre-wrap; word-break:break-word; }
+.delg-note-x{ position:absolute; top:3px; right:5px; border:none; background:transparent; color:var(--ink-faded); cursor:pointer; font-size:15px; line-height:1; padding:0; }
+.delg-note-x:hover{ color:var(--red); }
+.delg-note-empty, .delg-empty{ font-size:12px; color:var(--ink-faded); font-style:italic; }
+.delg-empty{ grid-column:1/-1; padding:14px; }
+.delg-note-add{ display:flex; gap:6px; }
+.delg-note-add input{ flex:1; font-size:12.5px; padding:5px 8px; }
+.delg-cat-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(300px,1fr)); gap:8px 16px; margin-top:10px; }
+.delg-cat-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; }
+.delg-cat-row select{ font-size:12.5px; padding:4px 6px; min-width:130px; }
+.delg-card-admin{ border:1px solid var(--line); border-radius:8px; padding:14px 16px; background:var(--bg-card); box-shadow:var(--shadow); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="app-config.js"></script>
@@ -860,6 +897,10 @@ async function hostedFetchAll() {
     const { data: ep } = await sb.from('app_state').select('value').eq('key', 'email_person').maybeSingle();
     window.__HOSTED.emailPerson = (ep && ep.value) ? ep.value : {};
   } catch (e) { window.__HOSTED.emailPerson = {}; }
+  // Delegation: task-type → default owner (category), per-task assignee overrides, per-task notes.
+  try { const { data: co } = await sb.from('app_state').select('value').eq('key','task_category_owner').maybeSingle(); window.__HOSTED.taskCategoryOwner = (co && co.value) ? co.value : {}; } catch (e) { window.__HOSTED.taskCategoryOwner = {}; }
+  try { const { data: ta } = await sb.from('app_state').select('value').eq('key','task_assignee').maybeSingle(); window.__HOSTED.taskAssignee = (ta && ta.value) ? ta.value : {}; } catch (e) { window.__HOSTED.taskAssignee = {}; }
+  try { const { data: tn } = await sb.from('app_state').select('value').eq('key','task_notes').maybeSingle(); window.__HOSTED.taskNotes = (tn && tn.value) ? tn.value : {}; } catch (e) { window.__HOSTED.taskNotes = {}; }
   // Deleted-order IDs — so deletions stick across reloads and aren't re-seeded.
   try {
     const { data: del } = await sb.from('app_state').select('value').eq('key', 'deleted_orders').maybeSingle();
@@ -1028,7 +1069,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
     <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
     <button class="tab-btn" data-tab="priority">Priority Queue <span class="count" id="priorityCount">0</span></button>
     <button class="tab-btn" data-tab="missing">Missing Info <span class="count" id="missingCount">0</span></button>
-    <button class="tab-btn" data-tab="inprogress">In Progress <span class="count" id="inProgressCount">0</span></button>
+    <button class="tab-btn" data-tab="inprogress">Delegation <span class="count" id="inProgressCount">0</span></button>
     <button class="tab-btn" data-tab="orders">Orders Database <span class="count" id="ordersCount">0</span></button>
     <button class="tab-btn" data-tab="method">Method Choice</button>
     <button class="tab-btn" data-tab="delivery">Delivery <span class="count" id="deliveryCount">0</span></button>
@@ -1188,25 +1229,12 @@ document.addEventListener('DOMContentLoaded', bootHosted);
 
   <section class="tab-section" data-tab="inprogress">
     <div class="section-intro">
-      <h2>In Progress</h2>
-      <p>Tasks delegated via a sent form — who it went to, what completes it, and how long it has been outstanding. When the person uploads via their link the task auto-completes, the order advances, and it clears from here.</p>
+      <h2>Delegation</h2>
+      <p>Every active task, owned by <strong>Simon</strong>, <strong>Silmi</strong> and <strong>Phoebus</strong>. Each task type has a default owner (set by an admin); any individual task can be moved to a different person, and anyone can leave notes flagging problems. Pick one or more people to see their workload.</p>
     </div>
-    <div class="ip-stats" id="inProgressStats"></div>
-    <div class="ip-controls">
-      <input type="text" id="ipSearch" placeholder="Search order, person, task…" oninput="renderInProgress()">
-      <select id="ipFilter" onchange="renderInProgress()">
-        <option value="open">Outstanding only</option>
-        <option value="all">All (incl. completed)</option>
-        <option value="overdue">Overdue (3 days+)</option>
-      </select>
-      <select id="ipSort" onchange="renderInProgress()">
-        <option value="longest">Longest outstanding</option>
-        <option value="newest">Most recently sent</option>
-        <option value="person">By person</option>
-      </select>
-    </div>
-    <div class="ip-grid" id="inProgressGrid"></div>
-    <table style="display:none"><tbody id="inProgressBody"></tbody></table>
+    <div id="delgAdminPanel" class="admin-only" style="margin-bottom:16px"></div>
+    <div id="delgFilterBar" class="delg-filter-bar"></div>
+    <div id="delgBoard" class="delg-board"></div>
   </section>
 
   <section class="tab-section" data-tab="orders">
@@ -2271,6 +2299,9 @@ function loadData() {
   DATA._taskStatus = (window.__HOSTED && window.__HOSTED.taskStatus) ? window.__HOSTED.taskStatus : {};
   DATA._delegatees = (window.__HOSTED && window.__HOSTED.delegatees) ? window.__HOSTED.delegatees : [];
   DATA._emailPerson = (window.__HOSTED && window.__HOSTED.emailPerson) ? window.__HOSTED.emailPerson : {};
+  DATA._taskCategoryOwner = (window.__HOSTED && window.__HOSTED.taskCategoryOwner) ? window.__HOSTED.taskCategoryOwner : {};
+  DATA._taskAssignee = (window.__HOSTED && window.__HOSTED.taskAssignee) ? window.__HOSTED.taskAssignee : {};
+  DATA._taskNotes = (window.__HOSTED && window.__HOSTED.taskNotes) ? window.__HOSTED.taskNotes : {};
   normalizeDeliveryDates();
   (DATA.orders || []).forEach(o => stampRequiredFields(o));
   (DATA.orders || []).forEach(o => {
@@ -2525,14 +2556,20 @@ async function hostedSaveTrackers() {
     const tsStr = JSON.stringify(DATA._taskStatus || {});
     const dgStr = JSON.stringify(DATA._delegatees || []);
     const epStr = JSON.stringify(DATA._emailPerson || {});
-    const h = ftStr + '|' + tsStr + '|' + dgStr + '|' + epStr;
+    const coStr = JSON.stringify(DATA._taskCategoryOwner || {});
+    const taStr = JSON.stringify(DATA._taskAssignee || {});
+    const tnStr = JSON.stringify(DATA._taskNotes || {});
+    const h = ftStr + '|' + tsStr + '|' + dgStr + '|' + epStr + '|' + coStr + '|' + taStr + '|' + tnStr;
     if (h === __trackersHash) return;
     __trackersHash = h;
-    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; window.__HOSTED.delegatees = DATA._delegatees || []; window.__HOSTED.emailPerson = DATA._emailPerson || {}; }
+    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; window.__HOSTED.delegatees = DATA._delegatees || []; window.__HOSTED.emailPerson = DATA._emailPerson || {}; window.__HOSTED.taskCategoryOwner = DATA._taskCategoryOwner || {}; window.__HOSTED.taskAssignee = DATA._taskAssignee || {}; window.__HOSTED.taskNotes = DATA._taskNotes || {}; }
     await sb.from('app_state').upsert({ key: 'formTrack', value: DATA._formTrack || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'taskStatus', value: DATA._taskStatus || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'delegatees', value: DATA._delegatees || [] }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'email_person', value: DATA._emailPerson || {} }, { onConflict: 'key' });
+    await sb.from('app_state').upsert({ key: 'task_category_owner', value: DATA._taskCategoryOwner || {} }, { onConflict: 'key' });
+    await sb.from('app_state').upsert({ key: 'task_assignee', value: DATA._taskAssignee || {} }, { onConflict: 'key' });
+    await sb.from('app_state').upsert({ key: 'task_notes', value: DATA._taskNotes || {} }, { onConflict: 'key' });
   } catch (e) {}
 }
 function saveData() { if(typeof reconcileInfoRequests==='function') reconcileInfoRequests(); hostedSave(); hostedSaveTrackers(); }
@@ -3809,6 +3846,135 @@ function ipTaskName(r){
 }
 function ipUrgency(ms){ const d=ms/86400000; if(d>=3) return 'overdue'; if(d>=1) return 'aging'; return 'fresh'; }
 function initials(name){ const p=(name||'').trim().split(/\s+/); return ((p[0]||'?')[0]+(p[1]?p[1][0]:'')).toUpperCase(); }
+// ============================================================
+// DELEGATION TAB — every active task, owned by Simon / Silmi / Phoebus.
+// A task TYPE is a "category" (admins set its default owner). Any individual
+// task can be reassigned by anyone, and carries an author-tagged notes thread.
+// ============================================================
+const DELEGATION_PEOPLE = ['Simon','Silmi','Phoebus'];
+function taskCatOwnerStore(){ if(!DATA._taskCategoryOwner) DATA._taskCategoryOwner={}; return DATA._taskCategoryOwner; }
+function taskAssigneeStore(){ if(!DATA._taskAssignee) DATA._taskAssignee={}; return DATA._taskAssignee; }
+function taskNotesStore(){ if(!DATA._taskNotes) DATA._taskNotes={}; return DATA._taskNotes; }
+function delgKey(orderId, code){ return orderId + '::' + code; }
+function delgCategoryOwner(code){ return taskCatOwnerStore()[code] || ''; }
+function delgEffectiveAssignee(orderId, code){ return taskAssigneeStore()[delgKey(orderId,code)] || delgCategoryOwner(code) || ''; }
+function delgCurrentUserName(){ const p=(typeof personByEmail==='function')?personByEmail(window.__currentActor):null; return (p&&p.name) || window.__currentActor || 'Unknown'; }
+function delgIsAdmin(){ return (typeof VIEW_ROLE!=='undefined') ? VIEW_ROLE==='admin' : true; }
+function delgFmtTime(ms){ if(!ms) return ''; try{ const d=new Date(ms); const pad=x=>String(x).padStart(2,'0'); return pad(d.getDate())+'/'+pad(d.getMonth()+1)+' '+pad(d.getHours())+':'+pad(d.getMinutes()); }catch(e){ return ''; } }
+// The full set of task types (categories), excluding the admin-only method choice.
+function delgAllCategories(){ return (typeof TASK_CATALOG!=='undefined'?TASK_CATALOG:[]).filter(t=>t.code!=='choose_method').map(t=>({code:t.code, name:t.name})); }
+// Build a person <select>. categoryMode = only the 3 (+ no default); task mode adds an "others" group.
+function delgPersonSelect(current, onchangeJs, categoryMode){
+  let opts = '<option value="">'+(categoryMode?'(no default owner)':'(unassigned)')+'</option>';
+  DELEGATION_PEOPLE.forEach(p=>{ opts += '<option'+(current===p?' selected':'')+'>'+escapeHtml(p)+'</option>'; });
+  if(!categoryMode){
+    let others = (typeof allPeopleRecords==='function'?allPeopleRecords():(typeof PEOPLE!=='undefined'?PEOPLE:[])).map(p=>p.name).filter(n=>DELEGATION_PEOPLE.indexOf(n)<0);
+    if(current && DELEGATION_PEOPLE.indexOf(current)<0 && others.indexOf(current)<0) others.push(current);
+    if(others.length){ opts += '<optgroup label="Delegate to others">'; others.forEach(n=>{ opts += '<option'+(current===n?' selected':'')+'>'+escapeHtml(n)+'</option>'; }); opts += '</optgroup>'; }
+  }
+  return '<select class="delg-person-sel" onchange="'+onchangeJs+'">'+opts+'</select>';
+}
+// --- mutations (all persist via saveData) ---
+function delgSetCatOwner(code, person){ const s=taskCatOwnerStore(); if(person) s[code]=person; else delete s[code]; saveData(); renderDelegation(); showToast('Category owner updated','success'); }
+function delgSetAssignee(i, person){
+  const m=(window.__delgMap||{})[i]; if(!m) return;
+  const s=taskAssigneeStore(); const k=delgKey(m.orderId,m.code);
+  if(person) s[k]=person; else delete s[k];
+  const o=DATA.orders.find(x=>x.order_id===m.orderId);
+  if(o && typeof logAudit==='function') logAudit(o,'task_delegated','"'+m.name+'" assigned to '+(person||'unassigned'));
+  saveData(); renderDelegation();
+}
+function delgAddNote(i){
+  const m=(window.__delgMap||{})[i]; if(!m) return;
+  const inp=document.getElementById('delgnote_'+i); const txt=inp?inp.value.trim():'';
+  if(!txt) return;
+  const s=taskNotesStore(); const k=delgKey(m.orderId,m.code);
+  if(!Array.isArray(s[k])) s[k]=[];
+  s[k].push({author:delgCurrentUserName(), at:Date.now(), text:txt});
+  saveData(); renderDelegation();
+}
+function delgDeleteNote(i, ni){
+  const m=(window.__delgMap||{})[i]; if(!m) return;
+  const s=taskNotesStore(); const k=delgKey(m.orderId,m.code);
+  if(Array.isArray(s[k])){ s[k].splice(ni,1); if(!s[k].length) delete s[k]; saveData(); renderDelegation(); }
+}
+function delgTogglePerson(name){ if(!window.__delgSel) window.__delgSel={}; window.__delgSel[name]=!window.__delgSel[name]; renderDelegation(); }
+
+function renderDelegation(){
+  const board = document.getElementById('delgBoard'); if(!board) return;
+  if(!window.__delgSel){ window.__delgSel = {Simon:true, Silmi:true, Phoebus:true}; }
+  const sel = window.__delgSel;
+  window.__delgMap = {};
+  let idx = 0;
+
+  // gather active tasks, bucket by effective assignee
+  const all = (typeof getAllTasksWithPriority==='function') ? getAllTasksWithPriority() : [];
+  const buckets = { __unassigned: [] };
+  DELEGATION_PEOPLE.forEach(p=>buckets[p]=[]);
+  const others = {};
+  all.forEach(it=>{
+    const code=it.task.type.code, oid=it.order.order_id;
+    const who=delgEffectiveAssignee(oid, code);
+    const entry={ it, who };
+    if(!who) buckets.__unassigned.push(entry);
+    else if(DELEGATION_PEOPLE.indexOf(who)>=0) buckets[who].push(entry);
+    else (others[who]=others[who]||[]).push(entry);
+  });
+
+  const cEl=document.getElementById('inProgressCount'); if(cEl) cEl.textContent = all.length;
+
+  // admin category-owner panel
+  const adminPanel=document.getElementById('delgAdminPanel');
+  if(adminPanel){
+    if(delgIsAdmin()){
+      let ah='<div class="delg-card-admin"><div style="font-weight:600;font-size:14px">Category owners <span style="font-weight:400;color:var(--ink-faded);font-size:12px">— admin only · the default person for every task of this type</span></div><div class="delg-cat-grid">';
+      delgAllCategories().forEach(c=>{ ah += '<div class="delg-cat-row"><span>'+escapeHtml(c.name)+'</span>'+delgPersonSelect(delgCategoryOwner(c.code), "delgSetCatOwner('"+c.code+"', this.value)", true)+'</div>'; });
+      ah += '</div></div>';
+      adminPanel.innerHTML=ah; adminPanel.style.display='';
+    } else { adminPanel.innerHTML=''; adminPanel.style.display='none'; }
+  }
+
+  // filter chips (the 3 people only)
+  const fbar=document.getElementById('delgFilterBar');
+  if(fbar){
+    let fh='<span class="delg-filter-label">View person:</span>';
+    DELEGATION_PEOPLE.forEach(p=>{ fh += '<button type="button" class="delg-chip'+(sel[p]?' on':'')+'" onclick="delgTogglePerson(\''+p+'\')">'+escapeHtml(p)+' <span class="delg-chip-n">'+buckets[p].length+'</span></button>'; });
+    fbar.innerHTML=fh;
+  }
+
+  // card renderer (assigns a stable index into __delgMap)
+  const mkCard = (entry)=>{
+    const i=idx++; const it=entry.it, o=it.order, code=it.task.type.code, name=it.task.type.name;
+    window.__delgMap[i]={ orderId:o.order_id, code, name };
+    const overdue = it.overdue_days>0;
+    const notes = taskNotesStore()[delgKey(o.order_id,code)] || [];
+    let notesHtml = notes.map((nt,ni)=>'<div class="delg-note"><span class="delg-note-meta">'+escapeHtml(nt.author||'?')+' · '+delgFmtTime(nt.at)+'</span><span class="delg-note-txt">'+escapeHtml(nt.text||'')+'</span><button type="button" class="delg-note-x" title="Delete note" onclick="delgDeleteNote('+i+','+ni+')">&times;</button></div>').join('');
+    if(!notes.length) notesHtml='<div class="delg-note-empty">No notes yet.</div>';
+    return '<div class="delg-card">'
+      + '<div class="delg-card-top"><div class="delg-card-title"><span class="delg-task-name">'+escapeHtml(name)+'</span>'
+      + '<span class="delg-order" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')" title="Open order">'+escapeHtml(o.store||'')+' · #'+escapeHtml(o.order_id)+'</span></div>'
+      + (overdue?'<span class="delg-overdue">'+Math.round(it.overdue_days)+'d overdue</span>':'')+'</div>'
+      + '<div class="delg-card-assign"><span class="delg-lbl">Assigned</span>'+delgPersonSelect(entry.who, 'delgSetAssignee('+i+', this.value)', false)+'</div>'
+      + '<div class="delg-notes">'+notesHtml+'</div>'
+      + '<div class="delg-note-add"><input type="text" id="delgnote_'+i+'" placeholder="Add a note — flag a problem…" onkeydown="if(event.key===\'Enter\'){delgAddNote('+i+');}"><button type="button" class="tiny" onclick="delgAddNote('+i+')">Add</button></div>'
+    + '</div>';
+  };
+
+  let h='';
+  if(buckets.__unassigned.length){
+    h += '<div class="delg-group"><div class="delg-group-h delg-group-unassigned">Unassigned <span class="delg-group-n">'+buckets.__unassigned.length+'</span></div><div class="delg-group-body">'+buckets.__unassigned.map(mkCard).join('')+'</div></div>';
+  }
+  DELEGATION_PEOPLE.forEach(p=>{
+    if(!sel[p]) return;
+    const list=buckets[p];
+    h += '<div class="delg-group"><div class="delg-group-h">'+escapeHtml(p)+' <span class="delg-group-n">'+list.length+' task'+(list.length===1?'':'s')+'</span></div><div class="delg-group-body">'+(list.length?list.map(mkCard).join(''):'<div class="delg-empty">No tasks assigned.</div>')+'</div></div>';
+  });
+  Object.keys(others).forEach(n=>{
+    h += '<div class="delg-group"><div class="delg-group-h delg-group-other">'+escapeHtml(n)+' <span class="delg-group-n">delegated to others · '+others[n].length+'</span></div><div class="delg-group-body">'+others[n].map(mkCard).join('')+'</div></div>';
+  });
+  board.innerHTML = h || '<div class="delg-empty">No active tasks right now.</div>';
+}
+
 function renderInProgress(){
   const grid = document.getElementById('inProgressGrid'); if(!grid) return;
   // Auto-close any sent task/info-request whose outcome is now recorded, so completed work doesn't
@@ -6531,7 +6697,7 @@ function goToTab(name){ const btn=document.querySelector('.tab-btn[data-tab="'+n
 
 // ---------- ROLE / VIEW (admin vs member) ----------
 let VIEW_ROLE = 'admin';
-const MEMBER_TABS = ['priority', 'orders', 'delivery'];
+const MEMBER_TABS = ['priority', 'orders', 'delivery', 'inprogress'];
 function applyRole(role) {
   VIEW_ROLE = role;
   document.querySelectorAll('#roleSwitch .role-opt').forEach(b => b.classList.toggle('active', b.dataset.role === role));
@@ -7463,7 +7629,7 @@ function renderAll() {
   renderDashboard();
   renderPriorityQueue();
   renderMissingInfo();
-  renderInProgress();
+  renderDelegation();
   renderOrdersDB();
   renderMethodLogic();
   renderDelivery();
