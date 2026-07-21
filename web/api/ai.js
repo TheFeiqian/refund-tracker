@@ -166,6 +166,7 @@ module.exports = async (req, res) => {
           + '"returns_form":"URL of the form used SPECIFICALLY to start or request a return / RMA — the page a customer uses to return an item. This is NOT the general contact form. Empty if none.",'
           + '"returns_portal":"URL of a self-service returns PORTAL if distinct from the returns form, else empty",'
           + '"phone":"official UK customer-service phone from their site, else empty",'
+          + '"opening_hours":"the customer-service / phone-line opening hours from their site, as a short string e.g. \\"Mon–Fri 9am–6pm, Sat 9am–5pm\\", else empty",'
           + '"email":"official customer-service email from their site, else empty",'
           + '"live_chat":true/false,'
           + '"parcel_shop_unwanted":true/false (free parcel-shop/drop-off return label for UNWANTED items),'

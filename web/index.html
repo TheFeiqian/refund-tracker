@@ -629,6 +629,7 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 <script>
 // ============ Hosted persistence adapter (Supabase) ============
 const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','rts_label_photo','box_photo'];
+const SIGNED_URL_TTL = 31536000; // 1 year — file links are re-signed on every load, so this only bounds shared "Copy link" URLs
 // Fields that accept MULTIPLE files (kept in an array `${field}s`, with the first as the primary value).
 const MULTI_FILE_FIELDS = FILE_FIELDS.slice(); // every file field allows multiple uploads
 function multiFileArrayKey(fieldKey){ return fieldKey + 's'; } // return_label_pdf -> return_label_pdfs, proof_of_postage -> proof_of_postages
@@ -788,14 +789,15 @@ async function hostedFetchAll() {
     sb.from('stores').select('*'),
   ]);
   const list = (orders || []).map(r => r.data || {});
-  // resolve storage file refs -> permanent PUBLIC URLs for display (never expire)
+  // resolve storage file refs -> fresh long-lived signed URLs (regenerated every load, valid ~1 year).
+  // Works on the private 'labels' bucket with no dashboard changes; overwrites any stale/expired URL.
   for (const o of list) {
     for (const f of FILE_FIELDS) {
       const p = o[f + '_path'];
       if (p) {
         try {
-          const { data: pub } = sb.storage.from('labels').getPublicUrl(p);
-          if (pub && pub.publicUrl) o[f + '_file'] = pub.publicUrl;
+          const { data: signed } = await sb.storage.from('labels').createSignedUrl(p, SIGNED_URL_TTL);
+          if (signed) o[f + '_file'] = signed.signedUrl;
         } catch (e) {}
       }
       // resolve each file in the multi-file array (public-form files arrive as durable .path entries).
@@ -805,8 +807,8 @@ async function hostedFetchAll() {
         for (const entry of o[arrKey]) {
           if (entry && entry.path) {
             try {
-              const { data: pub } = sb.storage.from('labels').getPublicUrl(entry.path);
-              if (pub && pub.publicUrl) entry.file = pub.publicUrl;
+              const { data: signed } = await sb.storage.from('labels').createSignedUrl(entry.path, SIGNED_URL_TTL);
+              if (signed) entry.file = signed.signedUrl;
             } catch (e) {}
           }
         }
@@ -933,8 +935,8 @@ async function __persistFiles(o) {
           const up = await sb.storage.from('labels').upload(path, bytes, { contentType: type, upsert: true });
           if (!up.error) {
             entry.path = path;
-            const { data: pub } = sb.storage.from('labels').getPublicUrl(path);
-            if (pub && pub.publicUrl) entry.file = pub.publicUrl;
+            const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, SIGNED_URL_TTL);
+            if (signed) entry.file = signed.signedUrl;
           }
         }
       }
@@ -951,8 +953,8 @@ async function __persistFiles(o) {
       if (!up.error) {
         o[f + '_path'] = path;
         await sb.from('files').upsert({ order_id: o.order_id, field: f, storage_path: path, filename: o[f + '_filename'] || (f + '.' + ext), filetype: type, size: bytes.length }, { onConflict: 'id' });
-        const { data: pub } = sb.storage.from('labels').getPublicUrl(path);
-        if (pub && pub.publicUrl) o[f + '_file'] = pub.publicUrl; // permanent public URL; not stored in the order row
+        const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, SIGNED_URL_TTL);
+        if (signed) o[f + '_file'] = signed.signedUrl; // display URL; not stored in the order row
       }
     }
   }
@@ -2919,8 +2921,8 @@ async function resolveFileLinks(order){
     const name = order[f+'_filename'] || order[f] || (f+'.file');
     if(path && typeof sb !== 'undefined' && sb){
       try{
-        const { data: pub } = sb.storage.from('labels').getPublicUrl(path); // permanent public URL (never expires)
-        if(pub && pub.publicUrl){ out[f] = { url: pub.publicUrl, name }; continue; }
+        const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, SIGNED_URL_TTL); // ~1 year
+        if(signed){ out[f] = { url: signed.signedUrl, name }; continue; }
       }catch(e){}
     }
     // fallback: a file already loaded as a usable URL (signed/http) but no durable path yet
@@ -3554,16 +3556,16 @@ function downloadMultiFileAt(fieldKey, i){
   if(!src){ showToast('No file data for this item', 'info'); return; }
   const a = document.createElement('a'); a.href = src; a.download = lbl.filename || (fieldKey + '-' + (i+1)); a.target='_blank'; a.click();
 }
-// Copy a permanent, shareable public link to this file to the clipboard.
-function copyMultiFileLink(fieldKey, i){
+// Copy a shareable link (valid ~1 year) to this file to the clipboard.
+async function copyMultiFileLink(fieldKey, i){
   const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
   const arr = order && order[multiFileArrayKey(fieldKey)];
   if(!order || !Array.isArray(arr) || !arr[i]) return;
   const lbl = arr[i];
   let url = '';
-  // Prefer re-deriving from the durable storage path so the link is always the permanent public URL.
+  // Re-sign fresh from the durable storage path so the shared link is a full ~1-year window.
   if(lbl.path && typeof sb !== 'undefined' && sb){
-    try { const { data: pub } = sb.storage.from('labels').getPublicUrl(lbl.path); if(pub && pub.publicUrl) url = pub.publicUrl; } catch(e){}
+    try { const { data: signed } = await sb.storage.from('labels').createSignedUrl(lbl.path, SIGNED_URL_TTL); if(signed) url = signed.signedUrl; } catch(e){}
   }
   if(!url) url = (typeof lbl.file === 'string' && /^https?:/.test(lbl.file)) ? lbl.file : '';
   if(!url){ showToast('This file has no shareable link yet — save the order first', 'info'); return; }
@@ -4415,7 +4417,7 @@ function openTaskForm(taskCode, orderId) {
     }
     const def = FIELD_DEFS[f] || { label: f, type: 'text' };
     const isFile = ['order_confirmation','delivery_photo','damage_photo','return_label_pdf','proof_of_postage','invoice','collection_handover','refund_confirmation_pdf'].includes(f);
-    h += '<div class="form-field full"><label>' + escapeHtml(def.label) + (def.required ? ' <span style="color:var(--red)">*</span>' : '') + '</label>';
+    h += '<div class="form-field full"><label>' + escapeHtml(def.label) + (def.required ? ' <span style="color:var(--red)">*</span>' : '') + (f === 'issue_notes' ? ' <span id="tf_issue_notes_reqmark" style="color:var(--red);font-weight:600;display:none">— required (no question &amp; answer logged above)</span>' : '') + '</label>';
     if (isFile) {
       h += '<div style="display:flex;gap:8px;align-items:center">'
          + '<input type="text" id="tf_' + f + '" placeholder="Describe or paste a link" style="flex:1">'
@@ -4434,6 +4436,22 @@ function openTaskForm(taskCode, orderId) {
   h += '</div>';
   document.getElementById('taskFormBody').innerHTML = h;
   document.getElementById('taskFormModal').classList.add('show');
+  if (taskCode === 'chase_investigation') wireChaseNotesRequirement();
+}
+// Chase investigation: Notes is required only while BOTH "question" and "answer" are empty.
+// Show a live red marker on the Notes label so that requirement is obvious.
+function updateChaseNotesRequired(){
+  const q = (document.getElementById('tf_retailer_question') || {}).value || '';
+  const a = (document.getElementById('tf_retailer_response') || {}).value || '';
+  const mark = document.getElementById('tf_issue_notes_reqmark');
+  if(mark) mark.style.display = (!q.trim() && !a.trim()) ? 'inline' : 'none';
+}
+function wireChaseNotesRequirement(){
+  ['tf_retailer_question','tf_retailer_response'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.addEventListener('input', updateChaseNotesRequired);
+  });
+  updateChaseNotesRequired();
 }
 function taskFormFileUpload(input, field) {
   const files = Array.from(input.files || []); if (!files.length || !_taskFormState) return;
