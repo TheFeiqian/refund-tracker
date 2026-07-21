@@ -655,6 +655,20 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 .delg-empty{ grid-column:1/-1; padding:14px; }
 .delg-note-add{ display:flex; gap:6px; }
 .delg-note-add input{ flex:1; font-size:12.5px; padding:5px 8px; }
+.delg-card-actions{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.delg-detail-btn{ font-size:12.5px; padding:6px 12px; border:1px solid var(--accent); background:var(--accent-soft); color:var(--accent-deep); border-radius:7px; cursor:pointer; font-weight:600; }
+.delg-detail-btn:hover{ background:var(--accent); color:#fff; }
+.delg-notes-count{ font-size:11px; color:var(--ink-faded); font-family:var(--mono); }
+.delg-detail-modal{ background:var(--bg-card,#fff); border-radius:12px; max-width:640px; width:100%; padding:20px; max-height:86vh; overflow:auto; box-shadow:0 20px 60px rgba(0,0,0,.3); }
+.delg-detail-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line); }
+.delg-detail-sec{ margin-bottom:18px; }
+.delg-detail-h{ font-family:var(--mono); font-size:10.5px; letter-spacing:1px; text-transform:uppercase; color:var(--ink-faded); margin-bottom:8px; font-weight:600; }
+.delg-desc{ white-space:pre-wrap; word-break:break-word; font-family:var(--sans); font-size:13px; line-height:1.5; background:var(--bg-soft,#faf9f7); border:1px solid var(--line-soft); border-radius:8px; padding:12px; margin:0; }
+.delg-info-row{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:6px 0; border-bottom:1px solid var(--line-soft); font-size:13px; }
+.delg-info-lbl{ color:var(--ink); }
+.delg-info-val{ text-align:right; color:var(--ink-soft); word-break:break-word; }
+.delg-missing-wrap{ display:flex; flex-wrap:wrap; gap:6px; }
+.delg-missing-badge{ background:var(--amber-soft,#fff4e0); color:#8a5a00; font-family:var(--mono); font-size:11px; padding:2px 8px; border-radius:8px; }
 .delg-cat-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(300px,1fr)); gap:8px 16px; margin-top:10px; }
 .delg-cat-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; }
 .delg-cat-row select{ font-size:12.5px; padding:4px 6px; min-width:130px; }
@@ -3888,13 +3902,10 @@ function delgFmtTime(ms){ if(!ms) return ''; try{ const d=new Date(ms); const pa
 function delgAllCategories(){ return (typeof TASK_CATALOG!=='undefined'?TASK_CATALOG:[]).filter(t=>t.code!=='choose_method').map(t=>({code:t.code, name:t.name})); }
 // Build a person <select>. categoryMode = only the 3 (+ no default); task mode adds an "others" group.
 function delgPersonSelect(current, onchangeJs, categoryMode){
+  // Responsibility always stays with the 3 (Simon / Silmi / Phoebus) — no "others" option.
   let opts = '<option value="">'+(categoryMode?'(no default owner)':'(unassigned)')+'</option>';
   DELEGATION_PEOPLE.forEach(p=>{ opts += '<option'+(current===p?' selected':'')+'>'+escapeHtml(p)+'</option>'; });
-  if(!categoryMode){
-    let others = (typeof allPeopleRecords==='function'?allPeopleRecords():(typeof PEOPLE!=='undefined'?PEOPLE:[])).map(p=>p.name).filter(n=>DELEGATION_PEOPLE.indexOf(n)<0);
-    if(current && DELEGATION_PEOPLE.indexOf(current)<0 && others.indexOf(current)<0) others.push(current);
-    if(others.length){ opts += '<optgroup label="Delegate to others">'; others.forEach(n=>{ opts += '<option'+(current===n?' selected':'')+'>'+escapeHtml(n)+'</option>'; }); opts += '</optgroup>'; }
-  }
+  if(current && DELEGATION_PEOPLE.indexOf(current)<0){ opts += '<option selected>'+escapeHtml(current)+'</option>'; } // keep any legacy value visible
   return '<select class="delg-person-sel" onchange="'+onchangeJs+'">'+opts+'</select>';
 }
 // --- mutations (all persist via saveData) ---
@@ -3970,16 +3981,14 @@ function renderDelegation(){
     const i=idx++; const it=entry.it, o=it.order, code=it.task.type.code, name=it.task.type.name;
     window.__delgMap[i]={ orderId:o.order_id, code, name };
     const overdue = it.overdue_days>0;
-    const notes = taskNotesStore()[delgKey(o.order_id,code)] || [];
-    let notesHtml = notes.map((nt,ni)=>'<div class="delg-note"><span class="delg-note-meta">'+escapeHtml(nt.author||'?')+' · '+delgFmtTime(nt.at)+'</span><span class="delg-note-txt">'+escapeHtml(nt.text||'')+'</span><button type="button" class="delg-note-x" title="Delete note" onclick="delgDeleteNote('+i+','+ni+')">&times;</button></div>').join('');
-    if(!notes.length) notesHtml='<div class="delg-note-empty">No notes yet.</div>';
+    const noteCount = (taskNotesStore()[delgKey(o.order_id,code)]||[]).length;
     return '<div class="delg-card">'
       + '<div class="delg-card-top"><div class="delg-card-title"><span class="delg-task-name">'+escapeHtml(name)+'</span>'
       + '<span class="delg-order" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')" title="Open order">'+escapeHtml(o.store||'')+' · #'+escapeHtml(o.order_id)+'</span></div>'
       + (overdue?'<span class="delg-overdue">'+Math.round(it.overdue_days)+'d overdue</span>':'')+'</div>'
       + '<div class="delg-card-assign"><span class="delg-lbl">Assigned</span>'+delgPersonSelect(entry.who, 'delgSetAssignee('+i+', this.value)', false)+'</div>'
-      + '<div class="delg-notes">'+notesHtml+'</div>'
-      + '<div class="delg-note-add"><input type="text" id="delgnote_'+i+'" placeholder="Add a note — flag a problem…" onkeydown="if(event.key===\'Enter\'){delgAddNote('+i+');}"><button type="button" class="tiny" onclick="delgAddNote('+i+')">Add</button></div>'
+      + '<div class="delg-card-actions"><button type="button" class="delg-detail-btn" onclick="openDelgTaskDetailFor(\''+escAttr(o.order_id)+'\',\''+code+'\')">🔍 Open task details</button>'
+      + '<span class="delg-notes-count" title="troubleshooting notes">💬 '+noteCount+'</span></div>'
     + '</div>';
   };
 
@@ -3996,6 +4005,85 @@ function renderDelegation(){
     h += '<div class="delg-group"><div class="delg-group-h delg-group-other">'+escapeHtml(n)+' <span class="delg-group-n">delegated to others · '+others[n].length+'</span></div><div class="delg-group-body">'+others[n].map(mkCard).join('')+'</div></div>';
   });
   board.innerHTML = h || '<div class="delg-empty">No active tasks right now.</div>';
+}
+
+// Copy a shareable link to an order's PRIMARY file (re-signed fresh from its storage path).
+async function copyOrderFileLink(orderId, fieldKey){
+  const order = DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
+  let url = await freshSignedUrl(order[fieldKey+'_path']);
+  if(!url){ const arr=order[multiFileArrayKey(fieldKey)]; if(Array.isArray(arr)&&arr[0]){ url = await freshSignedUrl(arr[0].path); if(!url && typeof arr[0].file==='string' && /^https?:/.test(arr[0].file)) url=arr[0].file; } }
+  if(!url && typeof order[fieldKey+'_file']==='string' && /^https?:/.test(order[fieldKey+'_file'])) url=order[fieldKey+'_file'];
+  if(!url){ showToast('No shareable link for this file yet — save the order first','info'); return; }
+  const done=()=>showToast('Link copied — paste it anywhere to share','success');
+  if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(done,()=>window.prompt('Copy this link:',url)); } else { window.prompt('Copy this link:',url); }
+}
+
+// ---- Delegation task DETAIL view: description, info needed + files, missing info, notes ----
+function closeDelgDetail(){ const ov=document.getElementById('delgDetailOv'); if(ov) ov.remove(); window.__delgDetail=null; }
+function delgDetailAddNote(){
+  const d=window.__delgDetail; if(!d) return;
+  const inp=document.getElementById('delgDetailNote'); const txt=inp?inp.value.trim():''; if(!txt) return;
+  const s=taskNotesStore(); const k=delgKey(d.orderId,d.code);
+  if(!Array.isArray(s[k])) s[k]=[];
+  s[k].push({author:delgCurrentUserName(), at:Date.now(), text:txt});
+  saveData(); renderDelegation(); openDelgTaskDetailFor(d.orderId, d.code);
+}
+function delgDetailDeleteNote(ni){
+  const d=window.__delgDetail; if(!d) return;
+  const s=taskNotesStore(); const k=delgKey(d.orderId,d.code);
+  if(Array.isArray(s[k])){ s[k].splice(ni,1); if(!s[k].length) delete s[k]; saveData(); renderDelegation(); openDelgTaskDetailFor(d.orderId, d.code); }
+}
+function openDelgTaskDetailFor(orderId, code){
+  const order = DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
+  window.__delgDetail = { orderId, code };
+  const taskType = (typeof TASK_CATALOG!=='undefined') ? TASK_CATALOG.find(t=>t.code===code) : null;
+  const name = (taskType&&taskType.name) || code;
+  let desc=''; try{ desc = (typeof generateInstruction==='function' && taskType) ? generateInstruction({type:taskType}, order) : ''; }catch(e){}
+  const fields = (typeof TASK_FORM_FIELDS!=='undefined' && TASK_FORM_FIELDS[code]) ? TASK_FORM_FIELDS[code] : [];
+  const isFileField=(f)=> (typeof FILE_FIELDS!=='undefined') && FILE_FIELDS.indexOf(f)>=0;
+  const hasFile=(f)=> (typeof hasOrderFile==='function') ? hasOrderFile(order,f) : (!!order[f+'_file']||!!order[f+'_path']);
+  const isFilled=(f)=> (typeof fieldFilled==='function') ? fieldFilled(order,f) : !!order[f];
+  const fileBtns=(f)=>'<button class="tiny" onclick="downloadOrderFile(\''+escAttr(orderId)+'\',\''+f+'\')">📄 Download</button> <button class="tiny" onclick="copyOrderFileLink(\''+escAttr(orderId)+'\',\''+f+'\')">🔗 Copy link</button>';
+  // (b) information needed to complete
+  let infoRows = fields.map(f=>{
+    const def=FIELD_DEFS[f]||{label:f};
+    let done, val;
+    if(isFileField(f)){ done=hasFile(f); val= done? fileBtns(f) : '<span class="delg-missing-badge">missing</span>'; }
+    else { done=isFilled(f); val= done? '<span>'+escapeHtml(String(order[f]||''))+'</span>' : '<span class="delg-missing-badge">missing</span>'; }
+    return '<div class="delg-info-row"><span class="delg-info-lbl">'+(done?'✓':'○')+' '+escapeHtml(def.label)+'</span><span class="delg-info-val">'+val+'</span></div>';
+  }).join('') || '<div class="delg-note-empty">No specific fields — follow the description above.</div>';
+  // (c) missing
+  const missing = fields.filter(f=> isFileField(f) ? !hasFile(f) : !isFilled(f));
+  const missingHtml = missing.length
+    ? missing.map(f=>'<span class="delg-missing-badge">'+escapeHtml((FIELD_DEFS[f]||{label:f}).label)+'</span>').join(' ')
+    : '<span style="color:var(--green);font-size:13px">Nothing outstanding — ready to complete.</span>';
+  // all files on the order (links to PDFs etc.)
+  const allFiles=(typeof FILE_FIELDS!=='undefined'?FILE_FIELDS:[]).filter(f=>hasFile(f));
+  const filesHtml = allFiles.length
+    ? allFiles.map(f=>'<div class="delg-info-row"><span class="delg-info-lbl">'+escapeHtml((FIELD_DEFS[f]||{label:f}).label)+'</span><span class="delg-info-val">'+fileBtns(f)+'</span></div>').join('')
+    : '<div class="delg-note-empty">No files uploaded to this order yet.</div>';
+  // (d) troubleshooting notes
+  const notes = taskNotesStore()[delgKey(orderId,code)]||[];
+  const notesHtml = notes.length
+    ? notes.map((nt,ni)=>'<div class="delg-note"><span class="delg-note-meta">'+escapeHtml(nt.author||'?')+' · '+delgFmtTime(nt.at)+'</span><span class="delg-note-txt">'+escapeHtml(nt.text||'')+'</span><button type="button" class="delg-note-x" title="Delete" onclick="delgDetailDeleteNote('+ni+')">&times;</button></div>').join('')
+    : '<div class="delg-note-empty">No notes yet.</div>';
+
+  const assignedTo = delgEffectiveAssignee(orderId, code) || 'Unassigned';
+  const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre></div>'
+    + '<div class="delg-detail-sec"><div class="delg-detail-h">Information needed to complete</div>'+infoRows+'</div>'
+    + '<div class="delg-detail-sec"><div class="delg-detail-h">Missing information</div><div class="delg-missing-wrap">'+missingHtml+'</div></div>'
+    + '<div class="delg-detail-sec"><div class="delg-detail-h">Files on this order</div>'+filesHtml+'</div>'
+    + '<div class="delg-detail-sec"><div class="delg-detail-h">Troubleshooting notes</div><div class="delg-notes" style="max-height:220px">'+notesHtml+'</div>'
+    + '<div class="delg-note-add"><input type="text" id="delgDetailNote" placeholder="Add a note — flag a problem…" onkeydown="if(event.key===\'Enter\'){delgDetailAddNote();}"><button type="button" class="tiny" onclick="delgDetailAddNote()">Add</button></div></div>';
+
+  let ov=document.getElementById('delgDetailOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='delgDetailOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:10000;background:rgba(10,12,20,.45);display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.innerHTML='<div class="delg-detail-modal"><div class="delg-detail-top"><div><div style="font-weight:600;font-size:16px">'+escapeHtml(name)+'</div>'
+    + '<div class="delg-order" onclick="openOrderModal(\''+escAttr(orderId)+'\')">'+escapeHtml(order.store||'')+' · #'+escapeHtml(orderId)+' · assigned to '+escapeHtml(assignedTo)+'</div></div>'
+    + '<button class="tiny" onclick="closeDelgDetail()">✕ Close</button></div>'+body+'</div>';
+  ov.addEventListener('click', e=>{ if(e.target===ov) closeDelgDetail(); });
+  document.body.appendChild(ov);
 }
 
 function renderInProgress(){
