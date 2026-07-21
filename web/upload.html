@@ -63,6 +63,11 @@ function decodeDef(s){
   try { return JSON.parse(decodeURIComponent(escape(atob(s.replace(/-/g,'+').replace(/_/g,'/'))))); }
   catch(e){ return null; }
 }
+// Native <input type="date"> uses ISO; the app stores/displays DD/MM/YYYY. Convert between them.
+function parseDateLoose(s){ if(!s) return null; s=String(s).trim(); if(!s) return null; var m=s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/); if(m){ var d=+m[1],mo=+m[2],y=+m[3]; if(y<100)y+=2000; var dt=new Date(y,mo-1,d); return isNaN(dt.getTime())?null:dt; } var dt2=new Date(s); return isNaN(dt2.getTime())?null:dt2; }
+function isoToUK(iso){ var m=String(iso||'').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/); return m?(m[3]+'/'+m[2]+'/'+m[1]):(iso||''); }
+function addWorkingDays(fromDate, n){ var d=new Date(fromDate.getTime()); var added=0; while(added<n){ d.setDate(d.getDate()+1); var day=d.getDay(); if(day!==0&&day!==6) added++; } function pad(x){return String(x).padStart(2,'0');} return pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear(); }
+function toggleDeadlineDate(i, val){ var w=document.getElementById('fld'+i+'_wrap'); if(w) w.style.display=(val==='yes')?'block':'none'; }
 
 function init(){
   const cfg = window.APP_CONFIG || {};
@@ -139,6 +144,18 @@ function renderFields(){
   const box = document.getElementById('fields');
   box.innerHTML = DEF.fields.map((f,i)=>{
     const help = f.help ? '<div class="help">'+esc(f.help)+'</div>' : '';
+    // Special: the notify-retailer form reframes the deadline as "Was a deadline given?"
+    // Yes -> reveal a calendar picker; No -> the app assumes 5 working days.
+    if(f.key === 'investigation_deadline' && DEF.task === 'contact_retailer_investigation'){
+      return '<div class="field"><label>Was an investigation deadline given?'+(f.required?' *':'')+'</label>'
+        + '<select id="fld'+i+'_given" onchange="toggleDeadlineDate('+i+', this.value)">'
+        + '<option value="">(select)</option>'
+        + '<option value="yes">Yes — they gave a date</option>'
+        + '<option value="no">No — assume 5 working days from the date you contacted them</option>'
+        + '</select>'
+        + '<div id="fld'+i+'_wrap" style="display:none;margin-top:8px"><label style="font-weight:500">Investigation deadline date</label><input type="date" id="fld'+i+'"></div>'
+        + help + '</div>';
+    }
     let input;
     if(f.kind === 'file'){
       input = '<label class="filebtn">📎 <span id="fbtn'+i+'">Choose file</span>'
@@ -150,6 +167,8 @@ function renderFields(){
             + '</select>';
     } else if(f.kind === 'textarea'){
       input = '<textarea id="fld'+i+'" placeholder="'+esc(f.placeholder||'')+'"></textarea>';
+    } else if(f.kind === 'date'){
+      input = '<input type="date" id="fld'+i+'">';
     } else {
       input = '<input type="'+(f.kind==='number'?'number':'text')+'" id="fld'+i+'" placeholder="'+esc(f.placeholder||'')+'">';
     }
@@ -182,12 +201,33 @@ async function submitForm(){
     if(f.kind === 'file'){
       if(FILES[i]) fileUploads.push(Object.assign({ key:f.key }, FILES[i]));
       else if(f.required){ return fail('Please attach: ' + (f.label||f.key)); }
-    } else {
-      const el = document.getElementById('fld'+i);
-      const v = el ? el.value.trim() : '';
-      if(f.required && !v){ return fail('Please fill in: ' + (f.label||f.key)); }
-      if(v) answers[f.key] = v;
+      continue;
     }
+    // Special: "Was a deadline given?" — No assumes 5 working days from the contact date.
+    if(f.key === 'investigation_deadline' && DEF.task === 'contact_retailer_investigation'){
+      const given = (document.getElementById('fld'+i+'_given')||{}).value || '';
+      if(given === 'no'){
+        const base = parseDateLoose(answers['retailer_contacted_date']) || new Date();
+        answers['investigation_deadline'] = addWorkingDays(base, 5);
+      } else if(given === 'yes'){
+        const dv = (document.getElementById('fld'+i)||{}).value || '';
+        if(dv) answers['investigation_deadline'] = isoToUK(dv);
+        else return fail('Please pick the investigation deadline date, or choose “No”.');
+      } else if(f.required){
+        return fail('Please answer: Was an investigation deadline given?');
+      }
+      continue;
+    }
+    const el = document.getElementById('fld'+i);
+    let v = el ? el.value.trim() : '';
+    if(f.kind === 'date' && v) v = isoToUK(v);
+    if(f.required && !v){ return fail('Please fill in: ' + (f.label||f.key)); }
+    if(v) answers[f.key] = v;
+  }
+  // Chase investigation: Notes is required unless the retailer's question & your answer were logged.
+  if(DEF.task === 'chase_investigation'){
+    const q=(answers['retailer_question']||'').trim(), a=(answers['retailer_response']||'').trim(), n=(answers['issue_notes']||'').trim();
+    if(!q && !a && !n){ return fail('Please log the retailer’s question & your answer, or fill in Notes.'); }
   }
   btn.disabled = true; btn.textContent = 'Submitting…';
   try{

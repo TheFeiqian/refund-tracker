@@ -1614,7 +1614,7 @@ const FIELD_ACCESS = {
   // admin
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
-  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', retailer_contacted_date:'email_holder', refund_confirmation_pdf:'email_holder', rts_label_photo:'email_holder', box_photo:'email_holder', issue_notes:'email_holder', refund_narrative:'admin',
+  collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', retailer_contacted_date:'email_holder', refund_confirmation_pdf:'email_holder', rts_label_photo:'email_holder', box_photo:'email_holder', issue_notes:'email_holder', retailer_question:'email_holder', retailer_response:'email_holder', refund_narrative:'admin',
   refund_refused_date:'admin', invoice:'email_holder', delivery_name:'delivery',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
@@ -1855,6 +1855,8 @@ function buildFormLink(order, group, taskCode, taskLabel, mandSet){
     // to auto-fill other fields, and uploading it is always the submitter's choice.
     const req = (k === 'order_confirmation') ? false : (mandSet ? !!mandSet[k] : !!def.required);
     let kind = isFile ? 'file' : (def.type === 'select' ? 'select' : (def.type === 'textarea' ? 'textarea' : (def.type === 'number' ? 'number' : 'text')));
+    // Date fields render as a native calendar picker on the completion form.
+    if(!isFile && ['retailer_contacted_date','investigation_deadline','refund_received_date','delivery_date_text','order_date','postage_date','collection_date','refund_refused_date','return_label_date','chargeback_date','court_claim_date','hearing_date'].indexOf(k) >= 0) kind = 'date';
     let options = def.options || undefined;
     if(k === 'card_used'){ kind = 'card'; options = UK_BANKS; }
     if(k === 'items'){ kind = 'items'; }
@@ -3524,40 +3526,54 @@ function downloadAttachedFile(fieldKey, ctx){
 // Download an uploaded file (stored as a base64 data URL) by order id — works from
 // the order modal OR the task queue. Converts to a Blob so the browser downloads it
 // reliably (so you can then attach the PDF to an email / Telegram yourself).
-function downloadOrderFile(orderId, fieldKey){
+// Best-effort FRESH signed URL for a stored file, re-signed from its durable storage path at click time.
+async function freshSignedUrl(path){
+  if(!path || typeof sb==='undefined' || !sb) return '';
+  try{ const { data:signed } = await sb.storage.from('labels').createSignedUrl(path, SIGNED_URL_TTL); return (signed&&signed.signedUrl)||''; }catch(e){ return ''; }
+}
+// Fetch a remote file URL and trigger a clean download. If the object is gone from storage
+// (e.g. removed when the bucket was changed), say so clearly instead of failing silently.
+async function fetchAndDownload(url, name){
+  try{
+    const resp = await fetch(url);
+    if(!resp.ok){
+      showToast('This file is no longer in storage (status '+resp.status+'). It was likely removed when the bucket was changed — please re-upload it.', 'error');
+      return false;
+    }
+    const blob = await resp.blob();
+    const href = URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=href; a.download=name||'download'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(href), 4000);
+    showToast('Downloading '+(name||'file'), 'success');
+    return true;
+  }catch(e){ showToast('Download failed: '+(e.message||e), 'error'); return false; }
+}
+async function downloadOrderFile(orderId, fieldKey){
   const order = DATA.orders.find(o => o.order_id === orderId);
   if(!order){ showToast('Order not found', 'error'); return; }
   const data = order[fieldKey + '_file'];
-  if(!data){ showToast('No file uploaded for this yet', 'error'); return; }
   const name = order[fieldKey + '_filename'] || (fieldKey + '.pdf');
-  try{
-    let href = data;
-    // data URL → Blob URL for a clean download
-    if(typeof data === 'string' && data.indexOf('data:') === 0){
+  // data URL (unsaved, still in this session) → clean blob download
+  if(typeof data === 'string' && data.indexOf('data:') === 0){
+    try{
       const comma = data.indexOf(',');
       const meta = data.slice(5, comma);            // e.g. application/pdf;base64
       const isB64 = /;base64/i.test(meta);
       const mime = meta.split(';')[0] || (order[fieldKey + '_filetype'] || 'application/octet-stream');
       const body = data.slice(comma + 1);
       let blob;
-      if(isB64){
-        const bin = atob(body);
-        const arr = new Uint8Array(bin.length);
-        for(let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
-        blob = new Blob([arr], { type: mime });
-      } else {
-        blob = new Blob([decodeURIComponent(body)], { type: mime });
-      }
-      href = URL.createObjectURL(blob);
-    }
-    const a = document.createElement('a');
-    a.href = href; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    if(href !== data) setTimeout(()=>URL.revokeObjectURL(href), 4000);
-    showToast('Downloading ' + name, 'success');
-  }catch(e){
-    showToast('Download failed: ' + e.message, 'error');
+      if(isB64){ const bin=atob(body); const arr=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i); blob=new Blob([arr],{type:mime}); }
+      else { blob=new Blob([decodeURIComponent(body)],{type:mime}); }
+      const href=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=href; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(href),4000);
+      showToast('Downloading '+name,'success');
+    }catch(e){ showToast('Download failed: '+e.message,'error'); }
+    return;
   }
+  // stored file → always re-sign fresh from the durable path, then fetch-download (clear error if gone)
+  let url = await freshSignedUrl(order[fieldKey + '_path']);
+  if(!url) url = (typeof data==='string' && /^https?:/.test(data)) ? data : '';
+  if(!url){ showToast('No file uploaded for this yet', 'error'); return; }
+  await fetchAndDownload(url, name);
 }
 function removeAttachedFile(fieldKey, ctx) {
   if (!confirm('Remove this attachment?')) return;
@@ -3584,14 +3600,21 @@ function removeAttachedFile(fieldKey, ctx) {
 function downloadReturnLabelAt(i){ downloadMultiFileAt('return_label_pdf', i); }
 function removeReturnLabelAt(i){ removeMultiFileAt('return_label_pdf', i); }
 // Generic versions for any multi-file field (return labels, postage receipts).
-function downloadMultiFileAt(fieldKey, i){
+async function downloadMultiFileAt(fieldKey, i){
   const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
   const arr = order && order[multiFileArrayKey(fieldKey)];
   if(!order || !Array.isArray(arr) || !arr[i]) return;
   const lbl = arr[i];
-  const src = lbl.file || lbl.path;
-  if(!src){ showToast('No file data for this item', 'info'); return; }
-  const a = document.createElement('a'); a.href = src; a.download = lbl.filename || (fieldKey + '-' + (i+1)); a.target='_blank'; a.click();
+  const name = lbl.filename || (fieldKey + '-' + (i+1));
+  // data URL (unsaved) → download directly
+  if(typeof lbl.file === 'string' && lbl.file.indexOf('data:') === 0){
+    const a=document.createElement('a'); a.href=lbl.file; a.download=name; document.body.appendChild(a); a.click(); a.remove(); return;
+  }
+  // always re-sign fresh from the durable path; fall back to any stored URL
+  let url = await freshSignedUrl(lbl.path);
+  if(!url) url = (typeof lbl.file==='string' && /^https?:/.test(lbl.file)) ? lbl.file : '';
+  if(!url){ showToast('This file has no storage reference — please re-upload it.', 'error'); return; }
+  await fetchAndDownload(url, name);
 }
 // Copy a shareable link (valid ~1 year) to this file to the clipboard.
 async function copyMultiFileLink(fieldKey, i){
@@ -5678,7 +5701,7 @@ function openOrderModal(orderId) {
       <div class="form-field"><label>Return label date</label><input type="text" id="f_return_label_date" value="${escAttr(order.return_label_date)}"></div>
       <div class="form-field"><label>Outbound tracking <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_outbound_tracking" value="${escAttr(order.outbound_tracking)}" oninput="updateTrackingLinks()"><div id="f_outbound_tracking_link" style="font-size:11px;margin-top:3px">${(function(){const u=trackingLink(order.outbound_courier, order.outbound_tracking); return u?'<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(order.outbound_courier))+'</a>':'';})()}</div></div>
       <div class="form-field full" id="f_outbound_tracking_extra"></div>
-      <div class="form-field"><label>Outbound courier <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_outbound_courier" value="${escAttr(order.outbound_courier)}"></div>
+      <div class="form-field"><label>Outbound courier <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">return-label courier · informs the store's LIT courier</span></label><select id="f_outbound_courier">${(function(){ const cur=normCourier(order.outbound_courier||''); let opts=['',...COURIER_LIST]; if(cur && opts.indexOf(cur)<0) opts.splice(opts.length-1,0,cur); return opts.map(c=>'<option value="'+escAttr(c)+'"'+(cur===c?' selected':'')+'>'+(c||'(none)')+'</option>').join(''); })()}</select></div>
       <div class="form-field"><label>Postage date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_postage_date" value="${escAttr(order.postage_date)}" placeholder="DD/MM/YYYY" oninput="updateContactRetailerDate()"></div>
       <div class="form-field"><label>Date to contact retailer <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto · postage + 5 working days</span></label><input type="text" id="f_contact_retailer_date" value="${escAttr(order.contact_retailer_date||'')}" readonly title="Auto-calculated from the proof-of-postage postage date" style="background:var(--line-soft);color:var(--ink-soft)"></div>
       <div class="form-field"><label>Posted from <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_posted_from" value="${escAttr(order.posted_from)}" placeholder="Post Office / parcelshop name"></div>
@@ -6454,12 +6477,20 @@ function forceBBMRoute(orderId, route){
   saveData(); renderAll();
   showToast('BBM route forced to '+route+' for #'+orderId, 'success');
 }
+// The return-label courier a store's orders have actually used (most common outbound_courier,
+// normalised). Lets an order's return-label courier auto-populate the store's LIT courier.
+function storeReturnCourierFromOrders(storeName){
+  if(!storeName) return '';
+  const oc={};
+  (DATA.orders||[]).forEach(o=>{ if(o.store===storeName && o.outbound_courier){ const c=(typeof normCourier==='function'?normCourier(o.outbound_courier):(''+o.outbound_courier).trim()); if(c) oc[c]=(oc[c]||0)+1; } });
+  return Object.keys(oc).sort((a,b)=>oc[b]-oc[a])[0] || '';
+}
 function deriveMethod(o, flags) {
   const f = flags[o.store];
   // BBM is a manual flag set at delivery review; it runs the LIT chain, with a collection fork by volume.
   if (o.bought_by_mistake === 'yes') {
     return {method:'BBM', resolved:'manual flag', blocked_at:'', missing:[], bbm:true,
-            collection: isCollectionPath(o, flags), return_label_courier:(f&&f.courier)||''};
+            collection: isCollectionPath(o, flags), return_label_courier:(f&&f.courier)||storeReturnCourierFromOrders(o.store)||''};
   }
   const courier = o.inbound_courier || (f && f.inbound_courier) || '';
   // Under £100: prefer a claim over a real return (explicit-no DNA, then EB, then PEB).
@@ -6472,8 +6503,8 @@ function deriveMethod(o, flags) {
   // Q1/Q2: only a NEVER-ASSESSED store stalls. An assessed store with no drop-off
   // label (unwanted/damaged false) is a definite "no" — flow through to Q3+.
   if (!f || !f.assessed) return {method:'', blocked_at:'Q1', missing:[{key:'parcel_shop_flags',src:'Stores',scope:'store'}]};
-  if (f.unwanted) return {method:'LIT', return_label_courier: f.courier||'', resolved:'Q1', blocked_at:'', missing:[]};
-  if (f.damaged) return {method:'LIT with pic', return_label_courier: f.courier||'', resolved:'Q2', blocked_at:'', missing:[]};
+  if (f.unwanted) return {method:'LIT', return_label_courier: f.courier || storeReturnCourierFromOrders(o.store) || '', resolved:'Q1', blocked_at:'', missing:[]};
+  if (f.damaged) return {method:'LIT with pic', return_label_courier: f.courier || storeReturnCourierFromOrders(o.store) || '', resolved:'Q2', blocked_at:'', missing:[]};
   if (!courier) return {method:'', blocked_at:'Q3', missing:[{key:'inbound_courier',src:'stage 2',scope:'order'}]};
   if (RET_COURIERS.includes(courier)) return {method:'RTS', resolved:'Q3', blocked_at:'', missing:[]};
   if (o.delivery_photo_shows_person === 'no') return {method:'DNA', resolved:'Q4', blocked_at:'', missing:[]};
@@ -7224,7 +7255,7 @@ function openStoreForm(name) {
   window._editStore = r;
   const ci = r.contact_info || (name && CONTACT_DATA[name]) || {};
   const chk=v=>v===true?'checked':'';
-  const COURIERS=['DPD','Royal Mail','Parcelforce','Evri','DHL','FedEx','Other'];
+  const COURIERS=['DPD','Royal Mail','Parcelforce','Evri','DHL','FedEx','UPS','Yodel','Other'];
   const rlcOpts=['',...COURIERS].map(c=>`<option ${r.return_label_courier===c?'selected':''}>${c||'unknown'}</option>`).join('');
   const inbOpts=['',...COURIERS].map(c=>`<option ${r.inbound_courier===c?'selected':''}>${c||'unknown'}</option>`).join('');
   const CATS=['clothes','tech','large furniture items','home items'];
@@ -7594,7 +7625,7 @@ function renderParcelshop() {
     {id:'s4',name:'Co-op, Islington Green',dist:'1.2 km',couriers:['Evri','DPD'],courier:'Evri'},
   ];
   returns.forEach((o,i)=>{ (shops[i%shops.length].returns=shops[i%shops.length].returns||[]).push(o); });
-  let h=`<div class="queue-toolbar"><div class="filter-group"><label>Base postcode</label><input type="text" value="N1 9RB" style="width:120px"><label>Courier</label><select><option>All couriers</option><option>Royal Mail</option><option>DPD</option><option>Evri</option></select></div></div>`;
+  let h=`<div class="queue-toolbar"><div class="filter-group"><label>Base postcode</label><input type="text" value="N1 9RB" style="width:120px"><label>Courier</label><select><option>All couriers</option><option>Royal Mail</option><option>DPD</option><option>Evri</option><option>Parcelforce</option><option>DHL</option><option>FedEx</option><option>UPS</option><option>Yodel</option></select></div></div>`;
   h+=`<div style="position:relative;height:240px;background:var(--line-soft);border-radius:10px;overflow:hidden;margin-bottom:6px">
     <div style="position:absolute;inset:0;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:40px 40px;opacity:.6"></div>
     <div style="position:absolute;top:80px;left:200px;width:13px;height:13px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:var(--green);border:2px solid #fff"></div>
