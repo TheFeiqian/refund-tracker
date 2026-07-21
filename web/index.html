@@ -655,7 +655,7 @@ function editorFileListHtml(order, fieldKey){
   const rows = arr.map((fl,i)=>{
     const isImg = (fl.filetype||'').startsWith('image/');
     const thumb = isImg ? `<img src="${fl.file||fl.path||''}" alt="" style="width:34px;height:34px;object-fit:cover;border-radius:4px;cursor:pointer" onclick="window.open(this.src)">` : `<div style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-size:18px">📄</div>`;
-    return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--line)">${thumb}<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(fl.filename||('file '+(i+1)))}</span><button type="button" class="tiny" onclick="downloadMultiFileAt('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Download</button><button type="button" class="tiny danger" onclick="removeEditorMultiFileAt('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Remove</button></div>`;
+    return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--line)">${thumb}<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(fl.filename||('file '+(i+1)))}</span><button type="button" class="tiny" onclick="downloadMultiFileAt('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Download</button><button type="button" class="tiny" onclick="copyMultiFileLink('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Copy link</button><button type="button" class="tiny danger" onclick="removeEditorMultiFileAt('${escAttr(fieldKey)}', ${i}); event.preventDefault();">Remove</button></div>`;
   }).join('');
   return `<div style="margin-top:6px">${rows}<div style="font-size:10.5px;color:var(--green);font-family:var(--mono);margin-top:4px">${arr.length} file${arr.length>1?'s':''} attached · saved</div></div>`;
 }
@@ -788,24 +788,25 @@ async function hostedFetchAll() {
     sb.from('stores').select('*'),
   ]);
   const list = (orders || []).map(r => r.data || {});
-  // resolve storage file refs -> signed URLs for display
+  // resolve storage file refs -> permanent PUBLIC URLs for display (never expire)
   for (const o of list) {
     for (const f of FILE_FIELDS) {
       const p = o[f + '_path'];
       if (p) {
         try {
-          const { data: signed } = await sb.storage.from('labels').createSignedUrl(p, 3600);
-          if (signed) o[f + '_file'] = signed.signedUrl;
+          const { data: pub } = sb.storage.from('labels').getPublicUrl(p);
+          if (pub && pub.publicUrl) o[f + '_file'] = pub.publicUrl;
         } catch (e) {}
       }
-      // resolve each file in the multi-file array (public-form files arrive as durable .path entries)
+      // resolve each file in the multi-file array (public-form files arrive as durable .path entries).
+      // Always re-derive from the durable path so any stale/expired signed URL is overwritten.
       const arrKey = f + 's';
       if (Array.isArray(o[arrKey])) {
         for (const entry of o[arrKey]) {
-          if (entry && entry.path && !entry.file) {
+          if (entry && entry.path) {
             try {
-              const { data: signed } = await sb.storage.from('labels').createSignedUrl(entry.path, 3600);
-              if (signed) entry.file = signed.signedUrl;
+              const { data: pub } = sb.storage.from('labels').getPublicUrl(entry.path);
+              if (pub && pub.publicUrl) entry.file = pub.publicUrl;
             } catch (e) {}
           }
         }
@@ -932,8 +933,8 @@ async function __persistFiles(o) {
           const up = await sb.storage.from('labels').upload(path, bytes, { contentType: type, upsert: true });
           if (!up.error) {
             entry.path = path;
-            const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, 3600);
-            if (signed) entry.file = signed.signedUrl;
+            const { data: pub } = sb.storage.from('labels').getPublicUrl(path);
+            if (pub && pub.publicUrl) entry.file = pub.publicUrl;
           }
         }
       }
@@ -950,8 +951,8 @@ async function __persistFiles(o) {
       if (!up.error) {
         o[f + '_path'] = path;
         await sb.from('files').upsert({ order_id: o.order_id, field: f, storage_path: path, filename: o[f + '_filename'] || (f + '.' + ext), filetype: type, size: bytes.length }, { onConflict: 'id' });
-        const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, 3600);
-        if (signed) o[f + '_file'] = signed.signedUrl; // display URL; not stored in the order row
+        const { data: pub } = sb.storage.from('labels').getPublicUrl(path);
+        if (pub && pub.publicUrl) o[f + '_file'] = pub.publicUrl; // permanent public URL; not stored in the order row
       }
     }
   }
@@ -1468,8 +1469,8 @@ const TASK_CATALOG = [
   { code: 'submit_chargeback', name: 'Submit chargeback', stage: 7, sla: 24, owner_only: true, info_only: false,
     appears_when: 'Refund unsuccessful ✓ (stage 7)',
     advances_when: 'Refunded ✓ → Done',
-    completed_when: (o) => fieldFilled(o, 'chargeback_date') || fieldFilled(o, 'chargeback_bank'),
-    completed_via: 'chargeback_date OR chargeback_bank is filled (chargeback filed)',
+    completed_when: (o) => fieldFilled(o, 'chargeback_date'),
+    completed_via: 'chargeback_date is filled (chargeback actually filed) — chargeback_bank is auto-derived from the card and no longer counts as "filed"',
     info_needed: 'Bank portal access, evidence package, reason code',
     instruction_template: '⚠ CARD OWNER ACTION REQUIRED - {person}\n\nSubmit chargeback for {store} order {order_id}.\n\n  Amount: £{price}\n  Reason: Goods returned / not as described, refund refused\n  Bank: {chargeback_bank}\n\nEvidence package to attach:\n  - Order confirmation\n  - Return label / proof of postage: {proof_of_postage}\n  - Retailer correspondence (refusal)\n  - Outbound tracking: {outbound_tracking}\n\nSubmit via your bank portal. Reply with the chargeback reference once filed.' },
 
@@ -1554,7 +1555,9 @@ const FIELD_DEFS = {
   refund_received_amount: { label: 'Refund received (£)', required: false, type: 'number', help: 'Amount actually refunded' },
   refund_confirmation_pdf: { label: 'Refund confirmation email (PDF)', required: false, type: 'file', help: 'Upload the retailer email confirming the refund' },
   rts_label_photo: { label: 'Return label on package (photo)', required: false, type: 'file', help: 'RTS only: photo of the return-to-sender label already on the parcel' },
-  issue_notes: { label: 'Notes (optional) — flag any issues', required: false, type: 'textarea', help: 'Anything the team should know: trouble reaching the retailer, a partial response, anything unusual.' },
+  retailer_question: { label: 'Question the retailer asked (optional)', required: false, type: 'textarea', help: 'What the retailer asked you during the chase. Leave blank if not applicable.' },
+  retailer_response: { label: 'The answer you gave (optional)', required: false, type: 'textarea', help: 'How you responded to the retailer. Leave blank if not applicable.' },
+  issue_notes: { label: 'Notes — flag any issues', required: false, type: 'textarea', help: 'Anything the team should know: trouble reaching the retailer, a partial response, anything unusual. Required if you did not log a question & answer above.' },
   box_photo: { label: 'Box photo (PEB/EB evidence)', required: false, type: 'file', help: 'PEB/EB: photo of the opened box after removing the claimed-missing items' },
 };
 
@@ -2312,6 +2315,17 @@ function parseDateLoose(s){
   if(m){ let d=+m[1],mo=+m[2],y=+m[3]; if(y<100)y+=2000; const dt=new Date(y,mo-1,d); return isNaN(dt.getTime())?null:dt; }
   const dt=new Date(s); return isNaN(dt.getTime())?null:dt;
 }
+// Native <input type="date"> uses ISO (YYYY-MM-DD); the rest of the app stores/displays DD/MM/YYYY.
+// These convert between the two so calendar pickers stay consistent with everything else.
+function isoToUK(iso){
+  const m = String(iso||'').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? (m[3]+'/'+m[2]+'/'+m[1]) : (iso||'');
+}
+function ukToIso(s){
+  const d = parseDateLoose(s); if(!d) return '';
+  const pad = x => String(x).padStart(2,'0');
+  return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+}
 function deliveryDatePassed(o){
   const d=parseDateLoose(o && o.delivery_date_text); if(!d) return false;
   const today=new Date(); today.setHours(23,59,59,999); return d<=today;
@@ -2346,7 +2360,10 @@ function applyEvidenceAdvances(order){
   const t = order.triggers;
   const present = (f)=> (typeof fieldFilled==='function' ? fieldFilled(order, f) : !!order[f]) || !!order[f+'_path'] || !!order[f+'_file'];
   // 1) Past delivery date OR a delivery photo => delivered (and therefore ordered).
-  if((order.delivery_date_text && deliveryDatePassed(order)) || present('delivery_photo')){
+  //    Click & collect: the item is delivered once the store collection address is filled
+  //    (there is no courier tracking/photo for collected orders).
+  if((order.delivery_date_text && deliveryDatePassed(order)) || present('delivery_photo')
+     || (order.click_and_collect && fieldFilled(order, 'collection_address'))){
     t.item_delivered = true;
   }
   // 2) Each evidence field that's present flips the trigger it proves.
@@ -2474,6 +2491,20 @@ function applyRetailerExtraction(){
 function onDeliveryDateInput(){
   const el=document.getElementById('f_delivery_date_text');
   if(el && deliveryDatePassed({delivery_date_text:el.value})) tickTriggerLive('item_delivered');
+}
+// Click & collect: hide the delivery/tracking fields and reveal the store collection address.
+function onClickCollectToggle(checked){
+  const wrap=document.getElementById('f_delivery_info_wrap');
+  if(wrap) wrap.style.display = checked ? 'none' : 'contents';
+  const cc=document.getElementById('f_click_collect_wrap');
+  if(cc) cc.style.display = checked ? 'block' : 'none';
+  if(checked) onCollectionAddressInput();
+}
+// A filled collection address on a click & collect order marks the item delivered.
+function onCollectionAddressInput(){
+  const cb=document.getElementById('f_click_and_collect');
+  const a=document.getElementById('f_collection_address');
+  if(cb && cb.checked && a && a.value.trim()) tickTriggerLive('item_delivered');
 }
 function updateModalStageHint(){
   const hint=document.getElementById('modalStageHint'); if(!hint) return;
@@ -2888,8 +2919,8 @@ async function resolveFileLinks(order){
     const name = order[f+'_filename'] || order[f] || (f+'.file');
     if(path && typeof sb !== 'undefined' && sb){
       try{
-        const { data: signed } = await sb.storage.from('labels').createSignedUrl(path, 604800); // 7 days
-        if(signed){ out[f] = { url: signed.signedUrl, name }; continue; }
+        const { data: pub } = sb.storage.from('labels').getPublicUrl(path); // permanent public URL (never expires)
+        if(pub && pub.publicUrl){ out[f] = { url: pub.publicUrl, name }; continue; }
       }catch(e){}
     }
     // fallback: a file already loaded as a usable URL (signed/http) but no durable path yet
@@ -3102,7 +3133,7 @@ function formatStoreContact(order){
   } catch(e){}
   if(!ci) return null;
   const parts = [];
-  if(ci.phone) parts.push('phone ' + ci.phone);
+  if(ci.phone) parts.push('phone ' + ci.phone + (ci.contact_hours ? ' (open ' + ci.contact_hours + ')' : ''));
   if(ci.email) parts.push('email ' + ci.email);
   if(ci.returns_form) parts.push('returns form ' + ci.returns_form);
   if(ci.returns_portal) parts.push('returns portal ' + ci.returns_portal);
@@ -3522,6 +3553,23 @@ function downloadMultiFileAt(fieldKey, i){
   const src = lbl.file || lbl.path;
   if(!src){ showToast('No file data for this item', 'info'); return; }
   const a = document.createElement('a'); a.href = src; a.download = lbl.filename || (fieldKey + '-' + (i+1)); a.target='_blank'; a.click();
+}
+// Copy a permanent, shareable public link to this file to the clipboard.
+function copyMultiFileLink(fieldKey, i){
+  const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
+  const arr = order && order[multiFileArrayKey(fieldKey)];
+  if(!order || !Array.isArray(arr) || !arr[i]) return;
+  const lbl = arr[i];
+  let url = '';
+  // Prefer re-deriving from the durable storage path so the link is always the permanent public URL.
+  if(lbl.path && typeof sb !== 'undefined' && sb){
+    try { const { data: pub } = sb.storage.from('labels').getPublicUrl(lbl.path); if(pub && pub.publicUrl) url = pub.publicUrl; } catch(e){}
+  }
+  if(!url) url = (typeof lbl.file === 'string' && /^https?:/.test(lbl.file)) ? lbl.file : '';
+  if(!url){ showToast('This file has no shareable link yet — save the order first', 'info'); return; }
+  const done = () => showToast('Link copied — paste it anywhere to share', 'success');
+  if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(done, ()=>window.prompt('Copy this link:', url)); }
+  else { window.prompt('Copy this link:', url); }
 }
 function removeMultiFileAt(fieldKey, i){
   const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
@@ -4159,7 +4207,7 @@ const TASK_FORM_FIELDS = {
   hand_over_collection:   ['collection_handover'],
   contact_retailer_investigation: ['retailer_contacted_date', 'investigation_deadline', 'box_photo'],
   bbm_confirm_refund:     ['refund_received_date', 'refund_confirmation_pdf'],
-  chase_investigation:    ['investigation_deadline', 'issue_notes', 'refund_received_date', 'refund_confirmation_pdf'],
+  chase_investigation:    ['investigation_deadline', 'retailer_question', 'retailer_response', 'issue_notes', 'refund_received_date', 'refund_confirmation_pdf'],
   submit_chargeback:      ['chargeback_bank', 'chargeback_amount', 'chargeback_reference', 'chargeback_type', 'invoice'],
 };
 
@@ -4186,7 +4234,7 @@ function buildTaskFormLinks(order, taskCode, taskLabel){
   // Fields that may appear on a completion form but must NEVER block it (supplementary evidence /
   // notes). The task's completed_when does not depend on these, so the form stays submittable without
   // them — e.g. the optional "flag any issues" notes, and the refund-confirmation fields.
-  const OPTIONAL_FORM_FIELDS = ['issue_notes','refund_received_date','refund_received_amount','refund_confirmation_pdf','box_photo'];
+  const OPTIONAL_FORM_FIELDS = ['issue_notes','retailer_question','retailer_response','refund_received_date','refund_received_amount','refund_confirmation_pdf','box_photo'];
   // completion fields for this task, minus already-filled, minus AI-derived, minus method-inapplicable
   const fields = (TASK_FORM_FIELDS[taskCode] || []).filter(f => {
     if(fieldFilled(order, f)) return false;
@@ -4336,6 +4384,35 @@ function openTaskForm(taskCode, orderId) {
          + '<span>Refund confirmed by the retailer — upload the confirmation email to close the order</span></label>'
          + '<div id="tf_refund_block" style="display:none">';
     }
+    // Date fields → native calendar picker (value round-trips through DD/MM/YYYY).
+    if (f === 'retailer_contacted_date') {
+      const d0 = FIELD_DEFS[f] || { label: f };
+      h += '<div class="form-field full"><label>' + escapeHtml(d0.label) + '</label>'
+         + '<input type="date" id="tf_' + f + '" value="' + escAttr(ukToIso(order[f] || '')) + '"></div>';
+      return;
+    }
+    // Investigation deadline on the "notify retailer & open investigation" form:
+    // reframe as "Was a deadline given?" — Yes reveals a calendar picker; No assumes 5 working days.
+    if (f === 'investigation_deadline' && taskCode === 'contact_retailer_investigation') {
+      h += '<div class="form-field full"><label>Was an investigation deadline given?</label>'
+         + '<select id="tf_deadline_given" onchange="var w=document.getElementById(\'tf_deadline_date_wrap\'); if(w) w.style.display=(this.value===\'yes\')?\'block\':\'none\';">'
+         + '<option value="">(choose)</option>'
+         + '<option value="yes">Yes — they gave a date</option>'
+         + '<option value="no">No — assume 5 working days from the contact date</option>'
+         + '</select>'
+         + '<div id="tf_deadline_date_wrap" style="display:none;margin-top:8px">'
+         + '<label style="font-size:12px;color:var(--ink-soft)">Investigation deadline date</label>'
+         + '<input type="date" id="tf_investigation_deadline" value="' + escAttr(ukToIso(order[f] || '')) + '">'
+         + '</div></div>';
+      return;
+    }
+    // Investigation deadline anywhere else (e.g. the chase form) → plain calendar picker.
+    if (f === 'investigation_deadline') {
+      const d0 = FIELD_DEFS[f] || { label: f };
+      h += '<div class="form-field full"><label>' + escapeHtml(d0.label) + '</label>'
+         + '<input type="date" id="tf_' + f + '" value="' + escAttr(ukToIso(order[f] || '')) + '"></div>';
+      return;
+    }
     const def = FIELD_DEFS[f] || { label: f, type: 'text' };
     const isFile = ['order_confirmation','delivery_photo','damage_photo','return_label_pdf','proof_of_postage','invoice','collection_handover','refund_confirmation_pdf'].includes(f);
     h += '<div class="form-field full"><label>' + escapeHtml(def.label) + (def.required ? ' <span style="color:var(--red)">*</span>' : '') + '</label>';
@@ -4346,15 +4423,10 @@ function openTaskForm(taskCode, orderId) {
          + '</div><div id="tf_preview_' + f + '" style="font-size:11px;color:var(--ink-faded);margin-top:4px"></div>';
     } else if (def.type === 'select') {
       h += '<select id="tf_' + f + '"><option value="">(choose)</option>' + (def.options || []).filter(Boolean).map(o => '<option>' + escapeHtml(o) + '</option>').join('') + '</select>';
+    } else if (def.type === 'textarea') {
+      h += '<textarea id="tf_' + f + '" rows="2" placeholder="' + escapeHtml(def.help || '') + '"></textarea>';
     } else {
       h += '<input type="text" id="tf_' + f + '" placeholder="' + escapeHtml(def.help || '') + '">';
-    }
-    // Investigation deadline: most stores don't give one — offer a "no deadline given" shortcut
-    // that assumes 5 working days (the chase task then regenerates once that date is reached).
-    if (f === 'investigation_deadline') {
-      h += '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;cursor:pointer">'
-         + '<input type="checkbox" id="tf_no_deadline" onchange="var d=document.getElementById(\'tf_investigation_deadline\'); if(d){ d.disabled=this.checked; if(this.checked) d.value=\'\'; }" style="width:auto;margin:0">'
-         + '<span>No investigation deadline given — assume 5 working days from the date you contacted them</span></label>';
     }
     h += '</div>';
     if (f === 'refund_confirmation_pdf') h += '</div>'; // close tf_refund_block
@@ -4410,12 +4482,24 @@ function submitTaskForm() {
   if (!order) return;
   const task = taskCode ? TASK_CATALOG.find(t => t.code === taskCode) : null;
   const fields = _taskFormState.fields || (taskCode ? (TASK_FORM_FIELDS[taskCode] || []) : []);
+  // Chase investigation: if the retailer's question & your answer were BOTH left blank,
+  // the Notes field becomes mandatory (so there's always a record of what happened).
+  if (taskCode === 'chase_investigation') {
+    const qv = (document.getElementById('tf_retailer_question') || {}).value || '';
+    const av = (document.getElementById('tf_retailer_response') || {}).value || '';
+    const nv = (document.getElementById('tf_issue_notes') || {}).value || '';
+    if (!qv.trim() && !av.trim() && !nv.trim()) {
+      showToast('Log the retailer’s question & your answer, or fill in Notes before completing', 'info');
+      return;
+    }
+  }
   const filled = [];
   fields.forEach(f => {
     const el = document.getElementById('tf_' + f);
     if (el && el.value) {
-      if (f === 'issue_notes') { order.issue_notes = (order.issue_notes ? order.issue_notes + '\n' : '') + el.value; } // running internal log
-      else { order[f] = el.value; }
+      const val = (el.type === 'date') ? isoToUK(el.value) : el.value;  // calendar pickers → DD/MM/YYYY
+      if (f === 'issue_notes') { order.issue_notes = (order.issue_notes ? order.issue_notes + '\n' : '') + val; } // running internal log
+      else { order[f] = val; }
       filled.push(f);
     }
     const fb = fileBuf[f];
@@ -4431,16 +4515,19 @@ function submitTaskForm() {
       if (f === 'delivery_photo' && !order.delivery_photo_shows_person) order.delivery_photo_shows_person = 'no';
     }
   });
-  // "No investigation deadline given" → assume 5 working days from the date the retailer was contacted
-  // (entered by the person on the form), falling back to today if that date is blank.
-  const noDeadlineEl = document.getElementById('tf_no_deadline');
-  if (noDeadlineEl && noDeadlineEl.checked) {
+  // Investigation deadline (notify-retailer form): "Was a deadline given?"
+  //   No  → assume 5 working days from the date the retailer was contacted (fallback: today).
+  //   Yes → the calendar-picked date was already captured by the field loop above.
+  const deadlineGivenEl = document.getElementById('tf_deadline_given');
+  if (deadlineGivenEl && deadlineGivenEl.value === 'no') {
     const cdEl = document.getElementById('tf_retailer_contacted_date');
-    const contactStr = (cdEl && cdEl.value.trim()) || order.retailer_contacted_date || '';
+    const contactStr = (cdEl && cdEl.value.trim() && isoToUK(cdEl.value)) || order.retailer_contacted_date || '';
     const base = parseDateLoose(contactStr) || new Date();
     order.investigation_deadline = addWorkingDays(base, 5);
     order.investigation_deadline_assumed = true;
     if (filled.indexOf('investigation_deadline') < 0) filled.push('investigation_deadline');
+  } else if (deadlineGivenEl && deadlineGivenEl.value === 'yes') {
+    order.investigation_deadline_assumed = false;
   }
   // Auto-tick the trigger the evidence maps to (per the evidence→trigger logic)
   order.triggers = order.triggers || {};
@@ -5349,7 +5436,19 @@ function openOrderModal(orderId) {
     </div>
     <div class="form-section-title">Delivery & tracking</div>
     <div class="form-grid">
+      <div class="form-field full" style="background:var(--surface-2,#faf9f7);border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:0">
+          <input type="checkbox" id="f_click_and_collect" ${order.click_and_collect ? 'checked' : ''} onchange="onClickCollectToggle(this.checked)" style="width:auto;margin:0">
+          <span>Click &amp; collect order (collected from the store — no courier delivery)</span>
+        </label>
+        <div style="font-size:11px;color:var(--ink-faded);margin:5px 0 0 26px">When ticked, the delivery &amp; tracking fields below are hidden. Enter the store collection address instead — the item counts as delivered once that address is filled.</div>
+        <div id="f_click_collect_wrap" style="display:${order.click_and_collect ? 'block' : 'none'};margin-top:8px">
+          <label>Click &amp; collect address (store pickup location)</label>
+          <textarea id="f_collection_address" rows="2" placeholder="The store address where the item is collected" oninput="onCollectionAddressInput()">${escapeHtml(order.collection_address || '')}</textarea>
+        </div>
+      </div>
       <div class="form-field"><label>Order date</label><input type="text" id="f_order_date" value="${escAttr(order.order_date)}" placeholder="DD/MM/YYYY"></div>
+      <div id="f_delivery_info_wrap" style="display:${order.click_and_collect ? 'none' : 'contents'}">
       <div class="form-field"><label>Delivery date</label><input type="text" id="f_delivery_date_text" value="${escAttr(order.delivery_date_text)}" placeholder="DD/MM/YYYY" onchange="onDeliveryDateInput()"></div>
       <div class="form-field full"><label>Tracking parcels <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">each parcel: tracking number + its courier + the items inside it. The first parcel's courier drives the collect-tracking proof steps.</span></label>
         <div id="f_trackings_list"></div>
@@ -5367,6 +5466,7 @@ function openOrderModal(orderId) {
         </div>
       </div>
       <div class="form-field"><label>Delivery photo shows a person? <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">DNA branch</span></label><select id="f_delivery_photo_shows_person"><option value="" ${!order.delivery_photo_shows_person?'selected':''}>(not reviewed)</option><option value="yes" ${order.delivery_photo_shows_person==='yes'?'selected':''}>yes</option><option value="no" ${order.delivery_photo_shows_person==='no'?'selected':''}>no</option></select></div>
+      </div><!-- /f_delivery_info_wrap -->
       <div class="form-field"><label>Item damaged?</label><select id="f_item_damaged"><option value="" ${!order.item_damaged?'selected':''}>(unknown)</option><option value="yes" ${order.item_damaged==='yes'?'selected':''}>yes</option><option value="no" ${order.item_damaged==='no'?'selected':''}>no</option></select></div>
       <div class="form-field full"><label>Damage photo <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">LIT with pic</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
@@ -5749,7 +5849,7 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_confirmation_pdf','rts_label_photo','box_photo','issue_notes','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','collection_address','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_confirmation_pdf','rts_label_photo','box_photo','issue_notes','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
@@ -5766,6 +5866,9 @@ function saveOrderEdit() {
   // Specified (edited) delivery address toggle.
   const useSpecEl = document.getElementById('f_use_specified_address');
   if (useSpecEl) order.use_specified_address = useSpecEl.checked;
+  // Click & collect toggle: no courier delivery — item collected from the store.
+  const ccEl = document.getElementById('f_click_and_collect');
+  if (ccEl) order.click_and_collect = ccEl.checked;
   // Warn (don't block) if the specified address loses the correct postcode — delivery relies on it.
   if (order.use_specified_address && order.specified_address && order.address) {
     const pc = (order.address.match(/[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}/i) || [])[0];
@@ -6959,7 +7062,7 @@ function openStoreForm(name) {
     <div class="form-field"><label>Return label courier <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">informs LIT / LIT with pic</span></label><select id="sf_courier">${rlcOpts}</select></div></div>
     <div class="form-field"><label><input type="checkbox" id="sf_collection" ${chk(r.collection)}> Offers courier collection? (BBM)</label></div>
     <div style="border-top:1px solid var(--line);margin:14px 0;padding-top:12px;font-weight:600">Contact <span style="font-weight:400;color:var(--ink-faded);font-size:12px">&mdash; tick what the store has</span></div>
-    <div class="form-field"><label><input type="checkbox" id="sfc_phone_cb" ${ci.phone?'checked':''} onchange="document.getElementById('sfc_phone').style.display=this.checked?'block':'none'"> Has phone?</label><div id="sfc_phone" style="display:${ci.phone?'block':'none'};margin-top:6px"><input type="text" id="sfc_phone_v" value="${escAttr(ci.phone||'')}" placeholder="+44..."></div></div>
+    <div class="form-field"><label><input type="checkbox" id="sfc_phone_cb" ${ci.phone?'checked':''} onchange="document.getElementById('sfc_phone').style.display=this.checked?'block':'none'"> Has phone?</label><div id="sfc_phone" style="display:${ci.phone?'block':'none'};margin-top:6px"><input type="text" id="sfc_phone_v" value="${escAttr(ci.phone||'')}" placeholder="+44..."><input type="text" id="sfc_hours_v" value="${escAttr(ci.contact_hours||'')}" placeholder="Opening hours, e.g. Mon–Fri 9am–6pm, Sat 9am–5pm" style="margin-top:6px"></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_email_cb" ${ci.email?'checked':''} onchange="document.getElementById('sfc_email').style.display=this.checked?'block':'none'"> Has email?</label><div id="sfc_email" style="display:${ci.email?'block':'none'};margin-top:6px"><input type="text" id="sfc_email_v" value="${escAttr(ci.email||'')}" placeholder="returns@..."></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_contactform_cb" ${ci.contact_form?'checked':''} onchange="document.getElementById('sfc_contactform').style.display=this.checked?'block':'none'"> Has contact form? <span style="font-size:10px;color:var(--ink-faded)">(general customer-service enquiries)</span></label><div id="sfc_contactform" style="display:${ci.contact_form?'block':'none'};margin-top:6px"><input type="text" id="sfc_contactform_v" value="${escAttr(ci.contact_form||'')}" placeholder="https://… contact / help form URL"></div></div>
     <div class="form-field"><label><input type="checkbox" id="sfc_returnsform_cb" ${ci.returns_form?'checked':''} onchange="document.getElementById('sfc_returnsform').style.display=this.checked?'block':'none'"> Has returns form? <span style="font-size:10px;color:var(--ink-faded)">(specifically to start a return)</span></label><div id="sfc_returnsform" style="display:${ci.returns_form?'block':'none'};margin-top:6px"><input type="text" id="sfc_returnsform_v" value="${escAttr(ci.returns_form||'')}" placeholder="https://… returns request / RMA form URL"></div></div>
@@ -7042,7 +7145,7 @@ async function autofillStore(){
     if(f.contact_form){ tick('sfc_contactform_cb','sfc_contactform',true); setV('sfc_contactform_v', f.contact_form); filled.push('contact form'); }
     if(f.returns_form){ tick('sfc_returnsform_cb','sfc_returnsform',true); setV('sfc_returnsform_v', f.returns_form); filled.push('returns form'); }
     // phone / email / chat
-    if(f.phone){ tick('sfc_phone_cb','sfc_phone',true); setV('sfc_phone_v', f.phone); filled.push('phone'); }
+    if(f.phone){ tick('sfc_phone_cb','sfc_phone',true); setV('sfc_phone_v', f.phone); if(f.contact_hours||f.opening_hours) setV('sfc_hours_v', f.contact_hours||f.opening_hours); filled.push('phone'); }
     if(f.email){ tick('sfc_email_cb','sfc_email',true); setV('sfc_email_v', f.email); filled.push('email'); }
     if(f.live_chat){ tick('sfc_chat_cb','sfc_chat',true); setV('sfc_chat_v','yes'); filled.push('chat'); }
     // method-logic flags (mutually exclusive unwanted/damaged)
@@ -7069,6 +7172,7 @@ function saveStoreForm(){
   const contactInfo={
     website: cv('sfc_website_v'),
     phone: document.getElementById('sfc_phone_cb').checked?cv('sfc_phone_v'):'',
+    contact_hours: document.getElementById('sfc_phone_cb').checked?cv('sfc_hours_v'):'',
     email: document.getElementById('sfc_email_cb').checked?cv('sfc_email_v'):'',
     contact_form: document.getElementById('sfc_contactform_cb').checked?cv('sfc_contactform_v'):'',
     returns_form: document.getElementById('sfc_returnsform_cb').checked?cv('sfc_returnsform_v'):'',
