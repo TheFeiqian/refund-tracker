@@ -1082,7 +1082,6 @@ document.addEventListener('DOMContentLoaded', bootHosted);
   <div class="tabs-inner">
     <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
     <button class="tab-btn" data-tab="priority">Priority Queue <span class="count" id="priorityCount">0</span></button>
-    <button class="tab-btn" data-tab="missing">Missing Info <span class="count" id="missingCount">0</span></button>
     <button class="tab-btn" data-tab="inprogress">Delegation <span class="count" id="inProgressCount">0</span></button>
     <button class="tab-btn" data-tab="orders">Orders Database <span class="count" id="ordersCount">0</span></button>
     <button class="tab-btn" data-tab="method">Method Choice</button>
@@ -1173,70 +1172,6 @@ document.addEventListener('DOMContentLoaded', bootHosted);
           </tr>
         </thead>
         <tbody id="priorityTableBody"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class="tab-section" data-tab="missing">
-    <div class="section-intro">
-      <h2>Missing Information Queue</h2>
-      <p>Tasks already get ranked by <code>£ × (1 + days_overdue)</code>. That ranking is meaningless when a task can't even start because a field is null &mdash; ranking a stuck task high doesn't unstick it. This queue reroutes attention to the <strong>blocker</strong>. Chase the missing field; the queue starts flowing again.</p>
-    </div>
-    <div class="formula-card">
-      <div class="formula-eyebrow">Information-priority formula</div>
-      <div class="formula-line">
-        <span class="fm-result">info_priority</span>
-        <span class="fm-eq">=</span>
-        <span class="fm-term">£value</span>
-        <span class="fm-op">×</span>
-        <span class="fm-term">(1 + days_missing)</span>
-        <span class="fm-op">×</span>
-        <span class="fm-term hl">blocking_factor</span>
-      </div>
-      <div class="tier-row">
-        <span class="bf-chip bf10">10</span> <span class="bf-desc">current-task blocker — the order's current-stage task can't fire</span>
-        <span class="bf-chip bf3">3</span> <span class="bf-desc">next-task blocker — fill now so the next stage doesn't stall</span>
-        <span class="bf-chip bf1">1</span> <span class="bf-desc">later-task blocker — backlog, fill when convenient</span>
-        <span class="bf-chip bf0">0</span> <span class="bf-desc">non-blocking — reference / display / audit only</span>
-      </div>
-    </div>
-    <details class="bm-card">
-      <summary>Field blocking matrix <span id="bmCount" style="color:var(--ink-faded);font-weight:400;font-size:12px;margin-left:8px"></span></summary>
-      <div class="bm-head-row">
-        <p class="bm-prose">Rows are order fields, sorted by how early they become essential. Columns are the order's <strong>current stage</strong>. Cells show the blocking factor for the field at that stage. Display-only / audit fields are hidden by default.</p>
-        <button class="primary small" id="bmToggleBtn" onclick="toggleBlockingMatrix()">Show non-blocking fields</button>
-      </div>
-      <div class="bm-table-wrap">
-        <table class="bm-table">
-          <thead><tr>
-            <th class="bm-field-head">Order field</th>
-            <th class="bm-stage-head">S1</th>
-            <th class="bm-stage-head">S2</th>
-            <th class="bm-stage-head">S3</th>
-            <th class="bm-stage-head">S4</th>
-            <th class="bm-stage-head">S5</th>
-            <th class="bm-stage-head">S6</th>
-            <th class="bm-stage-head">S7</th>
-            <th class="bm-stage-head">S8</th>
-            <th class="bm-essential-head">Essential at</th>
-          </tr></thead>
-          <tbody id="bmBody"></tbody>
-        </table>
-      </div>
-    </details>
-    <div class="missing-table-wrap">
-      <table class="missing-table">
-        <thead>
-          <tr>
-            <th>Order</th>
-            <th>Current stage</th>
-            <th>Missing field(s) &middot; blocking factor</th>
-            <th class="r">Top score</th>
-            <th>Person</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="missingTableBody"></tbody>
       </table>
     </div>
   </section>
@@ -7747,7 +7682,6 @@ function saveShopNote(id){ try{ localStorage.setItem('shopnote_'+id, document.ge
 function renderAll() {
   renderDashboard();
   renderPriorityQueue();
-  renderMissingInfo();
   renderDelegation();
   renderOrdersDB();
   renderMethodLogic();
