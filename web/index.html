@@ -3977,12 +3977,26 @@ function delgDetailDeleteNote(ni){
   if(Array.isArray(s[k])){ s[k].splice(ni,1); if(!s[k].length) delete s[k]; saveData(); renderDelegation(); openDelgTaskDetailFor(d.orderId, d.code); }
 }
 function delgIsDateField(f){ return ['retailer_contacted_date','investigation_deadline','refund_received_date','delivery_date_text','order_date','postage_date','collection_date','refund_refused_date','return_label_date','chargeback_date','court_claim_date','hearing_date'].indexOf(f)>=0; }
+function delgToggleDeadlineWrap(val){ var w=document.getElementById('dtf_deadline_wrap'); if(w) w.style.display=(val==='yes')?'block':'none'; }
 // One editable field in the completion-form format: text box / calendar date / dropdown / PDF-or-photo upload.
 function renderDelgEditField(f, order){
   const def = FIELD_DEFS[f] || { label:f, type:'text' };
   const isFile = (typeof FILE_FIELDS!=='undefined') && FILE_FIELDS.indexOf(f)>=0;
   const cur = order[f];
   const done = isFile ? ((typeof hasOrderFile==='function')?hasOrderFile(order,f):(!!order[f+'_file']||!!order[f+'_path'])) : ((typeof fieldFilled==='function')?fieldFilled(order,f):!!cur);
+  // Investigation deadline on the notify-retailer task → match the retailer form's Yes/No + calendar.
+  const _taskCode = (window.__delgDetail && window.__delgDetail.code) || '';
+  if(f==='investigation_deadline' && _taskCode==='contact_retailer_investigation'){
+    const iso = ukToIso(cur||'');
+    const sel = (cur && !order.investigation_deadline_assumed) ? 'yes' : (order.investigation_deadline_assumed ? 'no' : '');
+    const ctrl = '<select id="dtf_deadline_given" onchange="delgToggleDeadlineWrap(this.value)">'
+      + '<option value=""'+(sel===''?' selected':'')+'>(select)</option>'
+      + '<option value="yes"'+(sel==='yes'?' selected':'')+'>Yes — they gave a date</option>'
+      + '<option value="no"'+(sel==='no'?' selected':'')+'>No — assume 5 working days from the contact date</option>'
+      + '</select>'
+      + '<div id="dtf_deadline_wrap" style="display:'+(sel==='yes'?'block':'none')+';margin-top:8px"><label class="delg-edit-lbl" style="font-weight:500">Investigation deadline date</label><input type="date" id="dtf_investigation_deadline" value="'+escAttr(iso)+'"></div>';
+    return '<div class="delg-edit-row"><label class="delg-edit-lbl">'+(done?'✓ ':'')+'Was an investigation deadline given?</label>'+ctrl+'</div>';
+  }
   let control;
   if(isFile){
     const links = done ? '<span class="delg-file-links"><button type="button" class="tiny" onclick="downloadOrderFile(\''+escAttr(order.order_id)+'\',\''+f+'\')">📄 Download</button> <button type="button" class="tiny" onclick="copyOrderFileLink(\''+escAttr(order.order_id)+'\',\''+f+'\')">🔗 Copy link</button></span>' : '';
@@ -4013,7 +4027,9 @@ function delgDetailFileUpload(input, field){
 function delgDetailSaveFields(fieldsCsv){
   const d=window.__delgDetail; if(!d) return;
   const order = DATA.orders.find(o=>o.order_id===d.orderId); if(!order) return;
-  const fields = (fieldsCsv||'').split(',').filter(Boolean);
+  const allFields = (fieldsCsv||'').split(',').filter(Boolean);
+  const dgEl = document.getElementById('dtf_deadline_given');   // Yes/No deadline control present?
+  const fields = (dgEl && allFields.indexOf('investigation_deadline')>=0) ? allFields.filter(f=>f!=='investigation_deadline') : allFields;
   const buf = window.__delgFileBuf||{};
   let changed=0;
   fields.forEach(f=>{
@@ -4035,6 +4051,18 @@ function delgDetailSaveFields(fieldsCsv){
       else if(v){ order[f]=v; changed++; }
     }
   });
+  // Investigation deadline Yes/No (notify-retailer task): No → assume 5 working days from the contact date.
+  if(dgEl && allFields.indexOf('investigation_deadline')>=0){
+    if(dgEl.value==='no'){
+      const cdEl=document.getElementById('dtf_retailer_contacted_date');
+      const contactStr=(cdEl && cdEl.value.trim() && isoToUK(cdEl.value)) || order.retailer_contacted_date || '';
+      const base=parseDateLoose(contactStr) || new Date();
+      order.investigation_deadline=addWorkingDays(base,5); order.investigation_deadline_assumed=true; changed++;
+    } else if(dgEl.value==='yes'){
+      const ddEl=document.getElementById('dtf_investigation_deadline'); const dv=ddEl?(ddEl.value||'').trim():'';
+      if(dv){ order.investigation_deadline=isoToUK(dv); order.investigation_deadline_assumed=false; changed++; }
+    }
+  }
   if(!changed){ showToast('Nothing new to save yet','info'); return; }
   if(typeof applyEvidenceAdvances==='function') applyEvidenceAdvances(order);
   if(typeof stampRequiredFields==='function') stampRequiredFields(order);
