@@ -6610,7 +6610,7 @@ function deriveMethod(o, flags) {
     return {method:'BBM', resolved:'manual flag', blocked_at:'', missing:[], bbm:true,
             collection: isCollectionPath(o, flags), return_label_courier:(f&&f.courier)||storeReturnCourierFromOrders(o.store)||''};
   }
-  const courier = o.inbound_courier || (f && f.inbound_courier) || '';
+  const courier = (typeof normCourier==='function') ? normCourier(o.inbound_courier || (f && f.inbound_courier) || '') : (o.inbound_courier || (f && f.inbound_courier) || '');
   // Under £100: prefer a claim over a real return (explicit-no DNA, then EB, then PEB).
   if ((o.price||0) > 0 && (o.price||0) < 100) {
     if (o.delivery_photo_shows_person === 'no') return {method:'DNA', resolved:'sub100', blocked_at:'', missing:[]};
@@ -6638,8 +6638,8 @@ function buildStoreRegistry() {
   DATA.orders.forEach(o => {
     const s = map[o.store] || (map[o.store] = {name:o.store, orders:[], couriers:[], out_couriers:[]});
     s.orders.push(o);
-    if (o.inbound_courier) s.couriers.push(o.inbound_courier);
-    if (o.outbound_courier) s.out_couriers.push(o.outbound_courier);
+    if (o.inbound_courier) s.couriers.push((typeof normCourier==='function') ? normCourier(o.inbound_courier) : o.inbound_courier);
+    if (o.outbound_courier) s.out_couriers.push((typeof normCourier==='function') ? normCourier(o.outbound_courier) : o.outbound_courier);
   });
   const reg = Object.values(map).map(s => {
     const cc = {}; s.couriers.forEach(c => cc[c] = (cc[c]||0)+1);
@@ -6925,7 +6925,7 @@ const _STEP_ORDER = {BBM:0, Q1:1, Q2:2, Q3:3, Q4:4, Q5:5, Q6:6};
 function renderOrderFlowchart(o, flags) {
   const f = flags[o.store] || {};
   const RET = ['DPD','Royal Mail','Parcelforce'];
-  const courier = o.inbound_courier || f.inbound_courier || '';
+  const courier = (typeof normCourier==='function') ? normCourier(o.inbound_courier || f.inbound_courier || '') : (o.inbound_courier || f.inbound_courier || '');
   const bbm = o.bought_by_mistake === 'yes';
   const collection = isCollectionPath(o, flags);
   // Determine where the order resolves (or null if blocked)
@@ -7368,7 +7368,7 @@ function openStoreByName(name){ document.querySelector('.tab-btn[data-tab="store
 
 // ---------- STORE FORM MODAL ----------
 function openStoreForm(name) {
-  const reg = STORE_REG_CACHE.length?STORE_REG_CACHE:buildStoreRegistry();
+  const reg = buildStoreRegistry();   // always fresh so the form reflects current order data
   const r = name ? reg.find(x=>x.name===name) : {name:'',unwanted:null,damaged:null,collection:false,cat:[],default_courier:'',inbound_courier:'',return_label_courier:'',revenue:null,budget:null,rev_source:'na',missing:['parcel_shop flags','contact_info'],order_count:0,total_value:0};
   window._editStore = r;
   const ci = r.contact_info || (name && CONTACT_DATA[name]) || {};
