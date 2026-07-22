@@ -3167,6 +3167,9 @@ function fmtMoneyFull(n) { if (!n) return '£0.00'; return '£' + n.toLocaleStri
 function fmtDays(d) { if (d < 1) return Math.round(d * 24) + 'h'; return d.toFixed(1) + 'd'; }
 function escapeHtml(s) { if (s == null) return ''; return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 function escAttr(s) { return escapeHtml(s); }
+// Safe to embed inside an inline handler's single-quoted JS string within a double-quoted HTML
+// attribute — escapes backslashes/apostrophes (which escapeHtml alone doesn't), then HTML-escapes.
+function jsAttr(s) { return escapeHtml(String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")); }
 
 function showToast(msg, kind) {
   const t = document.getElementById('toast');
@@ -6641,6 +6644,9 @@ function buildStoreRegistry() {
     if (o.inbound_courier) s.couriers.push((typeof normCourier==='function') ? normCourier(o.inbound_courier) : o.inbound_courier);
     if (o.outbound_courier) s.out_couriers.push((typeof normCourier==='function') ? normCourier(o.outbound_courier) : o.outbound_courier);
   });
+  // Include stores that exist only in flags (manually added, or whose orders were removed)
+  // so they still appear and can be opened/edited.
+  Object.keys(flags||{}).forEach(name=>{ if(name && !map[name]) map[name] = {name, orders:[], couriers:[], out_couriers:[]}; });
   const reg = Object.values(map).map(s => {
     const cc = {}; s.couriers.forEach(c => cc[c] = (cc[c]||0)+1);
     const default_courier = Object.keys(cc).sort((a,b)=>cc[b]-cc[a])[0] || '';
@@ -6648,7 +6654,8 @@ function buildStoreRegistry() {
     const default_return_courier = Object.keys(oc).sort((a,b)=>oc[b]-oc[a])[0] || '';
     const f = flags[s.name];
     const catArr = f ? (Array.isArray(f.cat)?f.cat:(f.cat?[f.cat]:[])) : null;
-    const inbound = (f && f.inbound_courier) || default_courier || '';
+    const savedInb = (f && f.inbound_courier && f.inbound_courier!=='unknown') ? ((typeof normCourier==='function')?normCourier(f.inbound_courier):f.inbound_courier) : '';
+    const inbound = savedInb || default_courier || '';   // order-derived when the store's saved value is blank/unknown
     // ---- method-flag-from-history: infer drop-off flags from past confirmed methods ----
     // LIT seen  -> store provides unwanted-goods label;  LIT with pic seen -> damaged label.
     // LIT wins on conflict; both can be suggested; only a SUGGESTION where the flag
@@ -6677,7 +6684,8 @@ function buildStoreRegistry() {
     const ci = (f && f.contactInfo) || CONTACT_DATA[s.name] || null;
     r.contact_info = ci; r.contact = !!(ci && (ci.phone||ci.email||ci.portal||ci.chat));
     r.website = (ci && ci.website) || (f && f.website) || '';
-    r.return_label_courier = (f && f.courier) || default_return_courier || '';
+    const savedRet = (f && f.courier && f.courier!=='unknown') ? ((typeof normCourier==='function')?normCourier(f.courier):f.courier) : '';
+    r.return_label_courier = savedRet || default_return_courier || '';   // order-derived when blank/unknown
     const miss=[];
     if (!f || !f.assessed) miss.push('store assessment');
     if (r.cat===null||r.cat===undefined||r.cat.length===0) miss.push('item_category');
@@ -7257,7 +7265,7 @@ function mcMissingCard(o, r){
     + '<div style="font-size:12px;opacity:.85">Tree stalls at <strong>'+r.blocked+'</strong>. '+(isStore?'This store hasn\'t been assessed for drop-off returns yet — assess it and every order from it can resolve.':'Supply this one field and the method auto-resolves.')+'</div></div>'
     + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
     + (isStore
-        ? '<button class="primary small" onclick="openStoreByName(\''+escAttr(o.store)+'\')">Assess store</button>'
+        ? '<button class="primary small" onclick="openStoreByName(\''+jsAttr(o.store)+'\')">Assess store</button>'
         : '<button class="primary small" onclick="mcSendInfoTask(\''+escAttr(o.order_id)+'\',\''+escAttr(need)+'\')">📋 Send info request'+(who?(' to '+escapeHtml(who)):'')+'</button>'
           + '<button class="small" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">Open order</button>'
           + '<button class="small" onclick="setBBM(\''+escAttr(o.order_id)+'\',\'yes\',true)" title="mark bought-by-mistake → BBM chain (skips the tree)">Mark BBM</button>')
@@ -7354,7 +7362,7 @@ function renderStores() {
           <div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>Contact info</span>${r.contact?'<span style="color:var(--green)">on file</span>':'<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">missing</span>'}</div>
           ${r.contact_info?`<div style="font-size:12px;color:var(--ink-faded);line-height:1.7;padding:4px 0 0 8px;border-left:2px solid var(--line);margin-left:2px">${r.contact_info.phone?'📞 '+escapeHtml(r.contact_info.phone)+'<br>':''}${r.contact_info.email?'✉️ '+escapeHtml(r.contact_info.email)+'<br>':''}${r.contact_info.portal?'🔗 <a href="'+escAttr(r.contact_info.portal)+'" target="_blank" style="color:var(--blue)">returns portal</a><br>':''}${r.contact_info.chat?'💬 live chat available':''}</div>`:''}
           <div style="margin-top:10px;padding:8px 10px;background:var(--bg-card);border-radius:6px;font-size:13px">Resolves to <span class="badge-mini" style="${methodBadgeClass(r.auto_method)}">${escapeHtml(r.auto_method)}</span>${(r.auto_method.indexOf('LIT')===0 && r.return_label_courier)?' via '+escapeHtml(r.return_label_courier):''} for every order from this store.</div>
-          <button class="primary small" style="margin-top:10px" onclick="event.stopPropagation();openStoreForm('${escAttr(r.name)}')">${r.complete?'Edit store':'Fill missing fields ('+r.missing.length+')'}</button></div>
+          <button class="primary small" style="margin-top:10px" onclick="event.stopPropagation();openStoreForm('${jsAttr(r.name)}')">${r.complete?'Edit store':'Fill missing fields ('+r.missing.length+')'}</button></div>
         </div></td></tr>`;
     }
   });
@@ -7369,13 +7377,15 @@ function openStoreByName(name){ document.querySelector('.tab-btn[data-tab="store
 // ---------- STORE FORM MODAL ----------
 function openStoreForm(name) {
   const reg = buildStoreRegistry();   // always fresh so the form reflects current order data
-  const r = name ? reg.find(x=>x.name===name) : {name:'',unwanted:null,damaged:null,collection:false,cat:[],default_courier:'',inbound_courier:'',return_label_courier:'',revenue:null,budget:null,rev_source:'na',missing:['parcel_shop flags','contact_info'],order_count:0,total_value:0};
+  let r = name ? reg.find(x=>x.name===name) : {name:'',unwanted:null,damaged:null,collection:false,cat:[],default_courier:'',inbound_courier:'',return_label_courier:'',revenue:null,budget:null,rev_source:'na',missing:['parcel_shop flags','contact_info'],order_count:0,total_value:0};
+  // Guard: if the store isn't in the registry for any reason, still open an editable form for it.
+  if(name && !r){ r = {name:name,unwanted:null,damaged:null,collection:false,cat:[],default_courier:'',inbound_courier:'',return_label_courier:'',revenue:null,budget:null,rev_source:'na',missing:[],order_count:0,total_value:0,contact_info:null,website:''}; }
   window._editStore = r;
   const ci = r.contact_info || (name && CONTACT_DATA[name]) || {};
   const chk=v=>v===true?'checked':'';
   const COURIERS=['DPD','Royal Mail','Parcelforce','Evri','DHL','FedEx','UPS','Yodel','Other'];
-  const rlcOpts=['',...COURIERS].map(c=>`<option ${r.return_label_courier===c?'selected':''}>${c||'unknown'}</option>`).join('');
-  const inbOpts=['',...COURIERS].map(c=>`<option ${r.inbound_courier===c?'selected':''}>${c||'unknown'}</option>`).join('');
+  const rlcOpts=['',...COURIERS].map(c=>`<option value="${escAttr(c)}" ${r.return_label_courier===c?'selected':''}>${c||'unknown'}</option>`).join('');
+  const inbOpts=['',...COURIERS].map(c=>`<option value="${escAttr(c)}" ${r.inbound_courier===c?'selected':''}>${c||'unknown'}</option>`).join('');
   const CATS=['clothes','tech','large furniture items','home items'];
   const curCats = Array.isArray(r.cat)?r.cat:(r.cat?[r.cat]:[]);
   const catChecks=CATS.map(c=>`<label style="display:inline-flex;align-items:center;gap:5px;margin:0 14px 6px 0;font-size:13px;font-weight:400"><input type="checkbox" class="sf_cat_cb" value="${c}" ${curCats.includes(c)?'checked':''}> ${c}</label>`).join('');
