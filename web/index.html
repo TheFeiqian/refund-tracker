@@ -1242,7 +1242,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
 
   <section class="tab-section" data-tab="stores">
     <div class="section-intro"><h2>Stores</h2><p><strong>Set up stores first — before placing orders.</strong> A store's return logic and contacts determine what every order from it will need, so completing the store record up front means each new order auto-resolves its method instead of stalling. Every store from order history is here; order tracking links by store name, and courier is auto-derived from past shipments.</p></div>
-    <div class="queue-toolbar"><div class="filter-group" id="storeFilters"></div><button class="primary" onclick="openStoreForm(null)">+ Add store manually</button></div>
+    <div class="queue-toolbar"><div class="filter-group" id="storeFilters"></div><div style="display:flex;gap:10px;align-items:center"><input type="text" id="storeSearch" placeholder="Search stores…" oninput="renderStores()" style="padding:7px 11px;border:1px solid var(--line);border-radius:7px;font-size:13px;min-width:190px"><button class="primary" onclick="openStoreForm(null)">+ Add store manually</button></div></div>
     <div id="storesBody"></div>
   </section>
 
@@ -7339,14 +7339,16 @@ function renderStores() {
   let rows=reg.map((r,i)=>({r,i}));
   if (storeFilter==='setup') rows=rows.filter(x=>!x.r.complete);
   if (storeFilter==='complete') rows=rows.filter(x=>x.r.complete);
-  let h=`<div class="orders-table-wrap"><table class="orders-table"><thead><tr><th>Store</th><th class="r">Orders</th><th class="r">Value</th><th class="r">Revenue</th><th class="r">Budget</th><th>Inbound courier</th><th>Auto-method</th><th>Status</th></tr></thead><tbody>`;
+  const sq = ((document.getElementById('storeSearch')||{}).value || '').trim().toLowerCase();
+  if (sq) rows=rows.filter(x=>(x.r.name||'').toLowerCase().includes(sq));
+  let h=`<div class="orders-table-wrap"><table class="orders-table"><thead><tr><th>Store</th><th class="r">Orders</th><th class="r">Value</th><th class="r">Revenue</th><th class="r">Budget</th><th>Inbound courier</th><th>Return label courier</th><th>Auto-method</th><th>Status</th></tr></thead><tbody>`;
   rows.forEach(({r,i})=>{
     const status=r.complete?'<span class="badge-mini" style="background:var(--green-soft);color:var(--green)">ready</span>':`<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">${r.missing.length} to fill</span>`;
     const budgetCell = r.budget==null ? '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">set revenue</span>' : (r.budget===0 ? '<span style="color:var(--ink-faded)">ineligible</span>' : fmtMoney(r.budget)+(r.budget===3000?' <span style="color:var(--ink-faded);font-size:10px">cap</span>':''));
     const revCell = `${fmtRevenue(r.revenue)}${r.rev_source==='est'?' <span style="color:var(--amber);font-size:10px" title="estimate">~</span>':''}`;
-    h+=`<tr onclick="toggleStore(${i})" style="cursor:pointer"><td class="name">${escapeHtml(r.name)}</td><td class="r val">${r.order_count}</td><td class="r val">${fmtMoney(r.total_value)}</td><td class="r" title="${REV_SOURCE_LABEL[r.rev_source]}">${revCell}</td><td class="r val">${budgetCell}</td><td>${escapeHtml(r.inbound_courier||'—')}</td><td><span class="badge-mini" style="${methodBadgeClass(r.auto_method)}">${escapeHtml(r.auto_method)}</span></td><td>${status}</td></tr>`;
+    h+=`<tr onclick="toggleStore(${i})" style="cursor:pointer"><td class="name">${escapeHtml(r.name)}</td><td class="r val">${r.order_count}</td><td class="r val">${fmtMoney(r.total_value)}</td><td class="r" title="${REV_SOURCE_LABEL[r.rev_source]}">${revCell}</td><td class="r val">${budgetCell}</td><td>${escapeHtml(r.inbound_courier||'—')}</td><td>${escapeHtml(r.return_label_courier||'—')}</td><td><span class="badge-mini" style="${methodBadgeClass(r.auto_method)}">${escapeHtml(r.auto_method)}</span></td><td>${status}</td></tr>`;
     if (storeOpenIdx===i) {
-      h+=`<tr><td colspan="8" style="background:var(--bg);padding:14px 16px">
+      h+=`<tr><td colspan="9" style="background:var(--bg);padding:14px 16px">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
           <div><div style="font-weight:600;margin-bottom:8px">Aggregated from ${r.order_count} order(s)</div>
           <div style="font-size:13px;color:var(--ink-faded);line-height:1.8">Total value: <strong style="color:var(--ink)">${fmtMoney(r.total_value)}</strong><br>Ordered by: ${escapeHtml(r.people.join(', '))}<br>Couriers seen: ${escapeHtml(r.couriers_seen.join(', ')||'—')}<br>Yearly revenue: <strong style="color:var(--ink)">${fmtRevenue(r.revenue)}</strong> <span style="font-size:11px">(${REV_SOURCE_LABEL[r.rev_source]})</span><br>Budget: <strong style="color:var(--ink)">${r.budget==null?'set revenue first':(r.budget===0?'ineligible (revenue under £2M)':fmtMoney(r.budget)+(r.budget===3000?' (capped)':''))}</strong></div>
@@ -7366,6 +7368,7 @@ function renderStores() {
         </div></td></tr>`;
     }
   });
+  if(!rows.length) h+=`<tr><td colspan="9" style="text-align:center;color:var(--ink-faded);padding:22px">${sq?'No stores match “'+escapeHtml(sq)+'”.':'No stores yet.'}</td></tr>`;
   h+=`</tbody></table></div><p style="color:var(--ink-faded);font-size:12px;margin-top:10px">Order tracking links to these records by store name. Courier is auto-derived from past shipments; ${reg.filter(r=>r.default_courier).length} stores already have one. Set a store&rsquo;s flags and its blocked orders auto-resolve to a method.</p>`;
   document.getElementById('storesBody').innerHTML=h;
 }
