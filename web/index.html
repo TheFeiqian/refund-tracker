@@ -669,6 +669,14 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 .delg-info-val{ text-align:right; color:var(--ink-soft); word-break:break-word; }
 .delg-missing-wrap{ display:flex; flex-wrap:wrap; gap:6px; }
 .delg-missing-badge{ background:var(--amber-soft,#fff4e0); color:#8a5a00; font-family:var(--mono); font-size:11px; padding:2px 8px; border-radius:8px; }
+.delg-edit-row{ margin-bottom:12px; }
+.delg-edit-lbl{ display:block; font-size:12.5px; font-weight:600; margin-bottom:4px; color:var(--ink); }
+.delg-edit-row input[type=text], .delg-edit-row input[type=date], .delg-edit-row select, .delg-edit-row textarea{ width:100%; font-size:13px; padding:7px 9px; border:1px solid var(--line); border-radius:7px; font-family:inherit; }
+.delg-file-edit{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.delg-file-prev{ font-size:11px; color:var(--green); font-family:var(--mono); width:100%; }
+.delg-file-links{ display:inline-flex; gap:6px; }
+.delg-save-btn{ margin-top:8px; padding:8px 18px; border:none; border-radius:7px; background:var(--accent); color:#fff; font-size:13px; font-weight:600; cursor:pointer; }
+.delg-save-btn:hover{ opacity:0.9; }
 .delg-cat-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(300px,1fr)); gap:8px 16px; margin-top:10px; }
 .delg-cat-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; }
 .delg-cat-row select{ font-size:12.5px; padding:4px 6px; min-width:130px; }
@@ -3968,35 +3976,95 @@ function delgDetailDeleteNote(ni){
   const s=taskNotesStore(); const k=delgKey(d.orderId,d.code);
   if(Array.isArray(s[k])){ s[k].splice(ni,1); if(!s[k].length) delete s[k]; saveData(); renderDelegation(); openDelgTaskDetailFor(d.orderId, d.code); }
 }
+function delgIsDateField(f){ return ['retailer_contacted_date','investigation_deadline','refund_received_date','delivery_date_text','order_date','postage_date','collection_date','refund_refused_date','return_label_date','chargeback_date','court_claim_date','hearing_date'].indexOf(f)>=0; }
+// One editable field in the completion-form format: text box / calendar date / dropdown / PDF-or-photo upload.
+function renderDelgEditField(f, order){
+  const def = FIELD_DEFS[f] || { label:f, type:'text' };
+  const isFile = (typeof FILE_FIELDS!=='undefined') && FILE_FIELDS.indexOf(f)>=0;
+  const cur = order[f];
+  const done = isFile ? ((typeof hasOrderFile==='function')?hasOrderFile(order,f):(!!order[f+'_file']||!!order[f+'_path'])) : ((typeof fieldFilled==='function')?fieldFilled(order,f):!!cur);
+  let control;
+  if(isFile){
+    const links = done ? '<span class="delg-file-links"><button type="button" class="tiny" onclick="downloadOrderFile(\''+escAttr(order.order_id)+'\',\''+f+'\')">📄 Download</button> <button type="button" class="tiny" onclick="copyOrderFileLink(\''+escAttr(order.order_id)+'\',\''+f+'\')">🔗 Copy link</button></span>' : '';
+    control = '<div class="delg-file-edit"><label class="file-attach-btn"><span>📎 '+(done?'Replace / add file':'Attach PDF or photo')+'</span><input type="file" accept="image/*,application/pdf" multiple onchange="delgDetailFileUpload(this,\''+f+'\')"></label>'+links+'<div id="dtf_prev_'+f+'" class="delg-file-prev"></div></div>';
+  } else if(delgIsDateField(f)){
+    control = '<input type="date" id="dtf_'+f+'" value="'+escAttr(ukToIso(cur||''))+'">';
+  } else if(def.type==='select'){
+    control = '<select id="dtf_'+f+'"><option value="">(choose)</option>'+(def.options||[]).filter(Boolean).map(o=>'<option'+(cur===o?' selected':'')+'>'+escapeHtml(o)+'</option>').join('')+'</select>';
+  } else if(def.type==='textarea'){
+    control = '<textarea id="dtf_'+f+'" rows="2" placeholder="'+escapeHtml(def.help||'')+'">'+escapeHtml(f==='issue_notes'?'':(cur||''))+'</textarea>';
+  } else {
+    control = '<input type="text" id="dtf_'+f+'" value="'+escAttr(cur||'')+'" placeholder="'+escapeHtml(def.help||'')+'">';
+  }
+  return '<div class="delg-edit-row"><label class="delg-edit-lbl">'+(done?'✓ ':'')+escapeHtml(def.label)+'</label>'+control+'</div>';
+}
+function delgDetailFileUpload(input, field){
+  const files = Array.from(input.files||[]); if(!files.length) return;
+  if(!window.__delgFileBuf) window.__delgFileBuf={};
+  if(!Array.isArray(window.__delgFileBuf[field])) window.__delgFileBuf[field]=[];
+  Promise.all(files.map(fl=>readFileAsDataURL(fl).then(d=>({data:d,name:fl.name,type:fl.type})))).then(items=>{
+    items.forEach(it=>window.__delgFileBuf[field].push(it));
+    const prev=document.getElementById('dtf_prev_'+field);
+    if(prev){ const n=window.__delgFileBuf[field].length; prev.textContent='✓ '+n+' file'+(n>1?'s':'')+' ready — click Save'; }
+  });
+}
+// Save the edited fields into the order (mirrors the completion-form submit: dates -> DD/MM/YYYY,
+// files pushed into the order's file array and uploaded on save, triggers re-derived).
+function delgDetailSaveFields(fieldsCsv){
+  const d=window.__delgDetail; if(!d) return;
+  const order = DATA.orders.find(o=>o.order_id===d.orderId); if(!order) return;
+  const fields = (fieldsCsv||'').split(',').filter(Boolean);
+  const buf = window.__delgFileBuf||{};
+  let changed=0;
+  fields.forEach(f=>{
+    const isFile = (typeof FILE_FIELDS!=='undefined') && FILE_FIELDS.indexOf(f)>=0;
+    if(isFile){
+      const fb=buf[f];
+      if(fb && fb.length){
+        const arr=ensureFileArray(order,f);
+        fb.forEach(one=>arr.push({file:one.data, filename:one.name, filetype:one.type, added:Date.now()}));
+        const prim=arr[0]; order[f+'_file']=prim.file; order[f+'_filename']=prim.filename; order[f+'_filetype']=prim.filetype;
+        if(!order[f]) order[f]=prim.filename;
+        if(f==='delivery_photo' && !order.delivery_photo_shows_person) order.delivery_photo_shows_person='no';
+        delete buf[f]; changed++;
+      }
+    } else {
+      const el=document.getElementById('dtf_'+f); if(!el) return;
+      let v=(el.value||'').trim(); if(el.type==='date' && v) v=isoToUK(v);
+      if(f==='issue_notes'){ if(v){ order.issue_notes=(order.issue_notes?order.issue_notes+'\n':'')+v; changed++; } }
+      else if(v){ order[f]=v; changed++; }
+    }
+  });
+  if(!changed){ showToast('Nothing new to save yet','info'); return; }
+  if(typeof applyEvidenceAdvances==='function') applyEvidenceAdvances(order);
+  if(typeof stampRequiredFields==='function') stampRequiredFields(order);
+  saveData(); renderDelegation(); openDelgTaskDetailFor(d.orderId, d.code);
+  showToast('Saved '+changed+' field'+(changed>1?'s':''),'success');
+}
 function openDelgTaskDetailFor(orderId, code){
   const order = DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
   window.__delgDetail = { orderId, code };
+  window.__delgFileBuf = {};   // fresh upload buffer each time the panel opens
   const taskType = (typeof TASK_CATALOG!=='undefined') ? TASK_CATALOG.find(t=>t.code===code) : null;
   const name = (taskType&&taskType.name) || code;
   let desc=''; try{ desc = (typeof generateInstruction==='function' && taskType) ? generateInstruction({type:taskType}, order) : ''; }catch(e){}
-  const fields = (typeof TASK_FORM_FIELDS!=='undefined' && TASK_FORM_FIELDS[code]) ? TASK_FORM_FIELDS[code] : [];
-  const isFileField=(f)=> (typeof FILE_FIELDS!=='undefined') && FILE_FIELDS.indexOf(f)>=0;
-  const hasFile=(f)=> (typeof hasOrderFile==='function') ? hasOrderFile(order,f) : (!!order[f+'_file']||!!order[f+'_path']);
-  const isFilled=(f)=> (typeof fieldFilled==='function') ? fieldFilled(order,f) : !!order[f];
-  const fileBtns=(f)=>'<button class="tiny" onclick="downloadOrderFile(\''+escAttr(orderId)+'\',\''+f+'\')">📄 Download</button> <button class="tiny" onclick="copyOrderFileLink(\''+escAttr(orderId)+'\',\''+f+'\')">🔗 Copy link</button>';
-  // (b) information needed to complete
-  let infoRows = fields.map(f=>{
-    const def=FIELD_DEFS[f]||{label:f};
-    let done, val;
-    if(isFileField(f)){ done=hasFile(f); val= done? fileBtns(f) : '<span class="delg-missing-badge">missing</span>'; }
-    else { done=isFilled(f); val= done? '<span>'+escapeHtml(String(order[f]||''))+'</span>' : '<span class="delg-missing-badge">missing</span>'; }
-    return '<div class="delg-info-row"><span class="delg-info-lbl">'+(done?'✓':'○')+' '+escapeHtml(def.label)+'</span><span class="delg-info-val">'+val+'</span></div>';
-  }).join('') || '<div class="delg-note-empty">No specific fields — follow the description above.</div>';
-  // (c) missing
-  const missing = fields.filter(f=> isFileField(f) ? !hasFile(f) : !isFilled(f));
-  const missingHtml = missing.length
-    ? missing.map(f=>'<span class="delg-missing-badge">'+escapeHtml((FIELD_DEFS[f]||{label:f}).label)+'</span>').join(' ')
-    : '<span style="color:var(--green);font-size:13px">Nothing outstanding — ready to complete.</span>';
-  // all files on the order (links to PDFs etc.)
-  const allFiles=(typeof FILE_FIELDS!=='undefined'?FILE_FIELDS:[]).filter(f=>hasFile(f));
-  const filesHtml = allFiles.length
-    ? allFiles.map(f=>'<div class="delg-info-row"><span class="delg-info-lbl">'+escapeHtml((FIELD_DEFS[f]||{label:f}).label)+'</span><span class="delg-info-val">'+fileBtns(f)+'</span></div>').join('')
-    : '<div class="delg-note-empty">No files uploaded to this order yet.</div>';
+  // (b) information needed to COMPLETE — editable completion fields (queue-form format), minus AI-derived / method-inapplicable
+  const completeFields = ((typeof TASK_FORM_FIELDS!=='undefined' && TASK_FORM_FIELDS[code]) ? TASK_FORM_FIELDS[code] : []).filter(f=>{
+    const dm = (typeof FIELD_MODEL!=='undefined') ? FIELD_MODEL[f] : null;
+    if(dm && dm.aiDerived) return false;
+    if(dm && dm.inForm===false) return false;
+    if(dm && Array.isArray(dm.methods)){ const mk=(typeof methodKey==='function')?methodKey(order):''; if(mk && dm.methods.indexOf(mk)<0) return false; }
+    return true;
+  });
+  const completeHtml = completeFields.length
+    ? completeFields.map(f=>renderDelgEditField(f, order)).join('') + '<button type="button" class="delg-save-btn" onclick="delgDetailSaveFields(\''+completeFields.join(',')+'\')">Save information</button>'
+    : '<div class="delg-note-empty">No specific fields — follow the description above.</div>';
+  // (c) missing information to DO the task — prerequisites (blank if all good), also editable
+  let missingFields = [];
+  try { const c=(typeof classifyForMissingInfo==='function')?classifyForMissingInfo(order):{priority:[]}; missingFields=(c.priority||[]).filter(f=>FIELD_DEFS[f] && completeFields.indexOf(f)<0); }catch(e){}
+  const missingHtml = missingFields.length
+    ? missingFields.map(f=>renderDelgEditField(f, order)).join('') + '<button type="button" class="delg-save-btn" onclick="delgDetailSaveFields(\''+missingFields.join(',')+'\')">Save missing info</button>'
+    : '<div style="color:var(--green);font-size:13px">Nothing missing — you have everything needed to do this task.</div>';
   // (d) troubleshooting notes
   const notes = taskNotesStore()[delgKey(orderId,code)]||[];
   const notesHtml = notes.length
@@ -4005,9 +4073,8 @@ function openDelgTaskDetailFor(orderId, code){
 
   const assignedTo = delgEffectiveAssignee(orderId, code) || 'Unassigned';
   const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre></div>'
-    + '<div class="delg-detail-sec"><div class="delg-detail-h">Information needed to complete</div>'+infoRows+'</div>'
-    + '<div class="delg-detail-sec"><div class="delg-detail-h">Missing information</div><div class="delg-missing-wrap">'+missingHtml+'</div></div>'
-    + '<div class="delg-detail-sec"><div class="delg-detail-h">Files on this order</div>'+filesHtml+'</div>'
+    + '<div class="delg-detail-sec"><div class="delg-detail-h">Information needed to complete — fill in / upload below</div>'+completeHtml+'</div>'
+    + '<div class="delg-detail-sec"><div class="delg-detail-h">Missing information (needed to do the task)</div>'+missingHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Troubleshooting notes</div><div class="delg-notes" style="max-height:220px">'+notesHtml+'</div>'
     + '<div class="delg-note-add"><input type="text" id="delgDetailNote" placeholder="Add a note — flag a problem…" onkeydown="if(event.key===\'Enter\'){delgDetailAddNote();}"><button type="button" class="tiny" onclick="delgDetailAddNote()">Add</button></div></div>';
 
