@@ -4102,8 +4102,16 @@ function openDelgTaskDetailFor(orderId, code){
     ? notes.map((nt,ni)=>'<div class="delg-note"><span class="delg-note-meta">'+escapeHtml(nt.author||'?')+' · '+delgFmtTime(nt.at)+'</span><span class="delg-note-txt">'+escapeHtml(nt.text||'')+'</span><button type="button" class="delg-note-x" title="Delete" onclick="delgDetailDeleteNote('+ni+')">&times;</button></div>').join('')
     : '<div class="delg-note-empty">No notes yet.</div>';
 
+  // Files & documents already on this order (return label, proof of postage, etc.) — download / share links.
+  const _hasF = (f)=> (typeof hasOrderFile==='function') ? hasOrderFile(order,f) : (!!order[f+'_file']||!!order[f+'_path']);
+  const orderFiles = (typeof FILE_FIELDS!=='undefined'?FILE_FIELDS:[]).filter(f=>_hasF(f));
+  const filesHtml = orderFiles.length
+    ? orderFiles.map(f=>'<div class="delg-info-row"><span class="delg-info-lbl">'+escapeHtml((FIELD_DEFS[f]||{label:f}).label)+'</span><span class="delg-info-val"><button type="button" class="tiny" onclick="downloadOrderFile(\''+escAttr(orderId)+'\',\''+f+'\')">📄 Download</button> <button type="button" class="tiny" onclick="copyOrderFileLink(\''+escAttr(orderId)+'\',\''+f+'\')">🔗 Copy link</button></span></div>').join('')
+    : '<div class="delg-note-empty">No files uploaded to this order yet.</div>';
+
   const assignedTo = delgEffectiveAssignee(orderId, code) || 'Unassigned';
   const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre></div>'
+    + '<div class="delg-detail-sec"><div class="delg-detail-h">Files &amp; documents — return label, proof of postage, etc.</div>'+filesHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Information needed to complete — fill in / upload below</div>'+completeHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Missing information (needed to do the task)</div>'+missingHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Troubleshooting notes</div><div class="delg-notes" style="max-height:220px">'+notesHtml+'</div>'
