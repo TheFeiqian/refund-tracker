@@ -677,6 +677,26 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 .delg-file-links{ display:inline-flex; gap:6px; }
 .delg-save-btn{ margin-top:8px; padding:8px 18px; border:none; border-radius:7px; background:var(--accent); color:#fff; font-size:13px; font-weight:600; cursor:pointer; }
 .delg-save-btn:hover{ opacity:0.9; }
+/* Upcoming / unqueued tasks */
+.upcoming-wrap{ border:1px solid var(--line); border-radius:10px; background:var(--bg-card); box-shadow:var(--shadow); overflow:hidden; }
+.upcoming-head{ font-family:var(--serif); font-weight:600; font-size:15px; padding:12px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
+.upcoming-n{ font-family:var(--mono); font-size:12px; background:var(--line-soft); color:var(--ink-soft); padding:1px 8px; border-radius:9px; font-weight:500; }
+.upcoming-alert{ font-family:var(--mono); font-size:11px; background:var(--red-soft); color:var(--red); padding:2px 8px; border-radius:9px; font-weight:600; }
+.upcoming-sub{ font-size:12px; color:var(--ink-faded); padding:8px 16px 4px; }
+.upcoming-list{ padding:6px 10px 12px; }
+.upcoming-row{ display:grid; grid-template-columns:1.3fr 2fr 1.1fr 0.8fr; gap:12px; align-items:center; padding:9px 8px; border-bottom:1px solid var(--line-soft); font-size:13px; cursor:pointer; }
+.upcoming-row:hover:not(.uhead){ background:var(--accent-soft); }
+.upcoming-row.uhead{ cursor:default; font-family:var(--mono); font-size:10px; letter-spacing:0.5px; text-transform:uppercase; color:var(--ink-faded); }
+.upcoming-row.broken{ background:var(--red-soft); }
+.upcoming-row.due{ background:var(--amber-soft,#fff4e0); }
+.up-order{ font-family:var(--mono); font-size:12px; color:var(--accent-deep); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.up-task{ color:var(--ink); }
+.up-triggerlbl{ color:var(--ink-faded); font-size:11.5px; }
+.up-trigger{ color:var(--ink-soft); font-style:italic; font-size:12.5px; }
+.up-date-val{ font-family:var(--mono); font-size:12.5px; }
+.up-date-val.due{ color:var(--red); font-weight:600; }
+.up-alert-badge{ background:var(--red); color:#fff; font-family:var(--mono); font-size:10px; padding:1px 7px; border-radius:8px; }
+.up-person{ font-size:12.5px; color:var(--ink-soft); }
 .delg-cat-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(300px,1fr)); gap:8px 16px; margin-top:10px; }
 .delg-cat-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; }
 .delg-cat-row select{ font-size:12.5px; padding:4px 6px; min-width:130px; }
@@ -1182,6 +1202,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
         <tbody id="priorityTableBody"></tbody>
       </table>
     </div>
+    <div id="upcomingPriority" style="margin-top:22px"></div>
   </section>
 
   <section class="tab-section" data-tab="inprogress">
@@ -1192,6 +1213,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
     <div id="delgAdminPanel" class="admin-only" style="margin-bottom:16px"></div>
     <div id="delgFilterBar" class="delg-filter-bar"></div>
     <div id="delgBoard" class="delg-board"></div>
+    <div id="upcomingDelegation" style="margin-top:22px"></div>
   </section>
 
   <section class="tab-section" data-tab="orders">
@@ -2646,6 +2668,96 @@ function getAllTasksWithPriority() {
   return out;
 }
 
+// ============================================================
+// UPCOMING / UNQUEUED TASKS — orders that are NOT done yet have NO active task in
+// the Priority Queue / Delegation. For each we compute the next task in its method
+// chain + a pending date (a real date when one exists, else the trigger event).
+// Orders with no computable next task are flagged red as "needs attention".
+// ============================================================
+// Does this order have an active task that appears in the queue/Delegation?
+// (choose_method is decided in the Method Choice tab, so it does NOT count as a queue task.)
+function orderHasQueueTask(order){
+  return (getTasksForOrder(order)||[]).some(t=> t.type && t.type.code!=='choose_method');
+}
+function _taskCodeDone(order, code){
+  const tt = TASK_CATALOG.find(t=>t.code===code);
+  if(!tt) return false;
+  return !!((tt.completed_when && tt.completed_when(order)) || (typeof taskMarkedComplete==='function' && taskMarkedComplete(order.order_id, code)));
+}
+// Pending date + trigger label for a given upcoming task code (real date only where one exists).
+function upcomingDateFor(order, code){
+  if(code==='contact_retailer_investigation'){
+    const d = order.contact_retailer_date || (order.postage_date && typeof contactRetailerDateFrom==='function' ? contactRetailerDateFrom(order.postage_date) : '');
+    return d ? { date:d, trigger:'5 working days after posting' } : { date:'', trigger:'once the return is posted' };
+  }
+  if(code==='chase_investigation'){
+    return order.investigation_deadline ? { date:order.investigation_deadline, trigger:'investigation deadline' } : { date:'', trigger:'once the investigation deadline is set / passes' };
+  }
+  if(code==='choose_method') return { date:'', trigger:'awaiting return-method decision (Method Choice tab)' };
+  if(code==='upload_tracking') return { date:'', trigger:'when the item is delivered / tracking added' };
+  if(code==='place_order') return { date:'', trigger:'once the order is placed' };
+  if(code==='generate_return_label'||code==='damage_photo_check'||code==='rts_photograph_label') return { date:'', trigger:'once delivered & return method is chosen' };
+  if(code==='post_return_label') return { date:'', trigger:'once the return label is obtained' };
+  if(code==='bbm_book_label'||code==='bbm_book_collection'||code==='bbm_book') return { date:'', trigger:'once the BBM return is booked' };
+  if(code==='hand_over_collection') return { date:order.collection_date||'', trigger:'on the booked collection date' };
+  if(code==='bbm_confirm_refund') return { date:'', trigger:'awaiting refund confirmation' };
+  return { date:'', trigger:'waiting on the previous step' };
+}
+// Next (upcoming) task for an order that currently has no active queue task.
+function computeUpcomingTask(order){
+  const stage = (typeof computeStage==='function') ? computeStage(order) : 1;
+  if(stage==='done') return null;
+  const isPast = (ds)=>{ if(!ds||typeof parseDateLoose!=='function') return false; const d=parseDateLoose(ds); if(!d) return false; const t=new Date(); t.setHours(23,59,59,999); return d<=t; };
+  const wrap = (code, nameFallback)=>{ const tt=TASK_CATALOG.find(t=>t.code===code); const dt=upcomingDateFor(order,code); return { code, name:(tt&&tt.name)||nameFallback||code, date:dt.date, trigger:dt.trigger, due:isPast(dt.date) }; };
+  // 1) Current-stage tasks + their state (this reflects the order's real progress, unlike raw completion).
+  let all=[]; try{ all = getAllTasksForOrder(order)||[]; }catch(e){}
+  const active = all.filter(t=>t.type && !t.completed && t.prereqs_met);
+  const cm = active.find(t=>t.type.code==='choose_method');   // the one active task hidden from the queue
+  if(cm) return wrap('choose_method', cm.type.name);
+  const waiting = all.filter(t=>t.type && !t.completed && !t.prereqs_met);   // blocked on a prerequisite
+  if(waiting.length) return wrap(waiting[0].type.code, waiting[0].type.name);
+  // 2) Nothing to do at the current stage → walk the method chain for the next not-done step.
+  const mk = (typeof methodKey==='function') ? methodKey(order) : '';
+  const chain = (typeof METHOD_CHAINS!=='undefined' && METHOD_CHAINS[mk]) ? METHOD_CHAINS[mk] : ['place_order','upload_tracking','choose_method'];
+  let nextCode=null;
+  for(const code of chain){ if(!_taskCodeDone(order,code)){ nextCode=code; break; } }
+  if(!nextCode) return { broken:true, reason:'Every step in this order’s chain is marked done, but the order is still open — its stage didn’t advance to Done.' };
+  return wrap(nextCode);
+}
+function computeUpcomingList(){
+  return (DATA.orders||[])
+    .filter(o=> (typeof computeStage==='function' ? computeStage(o)!=='done' : true) && !orderHasQueueTask(o))
+    .map(o=> ({ order:o, up:computeUpcomingTask(o) }))
+    .filter(x=> x.up);
+}
+// Shared HTML for the Upcoming section (Priority Queue + Delegation both render it).
+function renderUpcomingHtml(){
+  const list = computeUpcomingList();
+  const broken = list.filter(x=>x.up.broken);
+  const normal = list.filter(x=>!x.up.broken);
+  if(!list.length) return '<div class="upcoming-wrap"><div class="upcoming-head">⏳ Upcoming &amp; unqueued tasks <span class="upcoming-n">0</span></div><div class="upcoming-sub">Every open order currently has an active task — nothing is falling through.</div></div>';
+  let h = '<div class="upcoming-wrap"><div class="upcoming-head">⏳ Upcoming &amp; unqueued tasks <span class="upcoming-n">'+list.length+'</span>'
+        + (broken.length? ' <span class="upcoming-alert">'+broken.length+' need attention</span>':'') + '</div>'
+        + '<div class="upcoming-sub">Orders not marked done that have no active task in the queue — their next task and when it becomes due.</div>'
+        + '<div class="upcoming-list"><div class="upcoming-row uhead"><div>Order</div><div>Next task</div><div>Due</div><div>Person</div></div>';
+  broken.forEach(x=>{ const o=x.order;
+    h += '<div class="upcoming-row broken" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">'
+      + '<div class="up-order">'+escapeHtml(o.store||'')+' · #'+escapeHtml(o.order_id)+'</div>'
+      + '<div class="up-task"><span class="up-alert-badge">needs attention</span> '+escapeHtml(x.up.reason||'No next task could be determined.')+'</div>'
+      + '<div class="up-date">—</div><div class="up-person">'+escapeHtml(o.person||'')+'</div></div>';
+  });
+  normal.forEach(x=>{ const o=x.order, up=x.up;
+    const dateCell = up.date ? '<span class="up-date-val'+(up.due?' due':'')+'">'+escapeHtml(up.date)+(up.due?' · due now':'')+'</span>' : '<span class="up-trigger">'+escapeHtml(up.trigger||'—')+'</span>';
+    h += '<div class="upcoming-row'+(up.due?' due':'')+'" onclick="openOrderModal(\''+escAttr(o.order_id)+'\')">'
+      + '<div class="up-order">'+escapeHtml(o.store||'')+' · #'+escapeHtml(o.order_id)+'</div>'
+      + '<div class="up-task">'+escapeHtml(up.name)+(up.date && up.trigger?' <span class="up-triggerlbl">('+escapeHtml(up.trigger)+')</span>':'')+'</div>'
+      + '<div class="up-date">'+dateCell+'</div><div class="up-person">'+escapeHtml(o.person||'')+'</div></div>';
+  });
+  h += '</div></div>';
+  return h;
+}
+function renderUpcoming(containerId){ const el=document.getElementById(containerId); if(el) el.innerHTML = renderUpcomingHtml(); }
+
 // Codes of the order's currently-active delegable tasks (not completed, prereqs met, not admin-only).
 // A field whose task is in this set is "completion evidence" for an active queue task and must NOT
 // appear in that order's Missing Info form (the two are separate; see classifyForMissingInfo).
@@ -3951,6 +4063,7 @@ function renderDelegation(){
     h += '<div class="delg-group"><div class="delg-group-h delg-group-other">'+escapeHtml(n)+' <span class="delg-group-n">delegated to others · '+others[n].length+'</span></div><div class="delg-group-body">'+others[n].map(mkCard).join('')+'</div></div>';
   });
   board.innerHTML = h || '<div class="delg-empty">No active tasks right now.</div>';
+  renderUpcoming('upcomingDelegation');
 }
 
 // Copy a shareable link to an order's PRIMARY file (re-signed fresh from its storage path).
@@ -4497,6 +4610,7 @@ function renderPriorityQueue() {
       </tr>
     `;
   }).join('');
+  renderUpcoming('upcomingPriority');
 }
 
 function togglePriorityExpand(rowKey) {
