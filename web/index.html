@@ -749,7 +749,9 @@ function removeEditorMultiFileAt(fieldKey, i){
     if(typeof removeMultiFileAt === 'function') removeMultiFileAt(fieldKey, i); // confirms + saveData + re-points primary
   } else {
     if(!confirm('Remove this file?')) return;
-    order[fieldKey+'_file']=''; order[fieldKey+'_filename']=''; order[fieldKey+'_filetype']='';
+    const _gp = order[fieldKey+'_path'];
+    order[fieldKey+'_file']=''; order[fieldKey+'_filename']=''; order[fieldKey+'_filetype']=''; order[fieldKey+'_path']='';
+    if(typeof _storageRemove==='function') _storageRemove([_gp]);
     if(typeof saveData==='function') saveData();
   }
   const prev = document.getElementById('filepreview_' + fieldKey);
@@ -1184,7 +1186,6 @@ document.addEventListener('DOMContentLoaded', bootHosted);
         <button class="primary small" id="sendAllBtn" style="margin-left:14px" onclick="markAllSentFromQueue()" title="Mark every task currently shown as sent and move them to In Progress">✓ Send all shown</button>
       </div>
     </div>
-    <div id="sentTracker"></div>
     <div class="priority-table-wrap">
       <table class="priority-table">
         <thead>
@@ -3663,9 +3664,14 @@ function removeAttachedFile(fieldKey, ctx) {
   // Removing the attachment also clears the text value — otherwise the filename lingers
   // and the task's completed_when still sees a value, so it won't revert to the prior step.
   order[fieldKey] = '';
+  const _gonePath = order[fieldKey + '_path'];
   delete order[fieldKey + '_file'];
   delete order[fieldKey + '_filename'];
   delete order[fieldKey + '_filetype'];
+  // Clear the durable path AND the multi-file array — else the file re-signs from the path on reload.
+  order[fieldKey + '_path'] = '';
+  delete order[multiFileArrayKey(fieldKey)];
+  if(typeof _storageRemove==='function') _storageRemove([_gonePath]);
   saveData();
   if (ctx === 'form') openMissingInfoForm(formOrderId);
   else openOrderModal(editingOrderId);
@@ -3709,24 +3715,32 @@ async function copyMultiFileLink(fieldKey, i){
   if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(done, ()=>window.prompt('Copy this link:', url)); }
   else { window.prompt('Copy this link:', url); }
 }
+// Best-effort delete of storage objects (so a removed file is truly gone, not just de-referenced).
+async function _storageRemove(paths){ try{ const list=(paths||[]).filter(Boolean); if(typeof sb!=='undefined' && sb && list.length) await sb.storage.from('labels').remove(list); }catch(e){} }
 function removeMultiFileAt(fieldKey, i){
   const order = DATA.orders.find(o => o.order_id === (formOrderId || editingOrderId));
   const arrKey = multiFileArrayKey(fieldKey);
   const arr = order && order[arrKey];
   if(!order || !Array.isArray(arr)) return;
   if(!confirm('Remove this file?')) return;
+  const removedPath = arr[i] && arr[i].path;
   arr.splice(i, 1);
   // Re-point the primary single-field value at the first remaining file (or clear it).
+  // CRITICAL: also update the durable "_path" — otherwise the app re-signs a fresh URL from the
+  // stale path on the next load and the "removed" file reappears.
   if(arr.length){
     const first = arr[0];
     order[fieldKey + '_file'] = first.file || first.path || '';
     order[fieldKey + '_filename'] = first.filename || '';
     order[fieldKey + '_filetype'] = first.filetype || '';
+    order[fieldKey + '_path'] = first.path || '';
   } else {
     delete order[arrKey];
     order[fieldKey + '_file'] = ''; order[fieldKey + '_filename'] = ''; order[fieldKey + '_filetype'] = '';
+    order[fieldKey + '_path'] = '';
     if(order[fieldKey] && /\.(pdf|png|jpe?g|webp|gif)$/i.test(order[fieldKey])) order[fieldKey] = '';
   }
+  _storageRemove([removedPath]);
   saveData();
   if(formOrderId && document.getElementById('formModal') && document.getElementById('formModal').classList.contains('show')) openMissingInfoForm(formOrderId);
   else if(editingOrderId) openOrderModal(editingOrderId);
@@ -4537,7 +4551,6 @@ function renderPriorityQueue() {
   
   document.getElementById('priorityCount').textContent = tasks.length;
   document.getElementById('priorityTotalValue').textContent = fmtMoney(tasks.reduce((s, t) => s + t.score, 0));
-  renderSentTracker();
   
   const tbody = document.getElementById('priorityTableBody');
   if (tasks.length === 0) {
