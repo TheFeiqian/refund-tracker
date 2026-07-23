@@ -3815,7 +3815,8 @@ function showParseToast(updates) {
   if (updates.posted_from) extracted.push('location');
   showToast(`Receipt parsed: ${extracted.join(', ')} — review pre-filled fields`, 'success');
 }
-async function uploadAndParseConfirmation(input) {
+// Step 1: attach the confirmation (NO auto-parse) — just buffer it and enable the Parse button.
+async function uploadAndParseConfirmation(input) {   // (name kept for the Quick-start panel's onchange)
   const file = input.files[0];
   if (!file) return;
   if (file.size > 4 * 1024 * 1024) {
@@ -3823,56 +3824,52 @@ async function uploadAndParseConfirmation(input) {
   }
   const btn = document.getElementById('parseConfirmBtn');
   const status = document.getElementById('parseConfirmStatus');
-  btn.disabled = true;
-  status.innerHTML = '<span style="color:var(--amber)">Reading file...</span>';
-  
   try {
     const dataUrl = await readFileAsDataURL(file);
     if (!window._fileBuffer) window._fileBuffer = {};
     window._fileBuffer.order_confirmation = { data: dataUrl, name: file.name, type: file.type };
-    
-    // Visual: show file is attached
     const preview = document.getElementById('confirmPreview');
     const isImg = file.type.startsWith('image/');
-    preview.innerHTML = `
-      <div class="file-attached-preview">
-        ${isImg ? `<img src="${dataUrl}" alt="${escAttr(file.name)}" style="max-height:80px" onclick="window.open(this.src)">` : `<div class="file-icon-large">📄</div>`}
-        <div class="file-meta">
-          <div class="file-name-line">${escapeHtml(file.name)}</div>
-          <div class="file-meta-line">${escapeHtml(file.type)} · ${fileSizeFmt(file.size)}</div>
-        </div>
-      </div>
-    `;
-    
-    status.innerHTML = '<span style="color:var(--amber)">Calling AI vision endpoint...</span>';
-    
-    /* === PRODUCTION HOOK ============================================================
-       In a real deployment this would POST the file to a server endpoint that
-       invokes Claude's vision API to extract structured order fields. Example:
-       
-         const fd = new FormData();
-         fd.append('file', file);
-         const r = await fetch('/api/parse-order-confirmation', { method: 'POST', body: fd });
-         const parsed = await r.json();
-         // parsed = { store, items, order_number, price, email, phone, address, ... }
-       
-       Then map parsed fields into the form inputs.
-       ============================================================================ */
-    
-    status.innerHTML = '<span style="color:var(--amber)">Reading the confirmation with AI…</span>';
-    // Real AI parse (with any per-store learned hints), then auto-fill the editor fields inline.
-    const storeNow = (document.getElementById('f_store')||{}).value || '';
-    const hints = (typeof parseHintsFor==='function') ? parseHintsFor(storeNow) : '';
-    const parsed = (typeof window.__parseOrderImpl==='function') ? await window.__parseOrderImpl(dataUrl, hints) : {};
-    const n = applyParsedOrderToForm(parsed);
-    if(n){ window._parseActive = true; status.innerHTML = '<span style="color:var(--green)">✓ Filled '+n+' field'+(n>1?'s':'')+' — review &amp; edit, then Save. Corrections are learned for this store.</span>'; }
-    else { status.innerHTML = '<span style="color:var(--amber)">Couldn’t read the fields automatically — the file is attached; fill the form in manually.</span>'; }
-    btn.disabled = false;
-    btn.textContent = 'Re-parse';
+    if (preview) preview.innerHTML =
+      `<div class="file-attached-preview">${isImg ? `<img src="${dataUrl}" alt="${escAttr(file.name)}" style="max-height:80px" onclick="window.open(this.src)">` : `<div class="file-icon-large">📄</div>`}<div class="file-meta"><div class="file-name-line">${escapeHtml(file.name)}</div><div class="file-meta-line">${escapeHtml(file.type)} · ${fileSizeFmt(file.size)}</div></div></div>`;
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; btn.textContent = 'Parse'; }
+    if (status) status.innerHTML = '<span style="color:var(--ink-soft)">File ready — click <strong>Parse</strong> to read the details (optional).</span>';
   } catch (e) {
-    status.innerHTML = `<span style="color:var(--red)">Parse failed: ${escapeHtml(e.message)}</span>`;
-    btn.disabled = false;
+    if (status) status.innerHTML = `<span style="color:var(--red)">Couldn’t read that file: ${escapeHtml(e.message)}</span>`;
   }
+}
+// Step 2: parse the attached confirmation on demand, and OVERRIDE the form details from it.
+async function parseAttachedConfirmation(){
+  const status = document.getElementById('parseConfirmStatus');
+  const btn = document.getElementById('parseConfirmBtn');
+  // Find the confirmation image data: freshly-buffered, an unsaved data-URL on the order, or a saved URL to fetch.
+  let dataUrl = (window._fileBuffer && window._fileBuffer.order_confirmation && window._fileBuffer.order_confirmation.data) || '';
+  const order = (typeof editingOrderId!=='undefined' && editingOrderId) ? DATA.orders.find(o=>o.order_id===editingOrderId) : null;
+  if(!dataUrl && order){
+    const arr = order.order_confirmations;
+    const cand = (typeof order.order_confirmation_file==='string' && order.order_confirmation_file) ||
+                 (Array.isArray(arr) && arr[0] && arr[0].file) || '';
+    if(cand && cand.indexOf('data:')===0) dataUrl = cand;
+    else if(cand && /^https?:/.test(cand)){
+      if(status) status.innerHTML = '<span style="color:var(--amber)">Fetching the attached confirmation…</span>';
+      try{ const r=await fetch(cand); const blob=await r.blob(); dataUrl = await new Promise(res=>{const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.readAsDataURL(blob);}); }catch(e){}
+    }
+  }
+  if(!dataUrl){ showToast('Attach an order confirmation first','info'); if(status) status.innerHTML='<span style="color:var(--amber)">No confirmation attached to parse.</span>'; return; }
+  if(btn){ btn.disabled=true; btn.textContent='Parsing…'; }
+  if(status) status.innerHTML = '<span style="color:var(--amber)">Reading the confirmation with AI…</span>';
+  const storeNow = (document.getElementById('f_store')||{}).value || '';
+  const hints = (typeof parseHintsFor==='function') ? parseHintsFor(storeNow) : '';
+  const parsed = (typeof window.__parseOrderImpl==='function') ? await window.__parseOrderImpl(dataUrl, hints) : {};
+  if(btn){ btn.disabled=false; btn.textContent='Re-parse'; }
+  if(!parsed || !Object.keys(parsed).length){ if(status) status.innerHTML='<span style="color:var(--amber)">Couldn’t read the details — check the file is a clear confirmation, or fill in manually.</span>'; showToast('Could not read that confirmation','info'); return; }
+  // Confirm before overwriting existing details.
+  const hasData = ((document.getElementById('f_store')||{}).value||'').trim() || (typeof OF_ITEMS!=='undefined' && (OF_ITEMS||[]).some(it=>it&&it.name));
+  if(hasData && !confirm('Parse this confirmation and OVERWRITE the current details with what it contains (items, price, card, address, etc.)?')){ if(status) status.innerHTML=''; return; }
+  const n = applyParsedOrderToForm(parsed, true);   // override = true
+  window._parseActive = true;
+  if(status) status.innerHTML = '<span style="color:var(--green)">✓ Updated '+n+' field'+(n===1?'':'s')+' from the confirmation — review &amp; Save. Corrections are learned for this store.</span>';
+  showToast('Parsed — '+n+' field'+(n===1?'':'s')+' updated from the confirmation','success');
 }
 // Hosted AI hook: extract structured fields from an order confirmation (with per-store learning hints).
 window.__parseOrderImpl = async function(dataUrl, hints){
@@ -3888,11 +3885,12 @@ window.__parseOrderImpl = async function(dataUrl, hints){
   }catch(e){ return {}; }
 };
 // Auto-fill the OPEN order editor from parsed fields (only fills empty fields — the user edits inline).
-function applyParsedOrderToForm(parsed){
+// Apply parsed fields to the OPEN order editor. override=true replaces existing details with the
+// non-empty parsed values (and replaces the whole item list); override=false only fills blanks.
+function applyParsedOrderToForm(parsed, override){
   if(!parsed || typeof parsed!=='object') return 0;
   let n=0;
-  // A field counts as "empty" if blank OR the default "0" (price / quantity default to 0 on a new order).
-  const setIf=(id,val)=>{ const el=document.getElementById(id); if(!el || val==null || val==='' || val===0) return; const cur=String(el.value||'').trim(); if(cur==='' || cur==='0'){ el.value=String(val); n++; } };
+  const setIf=(id,val)=>{ const el=document.getElementById(id); if(!el || val==null || val==='' || val===0) return; const cur=String(el.value||'').trim(); if(override || cur==='' || cur==='0'){ if(String(val)!==cur){ el.value=String(val); n++; } } };
   setIf('f_store', parsed.store);
   setIf('f_store_order_number', parsed.store_order_number);
   setIf('f_price', parsed.price);
@@ -3905,7 +3903,7 @@ function applyParsedOrderToForm(parsed){
   setIf('f_total_weight_kg', parsed.total_weight_kg);
   setIf('f_total_volume_l', parsed.total_volume_l);
   // inbound courier (normalise to the dropdown's canonical value)
-  if(parsed.inbound_courier){ const ic=document.getElementById('f_inbound_courier'); if(ic && !ic.value){ ic.value=(typeof normCourier==='function'?normCourier(parsed.inbound_courier):parsed.inbound_courier); n++; } }
+  if(parsed.inbound_courier){ const ic=document.getElementById('f_inbound_courier'); if(ic && (override || !ic.value)){ const v=(typeof normCourier==='function'?normCourier(parsed.inbound_courier):parsed.inbound_courier); if(v && v!==ic.value){ ic.value=v; n++; } } }
   // card used → bank + type selects (composed into "Bank — Type" on save; chargeback bank derives from it)
   if(parsed.card_used){
     const raw=String(parsed.card_used); const cu=(typeof parseCardUsed==='function')?parseCardUsed(raw):{bank:'',type:''};
@@ -3913,17 +3911,19 @@ function applyParsedOrderToForm(parsed){
     if(!bank && typeof UK_BANKS!=='undefined'){ const hit=UK_BANKS.find(b=>raw.toLowerCase().includes(b.toLowerCase())); if(hit) bank=hit; }
     if(!type){ if(/credit/i.test(raw)) type='Credit'; else if(/debit/i.test(raw)) type='Debit'; }
     const bEl=document.getElementById('f_card_bank'), tEl=document.getElementById('f_card_type');
-    if(bEl && bank && !bEl.value){ bEl.value=bank; try{bEl.dispatchEvent(new Event('change'));}catch(e){} n++; }
-    if(tEl && type && !tEl.value){ tEl.value=type; n++; }
+    if(bEl && bank && (override || !bEl.value) && bEl.value!==bank){ bEl.value=bank; try{bEl.dispatchEvent(new Event('change'));}catch(e){} n++; }
+    if(tEl && type && (override || !tEl.value) && tEl.value!==type){ tEl.value=type; n++; }
   }
-  // structured item lines → the per-item table (name, qty, weight, volume, price)
+  // structured item lines → the per-item table. Override REPLACES the whole list
+  // (so "1 item shown but 4 exist" or a wrong list gets corrected to the confirmation's full set).
   if(Array.isArray(parsed.item_lines) && parsed.item_lines.length && typeof OF_ITEMS!=='undefined'){
     const cur = (OF_ITEMS||[]).filter(it=>it && it.name);
-    if(!cur.length){
+    if(override || !cur.length){
       OF_ITEMS = parsed.item_lines.map(it=>({ name:it.name||'', qty:parseInt(it.qty)||1, weight:(it.weight_kg!=null&&it.weight_kg!==0)?it.weight_kg:'', volume:(it.volume_l!=null&&it.volume_l!==0)?it.volume_l:'', price:(it.price!=null&&it.price!==0)?it.price:'' }));
+      if(!OF_ITEMS.length) OF_ITEMS=[{name:'',qty:1,weight:'',volume:'',price:''}];
       if(typeof ofRenderItems==='function') ofRenderItems();
-      if(typeof ofSumWV==='function'){ const s=ofSumWV(); const wEl=document.getElementById('f_total_weight_kg'), vEl=document.getElementById('f_total_volume_l'); if(wEl&&!wEl.value)wEl.value=s.w; if(vEl&&!vEl.value)vEl.value=s.v; }
-      const iq=document.getElementById('f_item_quantity'); if(iq && !iq.value){ iq.value=OF_ITEMS.reduce((x,it)=>x+(it.qty||1),0); }
+      if(typeof ofSumWV==='function'){ const s=ofSumWV(); const wEl=document.getElementById('f_total_weight_kg'), vEl=document.getElementById('f_total_volume_l'); if(wEl&&(override||!wEl.value))wEl.value=s.w; if(vEl&&(override||!vEl.value))vEl.value=s.v; }
+      const iq=document.getElementById('f_item_quantity'); const q=OF_ITEMS.reduce((x,it)=>x+(it.qty||1),0); if(iq && (override||!iq.value)) iq.value=q;
       n++;
     }
   }
@@ -5820,13 +5820,13 @@ function openOrderModal(orderId) {
     ${isNew ? `
       <div class="ai-parse-panel">
         <h4>📄 Quick start: upload order confirmation <span class="ai-badge">AI</span></h4>
-        <p>Drop in a screenshot or PDF of the retailer's confirmation email and the system will pre-fill what it can. You can review and edit everything before saving.</p>
+        <p>Drop in a screenshot or PDF of the retailer's confirmation, then click <strong>Parse</strong> to read the details (optional — parsing overwrites the fields with what's in the confirmation, including all items). Review and edit before saving.</p>
         <div class="ai-parse-controls">
           <label class="file-attach-btn">
             <span>📎 Choose file</span>
             <input type="file" id="confirmUploadInput" accept="image/*,application/pdf" onchange="uploadAndParseConfirmation(this)">
           </label>
-          <button type="button" id="parseConfirmBtn" disabled style="opacity:0.5">Parse</button>
+          <button type="button" class="primary" id="parseConfirmBtn" onclick="parseAttachedConfirmation()" disabled style="opacity:0.5">✨ Parse</button>
           <span id="parseConfirmStatus" style="font-size:11.5px;color:var(--ink-soft);font-family:var(--mono)"></span>
         </div>
         <div id="confirmPreview"></div>
@@ -5932,6 +5932,7 @@ function openOrderModal(orderId) {
         <div style="display:flex;gap:8px;align-items:flex-start">
           <input type="text" id="f_order_confirmation" value="${escAttr(order.order_confirmation)}" placeholder="Confirmation email/number, URL, or attach the PDF" style="flex:1" onchange="onEvidenceProvided('order_confirmation')">
           <label class="file-attach-btn"><span>📎 Attach files</span><input type="file" accept="image/*,application/pdf" multiple onchange="onOrderFieldFileUpload(this, 'order_confirmation')"></label>
+          <button type="button" class="small" onclick="parseAttachedConfirmation()" title="Read the attached order confirmation and fill/override the fields from it" style="white-space:nowrap">✨ Parse</button>
         </div>
         <div id="filepreview_order_confirmation">
           ${order.order_confirmation_file ? `<div class="file-attached-preview">${(order.order_confirmation_filetype || '').startsWith('image/') ? `<img src="${order.order_confirmation_file}" alt="${escAttr(order.order_confirmation_filename || '')}" onclick="window.open(this.src)">` : `<div class="file-icon-large">📄</div>`}<div class="file-meta"><div class="file-name-line">${escapeHtml(order.order_confirmation_filename || '')}</div><div class="file-meta-line">${escapeHtml(order.order_confirmation_filetype || '')}</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="tiny" onclick="viewAttachedFile('order_confirmation', 'order'); event.preventDefault();">View</button><button type="button" class="tiny" onclick="downloadAttachedFile('order_confirmation', 'order'); event.preventDefault();">Download</button><button type="button" class="tiny danger" onclick="removeAttachedFile('order_confirmation', 'order'); event.preventDefault();">Remove</button></div></div></div>` : ''}
