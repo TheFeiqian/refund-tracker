@@ -130,24 +130,33 @@ module.exports = async (req, res) => {
     }
 
     if (task === 'parse_order') {
+      const hints = (payload.hints || '').toString().slice(0, 1500);
       const text = await callAnthropic(apiKey, {
         system: 'You read order confirmation emails, receipts, and invoices (any retailer, any format, possibly a screenshot or a forwarded email). Extract the fields and reply with ONLY a JSON object, no prose. Read the document in whatever orientation/scroll makes the text legible.\n'
           + 'FIELD RULES:\n'
           + '- "store": the retailer / brand / shop name (from the logo, header, sender address, or footer). Just the name, not the legal suffix.\n'
-          + '- "items": EVERY product line in the order, each with its quantity, joined with ", " (e.g. "2x Oak shelf, 1x Bracket set, 3x Wall plug"). If a quantity is shown use it; if not, assume 1. Do not include prices in this field.\n'
-          + '- "item_quantity": the TOTAL number of units across all lines (sum of the quantities) as a number; if you cannot tell, return 0.\n'
+          + '- "item_lines": an ARRAY with ONE object per DISTINCT product line: {"name":"", "qty":1, "price":0, "weight_kg":0, "volume_l":0}. '
+          + 'name = the product name (no quantity prefix); qty = the number of that item ordered (assume 1 if not shown); price = that line\'s price as a plain number if shown (0 if not); '
+          + 'weight_kg = your best ESTIMATE of the typical shipping weight in kilograms of ONE unit of that product; volume_l = your best ESTIMATE of the typical packed volume in litres of ONE unit. '
+          + 'Estimate weight/volume from what the product plainly is (e.g. a phone ≈ 0.4kg/1L, a sofa ≈ 40kg/400L, a t-shirt ≈ 0.2kg/1L). Use 0 only if you truly cannot guess.\n'
+          + '- "items": the SAME lines as a single readable string, each with its quantity, joined with ", " (e.g. "2x Oak shelf, 1x Bracket set"). Do not include prices here.\n'
+          + '- "item_quantity": the TOTAL number of units across all lines (sum of qty) as a number; 0 if you cannot tell.\n'
+          + '- "total_weight_kg": sum across all lines of qty × weight_kg (a number).\n'
+          + '- "total_volume_l": sum across all lines of qty × volume_l (a number).\n'
           + '- "store_order_number": the retailer\'s order / reference number (labelled "Order number", "Order #", "Order ref", "Your order", etc.). Keep any prefix letters/symbols exactly as printed.\n'
           + '- "price": the amount actually PAID — the grand total / order total including delivery (look for "Total", "Order total", "Amount paid", "Grand total"; if several totals appear, take the final payable one). A plain number, no currency symbol or thousands separators.\n'
+          + '- "card_used": the PAYMENT CARD used. If the issuing bank is identifiable, format as "Bank — Type" (e.g. "Monzo — Debit", "Barclays — Credit"). If only the network/last-4 is shown, return that as printed (e.g. "Visa ending 1234", "Mastercard ****5678"). Do NOT invent the bank — return "" if no card detail is shown.\n'
           + '- "delivery_name": the name the parcel is addressed to (the recipient on the delivery/shipping address), if shown.\n'
           + '- "email": the customer email shown on the confirmation, if any.\n'
           + '- "phone": the customer contact phone shown, if any (not the retailer\'s helpline).\n'
-          + '- "address": the FULL delivery/shipping address — every line plus the postcode, joined with ", " (use the DELIVERY address, not the billing address, if both are shown).\n'
+          + '- "address": the FULL delivery/shipping address — every line plus the postcode, joined with ", " (use the DELIVERY address, not the billing address, if both are shown). This is the true internal address.\n'
           + '- "order_date": the order / purchase date PRINTED ON THE DOCUMENT (look for "Order date", "Ordered on", "Placed on", "Date", or the date next to the order number), formatted DD/MM/YYYY. NEVER use today\'s date and NEVER guess — if no order date is visible, return "".\n'
           + '- "inbound_courier": if the confirmation names the DELIVERY courier (Royal Mail | Parcelforce | DPD | Evri | DHL | Yodel | UPS | FedEx | other), return it; else "".\n'
           + '- "inbound_tracking": only if a genuine delivery TRACKING / consignment number is printed (NOT the order number, NOT a phone number) — else "".\n'
-          + 'Return "" (or 0 for numbers) for anything genuinely not present. Do not invent values.',
+          + 'Return "" (or 0 for numbers, [] for arrays) for anything genuinely not present. Do not invent values.'
+          + (hints ? ('\n\nLEARNED NOTES for this retailer from past confirmations a human corrected — use them to parse this retailer\'s format more accurately (they are hints, not overrides; the current document always wins if it clearly differs):\n' + hints) : ''),
         userText: 'Extract from this order confirmation. Return ONLY JSON: '
-          + '{"store":"","items":"every item with its quantity, comma-separated","item_quantity":0,"store_order_number":"","price":0,"delivery_name":"","email":"","phone":"","address":"full delivery address joined with commas","order_date":"DD/MM/YYYY as printed, else empty","inbound_courier":"named delivery courier or empty","inbound_tracking":"genuine tracking only, else empty"}.',
+          + '{"store":"","item_lines":[{"name":"","qty":1,"price":0,"weight_kg":0,"volume_l":0}],"items":"every item with its quantity, comma-separated","item_quantity":0,"total_weight_kg":0,"total_volume_l":0,"store_order_number":"","price":0,"card_used":"bank + type if identifiable, else the network/last-4 as printed, else empty","delivery_name":"","email":"","phone":"","address":"full delivery address joined with commas","order_date":"DD/MM/YYYY as printed, else empty","inbound_courier":"named delivery courier or empty","inbound_tracking":"genuine tracking only, else empty"}.',
         image: { image_base64: payload.image_base64, media_type: payload.media_type },
       });
       return res.status(200).json({ fields: jsonFromText(text) || {} });

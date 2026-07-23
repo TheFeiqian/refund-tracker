@@ -943,6 +943,7 @@ async function hostedFetchAll() {
   try { const { data: co } = await sb.from('app_state').select('value').eq('key','task_category_owner').maybeSingle(); window.__HOSTED.taskCategoryOwner = (co && co.value) ? co.value : {}; } catch (e) { window.__HOSTED.taskCategoryOwner = {}; }
   try { const { data: ta } = await sb.from('app_state').select('value').eq('key','task_assignee').maybeSingle(); window.__HOSTED.taskAssignee = (ta && ta.value) ? ta.value : {}; } catch (e) { window.__HOSTED.taskAssignee = {}; }
   try { const { data: tn } = await sb.from('app_state').select('value').eq('key','task_notes').maybeSingle(); window.__HOSTED.taskNotes = (tn && tn.value) ? tn.value : {}; } catch (e) { window.__HOSTED.taskNotes = {}; }
+  try { const { data: ph } = await sb.from('app_state').select('value').eq('key','parse_hints').maybeSingle(); window.__HOSTED.parseHints = (ph && ph.value) ? ph.value : {}; } catch (e) { window.__HOSTED.parseHints = {}; }
   // Deleted-order IDs — so deletions stick across reloads and aren't re-seeded.
   try {
     const { data: del } = await sb.from('app_state').select('value').eq('key', 'deleted_orders').maybeSingle();
@@ -2283,6 +2284,7 @@ function loadData() {
   DATA._taskCategoryOwner = (window.__HOSTED && window.__HOSTED.taskCategoryOwner) ? window.__HOSTED.taskCategoryOwner : {};
   DATA._taskAssignee = (window.__HOSTED && window.__HOSTED.taskAssignee) ? window.__HOSTED.taskAssignee : {};
   DATA._taskNotes = (window.__HOSTED && window.__HOSTED.taskNotes) ? window.__HOSTED.taskNotes : {};
+  DATA._parseHints = (window.__HOSTED && window.__HOSTED.parseHints) ? window.__HOSTED.parseHints : {};
   normalizeDeliveryDates();
   (DATA.orders || []).forEach(o => stampRequiredFields(o));
   (DATA.orders || []).forEach(o => {
@@ -2540,10 +2542,11 @@ async function hostedSaveTrackers() {
     const coStr = JSON.stringify(DATA._taskCategoryOwner || {});
     const taStr = JSON.stringify(DATA._taskAssignee || {});
     const tnStr = JSON.stringify(DATA._taskNotes || {});
-    const h = ftStr + '|' + tsStr + '|' + dgStr + '|' + epStr + '|' + coStr + '|' + taStr + '|' + tnStr;
+    const phStr = JSON.stringify(DATA._parseHints || {});
+    const h = ftStr + '|' + tsStr + '|' + dgStr + '|' + epStr + '|' + coStr + '|' + taStr + '|' + tnStr + '|' + phStr;
     if (h === __trackersHash) return;
     __trackersHash = h;
-    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; window.__HOSTED.delegatees = DATA._delegatees || []; window.__HOSTED.emailPerson = DATA._emailPerson || {}; window.__HOSTED.taskCategoryOwner = DATA._taskCategoryOwner || {}; window.__HOSTED.taskAssignee = DATA._taskAssignee || {}; window.__HOSTED.taskNotes = DATA._taskNotes || {}; }
+    if (window.__HOSTED) { window.__HOSTED.formTrack = DATA._formTrack || {}; window.__HOSTED.taskStatus = DATA._taskStatus || {}; window.__HOSTED.delegatees = DATA._delegatees || []; window.__HOSTED.emailPerson = DATA._emailPerson || {}; window.__HOSTED.taskCategoryOwner = DATA._taskCategoryOwner || {}; window.__HOSTED.taskAssignee = DATA._taskAssignee || {}; window.__HOSTED.taskNotes = DATA._taskNotes || {}; window.__HOSTED.parseHints = DATA._parseHints || {}; }
     await sb.from('app_state').upsert({ key: 'formTrack', value: DATA._formTrack || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'taskStatus', value: DATA._taskStatus || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'delegatees', value: DATA._delegatees || [] }, { onConflict: 'key' });
@@ -2551,6 +2554,7 @@ async function hostedSaveTrackers() {
     await sb.from('app_state').upsert({ key: 'task_category_owner', value: DATA._taskCategoryOwner || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'task_assignee', value: DATA._taskAssignee || {} }, { onConflict: 'key' });
     await sb.from('app_state').upsert({ key: 'task_notes', value: DATA._taskNotes || {} }, { onConflict: 'key' });
+    await sb.from('app_state').upsert({ key: 'parse_hints', value: DATA._parseHints || {} }, { onConflict: 'key' });
   } catch (e) {}
 }
 function saveData() { if(typeof reconcileInfoRequests==='function') reconcileInfoRequests(); hostedSave(); hostedSaveTrackers(); }
@@ -3841,28 +3845,91 @@ async function uploadAndParseConfirmation(input) {
        Then map parsed fields into the form inputs.
        ============================================================================ */
     
-    // DEMO STUB: simulate latency, then write a placeholder note into a few fields
-    await new Promise(r => setTimeout(r, 1500));
-    
-    const stem = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
-    const setIfEmpty = (id, val) => {
-      const el = document.getElementById(id);
-      if (el && !el.value) el.value = val;
-    };
-    
-    // Try to guess a few things from the filename
-    const numericMatch = stem.match(/\d{4,}/);
-    if (numericMatch) setIfEmpty('f_order_id', numericMatch[0]);
-    if (numericMatch) setIfEmpty('f_store_order_number', numericMatch[0]);
-    setIfEmpty('f_order_date', new Date().toLocaleDateString('en-GB'));
-    
-    status.innerHTML = `<span style="color:var(--green)">✓ Stub-parsed from filename. <strong>Production wiring needed</strong> for real field extraction. Review the prefilled fields and complete the rest manually.</span>`;
+    status.innerHTML = '<span style="color:var(--amber)">Reading the confirmation with AI…</span>';
+    // Real AI parse (with any per-store learned hints), then auto-fill the editor fields inline.
+    const storeNow = (document.getElementById('f_store')||{}).value || '';
+    const hints = (typeof parseHintsFor==='function') ? parseHintsFor(storeNow) : '';
+    const parsed = (typeof window.__parseOrderImpl==='function') ? await window.__parseOrderImpl(dataUrl, hints) : {};
+    const n = applyParsedOrderToForm(parsed);
+    if(n){ window._parseActive = true; status.innerHTML = '<span style="color:var(--green)">✓ Filled '+n+' field'+(n>1?'s':'')+' — review &amp; edit, then Save. Corrections are learned for this store.</span>'; }
+    else { status.innerHTML = '<span style="color:var(--amber)">Couldn’t read the fields automatically — the file is attached; fill the form in manually.</span>'; }
     btn.disabled = false;
     btn.textContent = 'Re-parse';
   } catch (e) {
     status.innerHTML = `<span style="color:var(--red)">Parse failed: ${escapeHtml(e.message)}</span>`;
     btn.disabled = false;
   }
+}
+// Hosted AI hook: extract structured fields from an order confirmation (with per-store learning hints).
+window.__parseOrderImpl = async function(dataUrl, hints){
+  try{
+    const { media_type, image_base64 } = __dataUrlParts(dataUrl);
+    const res = await fetch((window.APP_CONFIG&&window.APP_CONFIG.aiProxyUrl)||'/api/ai', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ task:'parse_order', image_base64, media_type, hints: hints||'' })
+    });
+    if(!res.ok) return {};
+    const data = await res.json();
+    return (data && data.fields) || {};
+  }catch(e){ return {}; }
+};
+// Auto-fill the OPEN order editor from parsed fields (only fills empty fields — the user edits inline).
+function applyParsedOrderToForm(parsed){
+  if(!parsed || typeof parsed!=='object') return 0;
+  let n=0;
+  // A field counts as "empty" if blank OR the default "0" (price / quantity default to 0 on a new order).
+  const setIf=(id,val)=>{ const el=document.getElementById(id); if(!el || val==null || val==='' || val===0) return; const cur=String(el.value||'').trim(); if(cur==='' || cur==='0'){ el.value=String(val); n++; } };
+  setIf('f_store', parsed.store);
+  setIf('f_store_order_number', parsed.store_order_number);
+  setIf('f_price', parsed.price);
+  setIf('f_delivery_name', parsed.delivery_name);
+  setIf('f_email', parsed.email);
+  setIf('f_phone', parsed.phone);
+  setIf('f_address', parsed.address);
+  setIf('f_order_date', parsed.order_date);
+  setIf('f_item_quantity', parsed.item_quantity);
+  setIf('f_total_weight_kg', parsed.total_weight_kg);
+  setIf('f_total_volume_l', parsed.total_volume_l);
+  // inbound courier (normalise to the dropdown's canonical value)
+  if(parsed.inbound_courier){ const ic=document.getElementById('f_inbound_courier'); if(ic && !ic.value){ ic.value=(typeof normCourier==='function'?normCourier(parsed.inbound_courier):parsed.inbound_courier); n++; } }
+  // card used → bank + type selects (composed into "Bank — Type" on save; chargeback bank derives from it)
+  if(parsed.card_used){
+    const raw=String(parsed.card_used); const cu=(typeof parseCardUsed==='function')?parseCardUsed(raw):{bank:'',type:''};
+    let bank=cu.bank, type=cu.type;
+    if(!bank && typeof UK_BANKS!=='undefined'){ const hit=UK_BANKS.find(b=>raw.toLowerCase().includes(b.toLowerCase())); if(hit) bank=hit; }
+    if(!type){ if(/credit/i.test(raw)) type='Credit'; else if(/debit/i.test(raw)) type='Debit'; }
+    const bEl=document.getElementById('f_card_bank'), tEl=document.getElementById('f_card_type');
+    if(bEl && bank && !bEl.value){ bEl.value=bank; try{bEl.dispatchEvent(new Event('change'));}catch(e){} n++; }
+    if(tEl && type && !tEl.value){ tEl.value=type; n++; }
+  }
+  // structured item lines → the per-item table (name, qty, weight, volume, price)
+  if(Array.isArray(parsed.item_lines) && parsed.item_lines.length && typeof OF_ITEMS!=='undefined'){
+    const cur = (OF_ITEMS||[]).filter(it=>it && it.name);
+    if(!cur.length){
+      OF_ITEMS = parsed.item_lines.map(it=>({ name:it.name||'', qty:parseInt(it.qty)||1, weight:(it.weight_kg!=null&&it.weight_kg!==0)?it.weight_kg:'', volume:(it.volume_l!=null&&it.volume_l!==0)?it.volume_l:'', price:(it.price!=null&&it.price!==0)?it.price:'' }));
+      if(typeof ofRenderItems==='function') ofRenderItems();
+      if(typeof ofSumWV==='function'){ const s=ofSumWV(); const wEl=document.getElementById('f_total_weight_kg'), vEl=document.getElementById('f_total_volume_l'); if(wEl&&!wEl.value)wEl.value=s.w; if(vEl&&!vEl.value)vEl.value=s.v; }
+      const iq=document.getElementById('f_item_quantity'); if(iq && !iq.value){ iq.value=OF_ITEMS.reduce((x,it)=>x+(it.qty||1),0); }
+      n++;
+    }
+  }
+  return n;
+}
+// ---- Per-store parsing learning (stored in app_state 'parse_hints') ----
+function parseHintsStore(){ if(!DATA._parseHints) DATA._parseHints={}; return DATA._parseHints; }
+function parseHintsFor(store){ const s=parseHintsStore()[store]; return Array.isArray(s)? s.join('\n') : ''; }
+// After a parsed order is saved (with any human edits), remember the confirmed values as an example
+// for that store, so future confirmations from the same retailer parse more accurately.
+function learnStoreParse(order){
+  if(!order || !order.store) return;
+  const itemsStr = order.items || (typeof ofItemsSummary==='function'? ofItemsSummary() : '');
+  const note = 'Confirmed example — order number "'+(order.store_order_number||'?')+'"'
+    + (order.card_used? '; card "'+order.card_used+'"':'')
+    + (order.delivery_name? '; recipient "'+order.delivery_name+'"':'')
+    + (itemsStr? '; items "'+itemsStr+'"':'')+'.';
+  const s=parseHintsStore(); if(!Array.isArray(s[order.store])) s[order.store]=[];
+  s[order.store]=s[order.store].filter(x=>x!==note); s[order.store].push(note);
+  if(s[order.store].length>3) s[order.store]=s[order.store].slice(-3);
 }
 
 // ============================================================
@@ -5717,6 +5784,7 @@ function renderOrdersDB() {
 function openOrderModal(orderId) {
   // close form modal if open
   if (document.getElementById('formModal').classList.contains('show')) closeMissingInfoForm();
+  window._parseActive = false;   // fresh per order — only set true when a confirmation is parsed here
   editingOrderId = orderId;
   __orderEditDirty = false;
   const isNew = orderId === null;
@@ -6404,6 +6472,8 @@ function saveOrderEdit() {
   // Learn this email → responsible-person association for future auto-fill.
   if (typeof recordEmailPerson === 'function') recordEmailPerson(order.email, order.person);
   logAudit(order, isNew ? 'order_created' : 'order_edited', isNew ? 'Order created' : 'Order details edited');
+  // If this order was auto-filled from a parsed confirmation, learn the confirmed values for this store.
+  if (window._parseActive) { try { learnStoreParse(order); } catch(e){} window._parseActive = false; }
   stampRequiredFields(order);
 
   try {
