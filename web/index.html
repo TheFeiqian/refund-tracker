@@ -1178,6 +1178,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
         </select>
         <label>Person</label><select id="priorityPersonFilter"><option value="all">All</option></select>
         <label>Search</label><input type="text" id="prioritySearch" placeholder="Order ID, store, item...">
+        <label>Month</label><select id="priorityMonth" onchange="renderPriorityQueue()"><option value="all">All months</option></select>
         <label>Group</label><select id="priorityGroupBy"><option value="type">By task type</option><option value="none">Flat (by priority)</option></select>
       </div>
       <div class="filter-group">
@@ -1237,6 +1238,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
           <option value="7">Stage 7</option><option value="8">Stage 8</option><option value="done">Done</option>
         </select>
         <label>Person</label><select id="ordersPersonFilter"><option value="all">All</option></select>
+        <label>Month</label><select id="ordersMonth" onchange="renderOrdersDB()"><option value="all">All months</option></select>
         <label>Search</label><input type="text" id="ordersSearch" placeholder="Order ID, store, item, email...">
       </div>
       <button class="primary" onclick="openOrderModal(null)">+ Add new order</button>
@@ -4503,12 +4505,29 @@ function markAllSentFromQueue(){
   showToast('Sent '+n+' task'+(n>1?'s':'')+' — moved to In Progress', 'success');
   setTimeout(renderAll, 450);   // brief delay so the green state is visible before they move
 }
+// ---- Month-of-order filtering (Priority Queue + Orders DB) ----
+const _MONTH_NAMES=['January','February','March','April','May','June','July','August','September','October','November','December'];
+function orderMonthKey(o){ const d=(typeof parseDateLoose==='function')?parseDateLoose(o&&o.order_date):null; if(!d) return ''; return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function monthLabel(key){ const m=/^(\d{4})-(\d{2})$/.exec(key||''); return m? (_MONTH_NAMES[+m[2]-1]+' '+m[1]) : key; }
+// Rebuild a month <select>'s options from the order dates present, preserving the current selection.
+function populateMonthFilter(selectId){
+  const sel=document.getElementById(selectId); if(!sel) return;
+  const cur=sel.value||'all';
+  const keys=[...new Set((DATA.orders||[]).map(orderMonthKey).filter(Boolean))].sort().reverse();
+  const hasNoDate=(DATA.orders||[]).some(o=>!orderMonthKey(o));
+  sel.innerHTML='<option value="all">All months</option>'
+    + keys.map(k=>'<option value="'+k+'">'+escapeHtml(monthLabel(k))+'</option>').join('')
+    + (hasNoDate?'<option value="__none">(no order date)</option>':'');
+  sel.value = (cur==='all' || (cur!=='__none' && keys.indexOf(cur)<0)) ? 'all' : cur;
+}
 function renderPriorityQueue() {
   const taskFilter = (document.getElementById('priorityTaskFilter')||{}).value || 'all';
   const personFilter = document.getElementById('priorityPersonFilter').value;
   const search = document.getElementById('prioritySearch').value.toLowerCase().trim();
   const groupBy = (document.getElementById('priorityGroupBy')||{}).value || 'type';
-  
+  const monthFilter = (document.getElementById('priorityMonth')||{}).value || 'all';
+  populateMonthFilter('priorityMonth');
+
   // Populate people filter
   const personSel = document.getElementById('priorityPersonFilter');
   if (personSel.options.length <= 1) {
@@ -4530,6 +4549,7 @@ function renderPriorityQueue() {
   const ft = (typeof formTrackStore==='function') ? formTrackStore() : {};
   if (taskFilter !== 'all') tasks = tasks.filter(t => t.task.type.code === taskFilter);
   if (personFilter !== 'all') tasks = tasks.filter(t => t.order.person === personFilter);
+  if (monthFilter !== 'all') tasks = tasks.filter(t => monthFilter === '__none' ? !orderMonthKey(t.order) : orderMonthKey(t.order) === monthFilter);
   if (search) tasks = tasks.filter(t =>
     (t.order.order_id || '').toLowerCase().includes(search) ||
     (t.order.store || '').toLowerCase().includes(search) ||
@@ -5139,52 +5159,6 @@ function _taskLabelFromId(taskId){
   if(t) return {orderId:t.order.order_id, label:(t.task.type?t.task.type.name:'Task')};
   return {orderId:'', label:'Task'};
 }
-function renderSentTracker(){
-  const el=document.getElementById('sentTracker'); if(!el) return;
-  const store=taskStatusStore();
-  const ids=Object.keys(store);
-  const outstanding=[], completed=[];
-  ids.forEach(id=>{ const st=store[id]; if(!st||!st.sent_at) return;
-    const info=_taskLabelFromId(id);
-    const o=DATA.orders.find(x=>x.order_id===info.orderId);
-    const row={id, st, label:info.label, order:o, orderId:info.orderId, days:daysOutstanding(id)};
-    if(st.completed_at) completed.push(row); else outstanding.push(row);
-  });
-  if(!outstanding.length && !completed.length){ el.innerHTML=''; return; }
-  outstanding.sort((a,b)=>b.days-a.days);
-  completed.sort((a,b)=>b.st.completed_at-a.st.completed_at);
-  let h='<details class="method-desc-card" open style="margin-bottom:14px"><summary>Sent task tracker — '+outstanding.length+' outstanding'+(completed.length?(' · '+completed.length+' completed'):'')+'</summary>';
-  h+='<p style="font-size:11.5px;color:var(--ink-faded);margin:2px 0 8px">A task can only be marked done once evidence of completion is uploaded. Use “Add evidence &amp; mark done”. If the wrong proof was uploaded, “Reverse” returns it to outstanding.</p>';
-  if(outstanding.length){
-    h+='<div style="overflow-x:auto"><table class="orders-table"><thead><tr><th>Task</th><th>Order</th><th>Sent to</th><th class="r">Outstanding</th><th>Evidence</th><th></th></tr></thead><tbody>';
-    outstanding.forEach(r=>{
-      const dcol = r.days>=3?'color:var(--red)':r.days>=1?'color:var(--amber)':'color:var(--ink-faded)';
-      const hasEv = !!r.st.evidence;
-      const evCell = hasEv ? '<span style="color:var(--green);font-size:11px" title="'+escAttr(r.st.evidence)+'">✓ evidence</span>' : '<span style="color:var(--ink-faded);font-size:11px">none</span>';
-      h+='<tr><td>'+escapeHtml(r.label)+'</td>'
-        +'<td>'+(r.order?('<span style="cursor:pointer;text-decoration:underline" onclick="openOrderModal(\''+escAttr(r.orderId)+'\')">#'+escapeHtml(r.orderId)+'</span> '+escapeHtml(r.order.store||'')):escapeHtml(r.orderId))+'</td>'
-        +'<td>'+escapeHtml(r.st.sent_to||'?')+'</td>'
-        +'<td class="r" style="'+dcol+'">'+fmtDays(r.days)+'</td>'
-        +'<td>'+evCell+'</td>'
-        +'<td class="r"><button class="small" onclick="trackerAddEvidenceAndComplete(\''+escAttr(r.id)+'\')">Add evidence &amp; mark done</button> <button class="small" onclick="clearTaskSent(\''+escAttr(r.id)+'\');renderAll()" title="un-send">↺</button></td></tr>';
-    });
-    h+='</tbody></table></div>';
-  }
-  if(completed.length){
-    h+='<div style="overflow-x:auto;margin-top:10px"><table class="orders-table"><thead><tr><th>Completed task</th><th>Order</th><th>Evidence</th><th class="r">Took</th><th></th></tr></thead><tbody>';
-    completed.slice(0,20).forEach(r=>{
-      const took = fmtDays((r.st.completed_at - r.st.sent_at)/86400000);
-      h+='<tr><td>'+escapeHtml(r.label)+'</td>'
-        +'<td>'+(r.order?('#'+escapeHtml(r.orderId)+' '+escapeHtml(r.order.store||'')):escapeHtml(r.orderId))+'</td>'
-        +'<td><span style="color:var(--green);font-size:11px" title="'+escAttr(r.st.evidence||'')+'">✓ '+escapeHtml((r.st.evidence||'').slice(0,28))+'</span></td>'
-        +'<td class="r">'+took+'</td>'
-        +'<td class="r"><button class="small" onclick="reverseTaskCompletion(\''+escAttr(r.id)+'\');renderAll()" title="wrong evidence uploaded — send back to outstanding">Reverse</button></td></tr>';
-    });
-    h+='</tbody></table></div>';
-  }
-  h+='</details>';
-  el.innerHTML=h;
-}
 // Prompt for an evidence reference (filename / note / link), attach it, and mark done.
 function trackerAddEvidenceAndComplete(taskId){
   const ev = window.prompt('Describe or name the evidence of completion (e.g. "proof_of_postage.jpg", a tracking number, or a note). The task can only be marked done with this.');
@@ -5746,7 +5720,9 @@ function renderOrdersDB() {
   const stageFilter = document.getElementById('ordersStageFilter').value;
   const personFilter = document.getElementById('ordersPersonFilter').value;
   const search = document.getElementById('ordersSearch').value.toLowerCase().trim();
-  
+  const monthFilter = (document.getElementById('ordersMonth')||{}).value || 'all';
+  populateMonthFilter('ordersMonth');
+
   const personSel = document.getElementById('ordersPersonFilter');
   if (personSel.options.length <= 1) {
     getAllPeople().forEach(p => { const opt = document.createElement('option'); opt.value = p; opt.textContent = p; personSel.appendChild(opt); });
@@ -5755,6 +5731,7 @@ function renderOrdersDB() {
   let orders = DATA.orders.map(o => ({ ...o, stage: computeStage(o) }));
   if (stageFilter !== 'all') orders = orders.filter(o => String(o.stage) === stageFilter);
   if (personFilter !== 'all') orders = orders.filter(o => o.person === personFilter);
+  if (monthFilter !== 'all') orders = orders.filter(o => monthFilter === '__none' ? !orderMonthKey(o) : orderMonthKey(o) === monthFilter);
   if (search) orders = orders.filter(o =>
     (o.order_id || '').toLowerCase().includes(search) ||
     (o.store || '').toLowerCase().includes(search) ||
