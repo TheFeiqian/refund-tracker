@@ -751,6 +751,7 @@ function removeEditorMultiFileAt(fieldKey, i){
     if(!confirm('Remove this file?')) return;
     const _gp = order[fieldKey+'_path'];
     order[fieldKey+'_file']=''; order[fieldKey+'_filename']=''; order[fieldKey+'_filetype']=''; order[fieldKey+'_path']='';
+    if(typeof reverseTriggerForRemovedField==='function') reverseTriggerForRemovedField(order, fieldKey);
     if(typeof _storageRemove==='function') _storageRemove([_gp]);
     if(typeof saveData==='function') saveData();
   }
@@ -2399,6 +2400,41 @@ function applyEvidenceAdvances(order){
   if(t.lit_rts_sent || t.dna_email_sent || t.lit_created || t.rts_created){ t.item_ordered = true; t.item_delivered = true; }
   if(t.refund_unsuccessful || t.refunded){ t.item_ordered = true; t.item_delivered = true; }
 }
+// Is a stage-advancing trigger STILL backed by evidence present on the order? Mirrors the
+// evidence sources used by applyEvidenceAdvances. Used when a file/detail is removed so we
+// only reverse a stage when nothing left proves it.
+function triggerStillEvidenced(order, tk){
+  if(!order || !tk) return false;
+  const has = (f)=> (typeof fieldFilled==='function' ? fieldFilled(order, f) : !!order[f]) || !!order[f+'_path'] || !!order[f+'_file'];
+  const m = order.method || '';
+  switch(tk){
+    case 'item_ordered':  return has('store_order_number');
+    case 'item_delivered':return has('delivery_photo')
+                             || (order.delivery_date_text && typeof deliveryDatePassed==='function' && deliveryDatePassed(order))
+                             || (order.click_and_collect && (typeof fieldFilled==='function' ? fieldFilled(order,'collection_address') : !!order.collection_address));
+    case 'lit_created':   return (m!=='RTS') && has('return_label_pdf');
+    case 'rts_created':   return (m==='RTS' && has('return_label_pdf')) || has('rts_label_photo');
+    case 'lit_rts_sent':  return has('proof_of_postage') || has('collection_handover');
+    case 'refund_unsuccessful': return has('refund_refused_date');
+    case 'refunded':      return has('refund_received_date') || has('refund_confirmation_pdf');
+    default: return true; // triggers not backed by a removable file (e.g. dna_email_sent, refund_successful) are never auto-reversed
+  }
+}
+// When a piece of evidence is removed, drop the stage it proved — UNLESS other evidence still
+// backs it — then re-derive so any remaining later evidence re-implies the earlier stages.
+// This makes stage progression reversible: remove the return-label PDF and the order falls back
+// out of stage 4, remove the delivery proof and it falls back out of stage 3, and so on.
+function reverseTriggerForRemovedField(order, fieldKey){
+  if(!order || !fieldKey) return;
+  const tk = (typeof evidenceTriggerFor==='function') ? evidenceTriggerFor(fieldKey, order.method||'') : null;
+  if(!tk) return;
+  order.triggers = order.triggers || {};
+  if(!order.triggers[tk]) return;              // wasn't set → nothing to reverse
+  if(triggerStillEvidenced(order, tk)) return; // other proof remains → keep the stage
+  order.triggers[tk] = false;
+  if(typeof applyEvidenceAdvances==='function') applyEvidenceAdvances(order); // re-imply earlier stages from any later evidence
+  if(typeof logAudit==='function') try{ logAudit(order, 'stage_reverted', 'Evidence removed ('+fieldKey+') — "'+tk+'" cleared, order returned to its prior stage'); }catch(e){}
+}
 function tickTriggerLive(key){
   if(!key) return;
   const cb=document.getElementById('t_'+key);
@@ -3673,6 +3709,7 @@ function removeAttachedFile(fieldKey, ctx) {
   // Clear the durable path AND the multi-file array — else the file re-signs from the path on reload.
   order[fieldKey + '_path'] = '';
   delete order[multiFileArrayKey(fieldKey)];
+  reverseTriggerForRemovedField(order, fieldKey);
   if(typeof _storageRemove==='function') _storageRemove([_gonePath]);
   saveData();
   if (ctx === 'form') openMissingInfoForm(formOrderId);
@@ -3742,6 +3779,7 @@ function removeMultiFileAt(fieldKey, i){
     order[fieldKey + '_path'] = '';
     if(order[fieldKey] && /\.(pdf|png|jpe?g|webp|gif)$/i.test(order[fieldKey])) order[fieldKey] = '';
   }
+  reverseTriggerForRemovedField(order, fieldKey);
   _storageRemove([removedPath]);
   saveData();
   if(formOrderId && document.getElementById('formModal') && document.getElementById('formModal').classList.contains('show')) openMissingInfoForm(formOrderId);
