@@ -198,6 +198,17 @@ module.exports = async (req, res) => {
       return res.status(200).json({ fields: jsonFromText(text) || {} });
     }
 
+    if (task === 'parse_refusal') {
+      const text = await callAnthropic(apiKey, {
+        system: 'You read an email from an online retailer REFUSING a refund or return. Reply with ONLY a JSON object, no prose.\n'
+          + '- "refund_refused_date": the date the refusal email was sent / dated, format DD/MM/YYYY. Look for the email header "Date:"/"Sent:" line, or a date printed in the message body. If the date is relative or genuinely not present, return "". Never invent or compute a date.\n'
+          + 'If the image/PDF is rotated or multi-page, read it in whatever orientation/order makes the text legible.',
+        userText: 'Extract from this refund-refusal email. Return ONLY JSON: {"refund_refused_date":"DD/MM/YYYY as shown, else empty"}.',
+        image: { image_base64: payload.image_base64, media_type: payload.media_type },
+      });
+      return res.status(200).json({ fields: jsonFromText(text) || {} });
+    }
+
     if (task === 'store_autofill') {
       const text = await callAnthropic(apiKey, {
         webSearch: true,

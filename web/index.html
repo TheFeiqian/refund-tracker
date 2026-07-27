@@ -707,7 +707,7 @@ table.missing-table td.r { text-align: right; font-family: var(--mono); }
 
 <script>
 // ============ Hosted persistence adapter (Supabase) ============
-const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','rts_label_photo','box_photo'];
+const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','refund_refused_pdf','rts_label_photo','box_photo'];
 const SIGNED_URL_TTL = 31536000; // 1 year — file links are re-signed on every load, so this only bounds shared "Copy link" URLs
 // Fields that accept MULTIPLE files (kept in an array `${field}s`, with the first as the primary value).
 const MULTI_FILE_FIELDS = FILE_FIELDS.slice(); // every file field allows multiple uploads
@@ -1478,7 +1478,7 @@ const TASK_CATALOG = [
     completed_when: (o) => fieldFilled(o, 'refund_narrative'),
     completed_via: 'refund_narrative is captured (retailer’s final response written up)',
     info_needed: 'Retailer contact, investigation reference, days since last response',
-    instruction_template: 'Hi {person},\n\nInvestigation with {store} for order {order_id} is past its deadline. Please follow up.\n  Retailer contact: {store_contact}\n  Identify the order with: name on delivery {delivery_name}, phone {phone}, email {email}, order no. {store_order_number}.\n\n  Value: £{price}\n  Investigation deadline: {investigation_deadline}\n  Last update: see thread\n\nIf {store} refuses the refund, request that refusal in writing - we need it for the chargeback.' },
+    instruction_template: 'Hi {person},\n\nInvestigation with {store} for order {order_id} is past its deadline. Please follow up.\n  Retailer contact: {store_contact}\n  Identify the order with: name on delivery {delivery_name}, phone {phone}, email {email}, order no. {store_order_number}.\n\n  Value: £{price}\n  Investigation deadline: {investigation_deadline}\n  Last update: see thread\n\nIf {store} refuses the refund, get that refusal IN WRITING (an email). On the form, tick "Refund refused", upload the refusal email PDF, and set the refusal date — those two together move the order to the chargeback stage. We need that refusal email for the chargeback.' },
 
   { code: 'submit_chargeback', name: 'Submit chargeback', stage: 7, sla: 24, owner_only: true, info_only: false,
     appears_when: 'Refund unsuccessful ✓ (stage 7)',
@@ -1486,7 +1486,7 @@ const TASK_CATALOG = [
     completed_when: (o) => fieldFilled(o, 'chargeback_date'),
     completed_via: 'chargeback_date is filled (chargeback actually filed) — chargeback_bank is auto-derived from the card and no longer counts as "filed"',
     info_needed: 'Bank portal access, evidence package, reason code',
-    instruction_template: '⚠ CARD OWNER ACTION REQUIRED - {person}\n\nSubmit chargeback for {store} order {order_id}.\n\n  Amount: £{price}\n  Reason: Goods returned / not as described, refund refused\n  Bank: {chargeback_bank}\n\nEvidence package to attach:\n  - Order confirmation\n  - Return label / proof of postage: {proof_of_postage}\n  - Retailer correspondence (refusal)\n  - Outbound tracking: {outbound_tracking}\n\nSubmit via your bank portal. Reply with the chargeback reference once filed.' },
+    instruction_template: '⚠ CARD OWNER ACTION REQUIRED - {person}\n\nSubmit chargeback for {store} order {order_id}.\n\n  Amount: £{price}\n  Reason: Goods returned / not as described, refund refused\n  Bank: {chargeback_bank}\n\nEvidence package to attach:\n  - Order confirmation\n  - Return label / proof of postage: {proof_of_postage}\n  - Refund refusal email from the retailer (the PDF collected on the follow-up investigation task — download it from "Files for this task" below)\n  - Outbound tracking: {outbound_tracking}\n\nSubmit via your bank portal. Reply with the chargeback reference once filed.' },
 
   { code: 'file_court_claim', name: 'File court claim', stage: 8, sla: 168, owner_only: false, info_only: false,
     appears_when: 'Manual stage = 8 (no trigger path)',
@@ -1565,6 +1565,7 @@ const FIELD_DEFS = {
   damage_photo: { label: 'Damage photo', required: false, type: 'text', help: 'A picture of the damaged item (for LIT with pic).' },
   bought_by_mistake: { label: 'Bought by mistake (BBM)?', required: false, type: 'select', options: ['', 'no', 'yes'], help: 'Manual flag on delivery review. If yes, runs the LIT chain with a collection option.' },
   refund_refused_date: { label: 'Refund refused date', required: false, type: 'text', help: 'Date of the refusal email (starts the chargeback-owner clock)' },
+  refund_refused_pdf: { label: 'Refund refusal email (PDF)', required: false, type: 'file', help: 'Upload the retailer email that refused the refund — required, with the refusal date, to move the order to chargeback' },
   refund_received_date: { label: 'Refund received date', required: false, type: 'text', help: 'Date of the refund confirmation email (the real completion date)' },
   refund_received_amount: { label: 'Refund received (£)', required: false, type: 'number', help: 'Amount actually refunded' },
   refund_confirmation_pdf: { label: 'Refund confirmation email (PDF)', required: false, type: 'file', help: 'Upload the retailer email confirming the refund' },
@@ -1599,7 +1600,7 @@ const FIELD_ACCESS = {
   method:'admin', bbm_route:'admin', bought_by_mistake:'admin', item_damaged:'admin', return_label_pdf:'admin', return_label_date:'admin',
   outbound_courier:'admin', outbound_tracking:'admin', proof_of_postage:'admin', posted_from:'admin', postage_date:'admin',
   collection_date:'email_holder', collection_time:'email_holder', collection_handover:'email_holder', investigation_deadline:'email_holder', retailer_contacted_date:'email_holder', refund_confirmation_pdf:'email_holder', rts_label_photo:'email_holder', box_photo:'email_holder', issue_notes:'email_holder', retailer_question:'email_holder', retailer_response:'email_holder', refund_narrative:'admin',
-  refund_refused_date:'admin', invoice:'email_holder', delivery_name:'delivery',
+  refund_refused_date:'email_holder', refund_refused_pdf:'email_holder', invoice:'email_holder', delivery_name:'delivery',
 };
 function fieldAccessClass(fieldKey){ return FIELD_ACCESS[fieldKey] || 'admin'; }
 
@@ -1655,6 +1656,7 @@ const FIELD_MODEL = {
   investigation_deadline:{avail:5, methods:M_ESCALATE, inForm:true, task:'contact_retailer_investigation'},
   refund_narrative:{avail:7, methods:M_ESCALATE, inForm:true, task:'submit_chargeback'},  // chargeback evidence only
   refund_refused_date:{avail:6, methods:M_ESCALATE, inForm:true, task:'chase_investigation'},
+  refund_refused_pdf:{avail:6, methods:M_ESCALATE, inForm:true, task:'chase_investigation'},  // refusal email — with the date, the two triggers that move the order to chargeback
   retailer_rebuttal_received:{avail:6, methods:M_ESCALATE, inForm:true, task:'chase_investigation'},
   // stage 7 — chargeback (escalating only; contingent — not guaranteed)
   card_used:{avail:1, methods:'ALL', inForm:true, task:'place_order'},
@@ -1912,7 +1914,8 @@ async function syncSubmissions(){
     if(o.card_used) deriveChargebackBank(o);
     // advance the order: flip the trigger each provided field maps to (same as in-app completion)
     o.triggers = o.triggers || {};
-    touched.forEach(f=>{ const tk = (typeof evidenceTriggerFor==='function') ? evidenceTriggerFor(f, o.method||'') : null; if(tk) o.triggers[tk]=true; });
+    // refund_unsuccessful is excluded — it needs BOTH the refusal date AND PDF; applyEvidenceAdvances (below) decides it.
+    touched.forEach(f=>{ const tk = (typeof evidenceTriggerFor==='function') ? evidenceTriggerFor(f, o.method||'') : null; if(tk && tk !== 'refund_unsuccessful') o.triggers[tk]=true; });
     // a posting task completes on the proof-of-postage UPLOAD even before AI parses the date/tracking
     if((sub.files && sub.files.proof_of_postage) || o.proof_of_postage_path){ o.triggers.lit_rts_sent = true; }
     if(o.delivery_date_text && typeof deliveryDatePassed==='function' && deliveryDatePassed(o)) o.triggers.item_delivered = true;
@@ -2248,7 +2251,7 @@ function mergeOrdersWithInitial(saved) {
   if (!(saved && Array.isArray(saved.orders))) return { orders: initial.filter(io => !deleted[io.order_id]) };
   const savedById = {};
   saved.orders.forEach(o => { if (o && o.order_id) savedById[o.order_id] = o; });
-  const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','rts_label_photo','box_photo'];
+  const FILE_FIELDS = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice','refund_confirmation_pdf','refund_refused_pdf','rts_label_photo','box_photo'];
   const merged = initial.filter(io => !deleted[io.order_id]).map(io => {
     const so = savedById[io.order_id];
     if (!so) return io;
@@ -2366,7 +2369,9 @@ function evidenceTriggerFor(fieldKey, methodVal){
     case 'return_label_pdf': return (methodVal==='RTS') ? 'rts_created' : 'lit_created';
     case 'rts_label_photo': return 'rts_created';
     case 'proof_of_postage': case 'collection_handover': return 'lit_rts_sent';
-    case 'refund_refused_date': return 'refund_unsuccessful';
+    // Refund refusal needs BOTH the date AND the refusal-email PDF (handled jointly in
+    // applyEvidenceAdvances); each maps to refund_unsuccessful so removing either reverses stage 7.
+    case 'refund_refused_date': case 'refund_refused_pdf': return 'refund_unsuccessful';
     case 'refund_received_date': return 'refunded';
     case 'refund_confirmation_pdf': return 'refunded';
     default: return null;
@@ -2394,10 +2399,12 @@ function applyEvidenceAdvances(order){
   // order_confirmation is intentionally NOT here — it's a parsing aid only and must never
   // advance the order or complete a task. Only store_order_number proves the order exists.
   ['store_order_number','delivery_photo','return_label_pdf',
-   'proof_of_postage','collection_handover','rts_label_photo','refund_refused_date','refund_received_date'
+   'proof_of_postage','collection_handover','rts_label_photo','refund_received_date'
   ].forEach(f=>{
     if(present(f)){ const tk = evidenceTriggerFor(f, m); if(tk) t[tk] = true; }
   });
+  // Refund refused → stage 7 requires BOTH mandatory triggers: the refusal date AND the refusal-email PDF.
+  if(present('refund_refused_date') && present('refund_refused_pdf')) t.refund_unsuccessful = true;
   // 3) Monotonic ordering: a later proof implies the earlier stages were reached.
   if(t.item_delivered) t.item_ordered = true;
   if(t.lit_rts_sent || t.dna_email_sent || t.lit_created || t.rts_created){ t.item_ordered = true; t.item_delivered = true; }
@@ -2418,7 +2425,7 @@ function triggerStillEvidenced(order, tk){
     case 'lit_created':   return (m!=='RTS') && has('return_label_pdf');
     case 'rts_created':   return (m==='RTS' && has('return_label_pdf')) || has('rts_label_photo');
     case 'lit_rts_sent':  return has('proof_of_postage') || has('collection_handover');
-    case 'refund_unsuccessful': return has('refund_refused_date');
+    case 'refund_unsuccessful': return has('refund_refused_date') && has('refund_refused_pdf');
     case 'refunded':      return has('refund_received_date') || has('refund_confirmation_pdf');
     default: return true; // triggers not backed by a removable file (e.g. dna_email_sent, refund_successful) are never auto-reversed
   }
@@ -2447,6 +2454,15 @@ function tickTriggerLive(key){
 function onEvidenceProvided(fieldKey){
   const mEl=document.getElementById('f_method');
   const key=evidenceTriggerFor(fieldKey, mEl?mEl.value:'');
+  // Refund refusal is a joint trigger — only tick "refund unsuccessful" once BOTH the refusal
+  // date and the refusal-email PDF are present (mirrors applyEvidenceAdvances).
+  if(key==='refund_unsuccessful'){
+    const order = (typeof editingOrderId!=='undefined' && editingOrderId) ? DATA.orders.find(o=>o.order_id===editingOrderId) : null;
+    const dateEl=document.getElementById('f_refund_refused_date');
+    const hasDate = (dateEl && dateEl.value.trim()) || (order && (fieldFilled(order,'refund_refused_date')||order.refund_refused_date));
+    const hasPdf = order && (fieldFilled(order,'refund_refused_pdf') || order.refund_refused_pdf_file || order.refund_refused_pdf_path);
+    if(!(hasDate && hasPdf)) return;
+  }
   if(key) tickTriggerLive(key);
 }
 
@@ -3337,6 +3353,46 @@ function instructionHasMissingTokens(text) {
 function escapeHtmlPreserveTokens(text) {
   return escapeHtml(text).replace(/\[([\w\s]+) - TBD\]/g, '<span class="placeholder-token">[$1 — TBD]</span>');
 }
+// The PDFs/files each task needs on hand to be carried out (so its description can link them).
+function taskRelevantFiles(code){
+  const M = {
+    place_order:                    ['order_confirmation'],
+    generate_return_label:          ['order_confirmation'],
+    damage_photo_check:             ['order_confirmation','return_label_pdf','damage_photo'],
+    rts_photograph_label:           ['rts_label_photo'],
+    post_return_label:              ['return_label_pdf','proof_of_postage'],
+    bbm_book:                       ['order_confirmation'],
+    bbm_book_label:                 ['order_confirmation','return_label_pdf'],
+    bbm_book_collection:            ['order_confirmation'],
+    hand_over_collection:           ['collection_handover'],
+    contact_retailer_investigation: ['order_confirmation','proof_of_postage','box_photo'],
+    chase_investigation:            ['order_confirmation','proof_of_postage','refund_refused_pdf'],
+    bbm_confirm_refund:             ['proof_of_postage','collection_handover','refund_confirmation_pdf'],
+    submit_chargeback:              ['order_confirmation','proof_of_postage','return_label_pdf','refund_refused_pdf','invoice'],
+    file_court_claim:               ['order_confirmation','proof_of_postage','return_label_pdf','refund_refused_pdf','invoice'],
+  };
+  return M[code] || [];
+}
+// HTML block of clickable links to the task's relevant PDFs (Download + Copy link). Files that
+// haven't been uploaded yet are listed greyed-out so it's clear what the task still needs.
+function taskFilesHtml(order, code){
+  const rel = taskRelevantFiles(code);
+  if(!rel.length || !order) return '';
+  const has = (f)=> (typeof fieldFilled==='function'?fieldFilled(order,f):!!order[f]) || !!order[f+'_path'] || !!order[f+'_file'];
+  const rows = rel.map(f=>{
+    const label = (FIELD_DEFS[f]||{label:f}).label;
+    if(has(f)){
+      return '<div style="display:flex;gap:6px;align-items:center;margin:3px 0;font-size:12px">'
+        + '<span>📎 '+escapeHtml(label)+'</span>'
+        + '<button type="button" class="tiny" onclick="downloadOrderFile(\''+escAttr(order.order_id)+'\',\''+f+'\')">Download</button>'
+        + '<button type="button" class="tiny" onclick="copyOrderFileLink(\''+escAttr(order.order_id)+'\',\''+f+'\')">Copy link</button></div>';
+    }
+    return '<div style="margin:3px 0;font-size:12px;color:var(--ink-faded)">📎 '+escapeHtml(label)+' — not uploaded yet</div>';
+  }).join('');
+  return '<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:10px;background:var(--line-soft)">'
+    + '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-soft);margin-bottom:4px">Files for this task</div>'
+    + rows + '</div>';
+}
 
 // ============================================================
 // FORMATTING
@@ -3871,6 +3927,22 @@ async function parseReturnLabel(file, fileDataUrl) {
   } catch (e) { return {}; }
 }
 
+// Parse a refund REFUSAL email via /api/ai (task: parse_refusal) → {refund_refused_date}.
+async function parseRefusalEmail(file, fileDataUrl) {
+  try {
+    const { media_type, image_base64 } = __dataUrlParts(fileDataUrl);
+    const res = await fetch((window.APP_CONFIG && window.APP_CONFIG.aiProxyUrl) || '/api/ai', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'parse_refusal', image_base64, media_type })
+    });
+    if (!res.ok) return {};
+    const data = await res.json();
+    const f = (data && data.fields) || {};
+    const out = {};
+    if (f.refund_refused_date) out.refund_refused_date = f.refund_refused_date;
+    return out;
+  } catch (e) { return {}; }
+}
 function showParseToast(updates) {
   const extracted = [];
   if (updates.postage_date) extracted.push('date');
@@ -4716,6 +4788,7 @@ function renderPriorityQueue() {
                 ${hasMissing ? '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">HAS MISSING DATA</span>' : ''}
               </div>
               <pre class="instruction-box" id="instr_${rowKey}">${instructionHtml}</pre>
+              ${taskFilesHtml(t.order, t.task.type.code)}
               <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
                 <button class="small" onclick="copyInstruction('${rowKey}'); event.stopPropagation();">Copy text</button>
                 <button class="small" onclick="sendAsForm('${rowKey}','${escAttr(t.task.type.code)}','${escAttr(t.order.order_id)}'); event.stopPropagation();" title="Send the task as a Google Form. The assignee fills the form to mark it complete; their answers flow into the order. They never have to come into this app.">Send as form ↗</button>
@@ -4803,7 +4876,7 @@ const TASK_FORM_FIELDS = {
   hand_over_collection:   ['collection_handover'],
   contact_retailer_investigation: ['retailer_contacted_date', 'investigation_deadline', 'box_photo'],
   bbm_confirm_refund:     ['refund_received_date', 'refund_confirmation_pdf'],
-  chase_investigation:    ['investigation_deadline', 'retailer_question', 'retailer_response', 'issue_notes', 'refund_received_date', 'refund_confirmation_pdf'],
+  chase_investigation:    ['investigation_deadline', 'retailer_question', 'retailer_response', 'issue_notes', 'refund_received_date', 'refund_confirmation_pdf', 'refund_refused_date', 'refund_refused_pdf'],
   submit_chargeback:      ['chargeback_bank', 'chargeback_amount', 'chargeback_reference', 'chargeback_type', 'invoice'],
 };
 
@@ -4830,7 +4903,7 @@ function buildTaskFormLinks(order, taskCode, taskLabel){
   // Fields that may appear on a completion form but must NEVER block it (supplementary evidence /
   // notes). The task's completed_when does not depend on these, so the form stays submittable without
   // them — e.g. the optional "flag any issues" notes, and the refund-confirmation fields.
-  const OPTIONAL_FORM_FIELDS = ['issue_notes','retailer_question','retailer_response','refund_received_date','refund_received_amount','refund_confirmation_pdf','box_photo'];
+  const OPTIONAL_FORM_FIELDS = ['issue_notes','retailer_question','retailer_response','refund_received_date','refund_received_amount','refund_confirmation_pdf','box_photo','refund_refused_date','refund_refused_pdf'];
   // completion fields for this task, minus already-filled, minus AI-derived, minus method-inapplicable
   const fields = (TASK_FORM_FIELDS[taskCode] || []).filter(f => {
     if(fieldFilled(order, f)) return false;
@@ -4968,6 +5041,7 @@ function openTaskForm(taskCode, orderId) {
 
   const brief = generateInstruction({ type: task }, order);
   let h = '<div class="staged-form-explainer" style="white-space:pre-wrap">' + escapeHtmlPreserveTokens(brief) + '</div>';
+  h += taskFilesHtml(order, taskCode);
   if (taskCode === 'damage_photo_check') {
     h += '<div style="background:var(--blue-soft);border-radius:8px;padding:12px 14px;margin:12px 0;font-size:13px;line-height:1.5"><strong>How to photograph this item</strong><br>' + escapeHtml(damageGuidanceFor(order)) + '</div>';
   }
@@ -5009,8 +5083,19 @@ function openTaskForm(taskCode, orderId) {
          + '<input type="date" id="tf_' + f + '" value="' + escAttr(ukToIso(order[f] || '')) + '"></div>';
       return;
     }
+    // Refund refused: mirror the "refund confirmed" tick-box — a "Refund refused" checkbox reveals
+    // the two mandatory triggers (the refusal-email PDF + the refusal date) that move the order to chargeback.
+    if (f === 'refund_refused_date') {
+      h += '<label style="display:flex;align-items:center;gap:8px;margin:12px 0 6px;font-size:13px;cursor:pointer;font-weight:600">'
+         + '<input type="checkbox" id="tf_refund_refused" onchange="var b=document.getElementById(\'tf_refund_refused_block\'); if(b) b.style.display=this.checked?\'block\':\'none\';" style="width:auto;margin:0">'
+         + '<span>Refund refused by the retailer — upload the refusal email to move the order to chargeback</span></label>'
+         + '<div id="tf_refund_refused_block" style="display:none">'
+         + '<div class="form-field full"><label>Refund refusal date <span style="color:var(--red)">*</span> <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">when the refusal email was sent — auto-filled from the PDF where possible</span></label>'
+         + '<input type="date" id="tf_refund_refused_date" value="' + escAttr(ukToIso(order[f] || '')) + '"></div>';
+      return;
+    }
     const def = FIELD_DEFS[f] || { label: f, type: 'text' };
-    const isFile = ['order_confirmation','delivery_photo','damage_photo','return_label_pdf','proof_of_postage','invoice','collection_handover','refund_confirmation_pdf'].includes(f);
+    const isFile = ['order_confirmation','delivery_photo','damage_photo','return_label_pdf','proof_of_postage','invoice','collection_handover','refund_confirmation_pdf','refund_refused_pdf'].includes(f);
     h += '<div class="form-field full"><label>' + escapeHtml(def.label) + (def.required ? ' <span style="color:var(--red)">*</span>' : '') + (f === 'issue_notes' ? ' <span id="tf_issue_notes_reqmark" style="color:var(--red);font-weight:600;display:none">— required (no question &amp; answer logged above)</span>' : '') + '</label>';
     if (isFile) {
       h += '<div style="display:flex;gap:8px;align-items:center">'
@@ -5026,6 +5111,7 @@ function openTaskForm(taskCode, orderId) {
     }
     h += '</div>';
     if (f === 'refund_confirmation_pdf') h += '</div>'; // close tf_refund_block
+    if (f === 'refund_refused_pdf') h += '</div>'; // close tf_refund_refused_block
   });
   h += '</div>';
   document.getElementById('taskFormBody').innerHTML = h;
@@ -5063,6 +5149,15 @@ function taskFormFileUpload(input, field) {
       if (field === 'damage_photo' || field === 'delivery_photo') {
         runVisionCheck(field, last.data).then(res => {
           if (prev) prev.innerHTML = '✓ ' + escapeHtml(count > 1 ? (count + ' files') : last.name) + ' <span style="color:' + (res.ok ? 'var(--green)' : 'var(--amber)') + '">· ' + escapeHtml(res.label) + '</span>';
+        });
+      }
+      // Refusal email: try to auto-extract the refusal date and pre-fill the date picker.
+      if (field === 'refund_refused_pdf') {
+        prev.textContent = '✓ ' + (count > 1 ? (count + ' files') : last.name) + ' — reading refusal date…';
+        parseRefusalEmail(last, last.data).then(upd => {
+          const dEl = document.getElementById('tf_refund_refused_date');
+          if (upd && upd.refund_refused_date && dEl && !dEl.value) { dEl.value = ukToIso(upd.refund_refused_date); }
+          if (prev) prev.innerHTML = '✓ ' + escapeHtml(count > 1 ? (count + ' files') : last.name) + (upd && upd.refund_refused_date ? ' <span style="color:var(--green)">· refusal date ' + escapeHtml(upd.refund_refused_date) + '</span>' : '');
         });
       }
     }
@@ -5104,6 +5199,16 @@ function submitTaskForm() {
       showToast('Log the retailer’s question & your answer, or fill in Notes before completing', 'info');
       return;
     }
+    // Refund refused: BOTH the refusal date and the refusal-email PDF are mandatory to move to chargeback.
+    const refusedEl = document.getElementById('tf_refund_refused');
+    if (refusedEl && refusedEl.checked) {
+      const rd = (document.getElementById('tf_refund_refused_date') || {}).value || '';
+      const hasPdf = !!(fileBuf['refund_refused_pdf'] && fileBuf['refund_refused_pdf'].length) || fieldFilled(order, 'refund_refused_pdf');
+      if (!rd.trim() || !hasPdf) {
+        showToast('Refund refused: attach the refusal email PDF and set the refusal date — both are required to move to chargeback', 'info');
+        return;
+      }
+    }
   }
   const filled = [];
   fields.forEach(f => {
@@ -5141,11 +5246,13 @@ function submitTaskForm() {
   } else if (deadlineGivenEl && deadlineGivenEl.value === 'yes') {
     order.investigation_deadline_assumed = false;
   }
-  // Auto-tick the trigger the evidence maps to (per the evidence→trigger logic)
+  // Auto-tick the trigger the evidence maps to (per the evidence→trigger logic).
+  // refund_unsuccessful is excluded — it needs BOTH the refusal date AND the refusal PDF, so
+  // applyEvidenceAdvances (below) is the single place that decides it.
   order.triggers = order.triggers || {};
   filled.forEach(f => {
     const tk = evidenceTriggerFor(f, order.method || '');
-    if (tk) order.triggers[tk] = true;
+    if (tk && tk !== 'refund_unsuccessful') order.triggers[tk] = true;
   });
   // date-stamp completion (trust system events, not typed dates)
   if (taskCode === 'post_return_label' && !order.postage_date) order.postage_date = todayISO();
@@ -6085,7 +6192,14 @@ function openOrderModal(orderId) {
     </div>
     <div class="form-section-title">Chargeback (if applicable)</div>
     <div class="form-grid">
-      <div class="form-field"><label>Refund refused date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">from refusal email</span></label><input type="date" id="f_refund_refused_date" value="${escAttr(ukToIso(order.refund_refused_date||''))}" onchange="onEvidenceProvided('refund_refused_date')"></div>
+      <div class="form-field"><label>Refund refused date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">from refusal email · required with the PDF to move to chargeback</span></label><input type="date" id="f_refund_refused_date" value="${escAttr(ukToIso(order.refund_refused_date||''))}" onchange="onEvidenceProvided('refund_refused_date')"></div>
+      <div class="form-field full"><label>Refund refusal email (PDF) <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">mandatory · moves the order to chargeback (Stage 7) · shown on the Submit chargeback task</span></label>
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <input type="text" id="f_refund_refused_pdf" value="${escAttr(order.refund_refused_pdf)}" placeholder="Filename, URL, or attach the refusal email" style="flex:1" onchange="onEvidenceProvided('refund_refused_pdf')">
+          <label class="file-attach-btn"><span>📎 Attach files</span><input type="file" accept="image/*,application/pdf" multiple onchange="onOrderFieldFileUpload(this, 'refund_refused_pdf')"></label>
+        </div>
+        <div id="filepreview_refund_refused_pdf"></div>
+      </div>
       <div class="form-field"><label>Chargeback bank</label><input type="text" id="f_chargeback_bank" value="${escAttr(order.chargeback_bank)}"></div>
       <div class="form-field"><label>Chargeback amount</label><input type="text" id="f_chargeback_amount" value="${escAttr(order.chargeback_amount)}"></div>
       <div class="form-field"><label>Chargeback date</label><input type="date" id="f_chargeback_date" value="${escAttr(ukToIso(order.chargeback_date||''))}"></div>
@@ -6420,7 +6534,7 @@ function saveOrderEdit() {
   if (!id) { alert('Order ID is required'); return; }
   const isNew = editingOrderId === null;
   if (isNew && DATA.orders.find(o => o.order_id === id)) { alert('An order with this ID already exists'); return; }
-  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','collection_address','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_confirmation_pdf','rts_label_photo','box_photo','issue_notes','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
+  const fields = ['order_id','store','items','store_order_number','order_confirmation','card_used','card_owner','phone','email','address','specified_address','delivery_name','person','item_quantity','total_weight_kg','total_volume_l','inbound_tracking','inbound_courier','order_date','delivery_date_text','delivery_photo','delivery_photo_shows_person','collection_address','item_damaged','damage_photo','bought_by_mistake','method','bbm_route','return_label_pdf','return_label_date','outbound_tracking','outbound_courier','proof_of_postage','postage_date','posted_from','collection_date','collection_time','collection_handover','investigation_deadline','refund_refused_date','refund_refused_pdf','chargeback_bank','chargeback_amount','chargeback_date','chargeback_type','chargeback_reference','retailer_rebuttal_received','invoice','refund_received_date','refund_received_amount','refund_confirmation_pdf','rts_label_photo','box_photo','issue_notes','refund_narrative','court_claim_ref','court_claim_date','court_fee_paid','defendant_legal_entity','hearing_date','court_outcome','total_recovered','notes'];
   const triggerKeys = ['item_ordered','item_delivered','lit_created','rts_created','dna_email_sent','lit_rts_sent','refund_successful','refund_unsuccessful','refunded'];
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }

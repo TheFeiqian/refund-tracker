@@ -140,6 +140,24 @@ async function onConfirmationFile(input){
   r.readAsDataURL(file);
 }
 
+// Refusal email uploaded on the chase form → try to auto-read the refusal date into the picker.
+async function onRefusalFile(i, input){
+  const file = input.files[0]; if(!file) return;
+  const dateEl = document.querySelector('#refusedWrap input[type=date]');
+  const r = new FileReader();
+  r.onload = async ()=>{
+    try{
+      const dataUrl = r.result; const comma = dataUrl.indexOf(',');
+      const mt = (dataUrl.slice(0,comma).match(/data:([^;]+)/)||[])[1] || file.type || 'application/octet-stream';
+      const b64 = dataUrl.slice(comma+1);
+      const resp = await fetch('/api/ai', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ task:'parse_refusal', image_base64:b64, media_type:mt }) });
+      if(!resp.ok) return;
+      const data = await resp.json(); const f = (data && data.fields) || {};
+      if(f.refund_refused_date && dateEl && !dateEl.value){ dateEl.value = ukToIso(f.refund_refused_date); }
+    }catch(e){}
+  };
+  r.readAsDataURL(file);
+}
 function renderFields(){
   const box = document.getElementById('fields');
   box.innerHTML = DEF.fields.map((f,i)=>{
@@ -155,6 +173,23 @@ function renderFields(){
         + '</select>'
         + '<div id="fld'+i+'_wrap" style="display:none;margin-top:8px"><label style="font-weight:500">Investigation deadline date</label><input type="date" id="fld'+i+'"></div>'
         + help + '</div>';
+    }
+    // Refund refused: gate the two triggers (refusal date + refusal-email PDF) behind a checkbox.
+    // Ticking it reveals both and makes them required; leaving it unticked keeps the form submittable
+    // for the non-refusal outcomes (new deadline, refund confirmed, etc.).
+    if(f.key === 'refund_refused_date' && DEF.task === 'chase_investigation'){
+      return '<div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">'
+        + '<input type="checkbox" id="refusedChk" onchange="var w=document.getElementById(\'refusedWrap\'); if(w) w.style.display=this.checked?\'block\':\'none\'; var p=document.getElementById(\'refusedPdfField\'); if(p) p.style.display=this.checked?\'block\':\'none\';" style="width:auto;margin:0">'
+        + '<span>Refund refused by the retailer — upload the refusal email to move to chargeback</span></label>'
+        + '<div id="refusedWrap" style="display:none;margin-top:8px">'
+        + '<label style="font-weight:500">Refund refusal date *</label><input type="date" id="fld'+i+'">'
+        + '<div class="help">When the refusal email was sent — auto-filled from the PDF where possible.</div></div></div>';
+    }
+    if(f.key === 'refund_refused_pdf' && DEF.task === 'chase_investigation'){
+      return '<div class="field" id="refusedPdfField" style="display:none"><label>Refund refusal email (PDF) *</label>'
+        + '<label class="filebtn">📎 <span id="fbtn'+i+'">Choose file</span>'
+        + '<input type="file" accept="'+(f.accept||'image/*,application/pdf')+'" onchange="onFile('+i+', this); onRefusalFile('+i+', this)"></label>'
+        + '<div class="filename" id="fname'+i+'"></div></div>';
     }
     let input;
     if(f.kind === 'file'){
@@ -228,6 +263,13 @@ async function submitForm(){
   if(DEF.task === 'chase_investigation'){
     const q=(answers['retailer_question']||'').trim(), a=(answers['retailer_response']||'').trim(), n=(answers['issue_notes']||'').trim();
     if(!q && !a && !n){ return fail('Please log the retailer’s question & your answer, or fill in Notes.'); }
+    // Refund refused: both the refusal date and the refusal-email PDF are required when the box is ticked.
+    const refusedChk = document.getElementById('refusedChk');
+    if(refusedChk && refusedChk.checked){
+      const hasDate = !!(answers['refund_refused_date'] && String(answers['refund_refused_date']).trim());
+      const hasPdf = fileUploads.some(u=>u.key==='refund_refused_pdf');
+      if(!hasDate || !hasPdf){ return fail('Refund refused: attach the refusal email PDF and set the refusal date — both are required to move to chargeback.'); }
+    }
   }
   btn.disabled = true; btn.textContent = 'Submitting…';
   try{
