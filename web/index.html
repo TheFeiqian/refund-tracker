@@ -952,6 +952,11 @@ async function hostedFetchAll() {
     const { data: del } = await sb.from('app_state').select('value').eq('key', 'deleted_orders').maybeSingle();
     window.__HOSTED.deletedOrders = (del && del.value) ? del.value : [];
   } catch (e) { window.__HOSTED.deletedOrders = []; }
+  // Deleted-store names — so a deleted store doesn't reappear on refresh even if RLS blocks its row delete.
+  try {
+    const { data: dels } = await sb.from('app_state').select('value').eq('key', 'deleted_stores').maybeSingle();
+    window.__HOSTED.deletedStores = (dels && dels.value) ? dels.value : [];
+  } catch (e) { window.__HOSTED.deletedStores = []; }
   // Defensive: drop any deleted orders that may still be in the DB from before this fix.
   if (window.__HOSTED.deletedOrders.length) {
     const dset = {}; window.__HOSTED.deletedOrders.forEach(id => dset[id] = true);
@@ -2284,6 +2289,7 @@ function loadData() {
     return base.filter(o => !dset[o.order_id]);
   })() };
   DATA._deletedOrders = (window.__HOSTED && window.__HOSTED.deletedOrders) ? window.__HOSTED.deletedOrders.slice() : [];
+  DATA._deletedStores = (window.__HOSTED && window.__HOSTED.deletedStores) ? window.__HOSTED.deletedStores.slice() : [];
   DATA._burndown = (window.__HOSTED && window.__HOSTED.burndown) ? window.__HOSTED.burndown : [];
   DATA._formTrack = (window.__HOSTED && window.__HOSTED.formTrack) ? window.__HOSTED.formTrack : {};
   DATA._taskStatus = (window.__HOSTED && window.__HOSTED.taskStatus) ? window.__HOSTED.taskStatus : {};
@@ -4173,7 +4179,7 @@ function delgCurrentUserName(){ const p=(typeof personByEmail==='function')?pers
 function delgIsAdmin(){ return (typeof VIEW_ROLE!=='undefined') ? VIEW_ROLE==='admin' : true; }
 function delgFmtTime(ms){ if(!ms) return ''; try{ const d=new Date(ms); const pad=x=>String(x).padStart(2,'0'); return pad(d.getDate())+'/'+pad(d.getMonth()+1)+' '+pad(d.getHours())+':'+pad(d.getMinutes()); }catch(e){ return ''; } }
 // The full set of task types (categories), excluding the admin-only method choice.
-function delgAllCategories(){ return (typeof TASK_CATALOG!=='undefined'?TASK_CATALOG:[]).filter(t=>t.code!=='choose_method').map(t=>({code:t.code, name:t.name})); }
+function delgAllCategories(){ return (typeof TASK_CATALOG!=='undefined'?TASK_CATALOG:[]).map(t=>({code:t.code, name:t.name})); }
 // Build a person <select>. categoryMode = only the 3 (+ no default); task mode adds an "others" group.
 function delgPersonSelect(current, onchangeJs, categoryMode){
   // Responsibility always stays with the 3 (Simon / Silmi / Phoebus) — no "others" option.
@@ -7004,8 +7010,11 @@ function deriveMethod(o, flags) {
 }
 function buildStoreRegistry() {
   const flags = getStoreFlags();
+  const del = (typeof deletedStoreSet==='function') ? deletedStoreSet() : [];
+  const delSet = {}; del.forEach(n=>{ delSet[n]=1; });
   const map = {};
   DATA.orders.forEach(o => {
+    if(delSet[o.store]) return;   // store was deleted — don't rebuild it from lingering orders
     const s = map[o.store] || (map[o.store] = {name:o.store, orders:[], couriers:[], out_couriers:[]});
     s.orders.push(o);
     if (o.inbound_courier) s.couriers.push((typeof normCourier==='function') ? normCourier(o.inbound_courier) : o.inbound_courier);
@@ -7013,7 +7022,7 @@ function buildStoreRegistry() {
   });
   // Include stores that exist only in flags (manually added, or whose orders were removed)
   // so they still appear and can be opened/edited.
-  Object.keys(flags||{}).forEach(name=>{ if(name && !map[name]) map[name] = {name, orders:[], couriers:[], out_couriers:[]}; });
+  Object.keys(flags||{}).forEach(name=>{ if(name && !delSet[name] && !map[name]) map[name] = {name, orders:[], couriers:[], out_couriers:[]}; });
   const reg = Object.values(map).map(s => {
     const cc = {}; s.couriers.forEach(c => cc[c] = (cc[c]||0)+1);
     const default_courier = Object.keys(cc).sort((a,b)=>cc[b]-cc[a])[0] || '';
@@ -7956,24 +7965,55 @@ function renderStores() {
   document.getElementById('storesBody').innerHTML=h;
 }
 function storeFlagRow(label,v){ const val = v===null||v===undefined ? '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">missing</span>' : (v?'yes':'no'); return `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>${label}</span>${val}</div>`; }
-// Delete a store's saved record (flags, contact info, revenue, courier). If orders still reference
-// the store by name it will reappear rebuilt from those orders (with its setup cleared) until they
-// are reassigned — we warn about that up front.
+// Persistent set of deleted store names (app_state key 'deleted_stores'), so a store stays gone
+// across reloads even if the physical stores-table delete is blocked by row-level security.
+function deletedStoreSet(){
+  if(!DATA._deletedStores) DATA._deletedStores = (window.__HOSTED && window.__HOSTED.deletedStores) ? window.__HOSTED.deletedStores.slice() : [];
+  return DATA._deletedStores;
+}
+async function recordDeletedStore(name){
+  const s = deletedStoreSet();
+  if(s.indexOf(name) < 0) s.push(name);
+  if(window.__HOSTED){
+    window.__HOSTED.deletedStores = s.slice();
+    if(window.__HOSTED.storeFlags) delete window.__HOSTED.storeFlags[name];
+  }
+  if(typeof sb!=='undefined' && sb){
+    try{ const { error } = await sb.from('app_state').upsert({ key:'deleted_stores', value:s }, { onConflict:'key' }); if(error) return false; }
+    catch(e){ return false; }
+  }
+  return true;
+}
+// Delete a store. Because the store list is rebuilt from its orders, a store that still has orders
+// can only be removed by removing those orders too — we make that explicit and delete them (using the
+// same durable order-deletion), then drop the store record and remember it as deleted so it can't
+// reappear on refresh.
 async function deleteStore(name, orderCount){
-  const warn = (orderCount>0)
-    ? ('Delete the saved setup for "'+name+'"?\n\nThis clears its flags, contact info, revenue and courier. '+orderCount+' order'+(orderCount>1?'s':'')+' still reference this store by name, so it will reappear here (rebuilt from those orders, with its setup blank) until those orders are reassigned or removed.')
-    : ('Delete the store "'+name+'"?\n\nNo orders reference it, so it will be removed completely. This clears its saved flags, contact info, revenue and courier.');
+  const linked = (DATA.orders||[]).filter(o=>o.store===name);
+  const n = linked.length;
+  const warn = (n>0)
+    ? ('Delete store "'+name+'" AND its '+n+' linked order'+(n>1?'s':'')+'?\n\nThe store list is built from its orders, so removing the store also permanently deletes those '+n+' order'+(n>1?'s':'')+' and all their data. This cannot be undone.')
+    : ('Delete store "'+name+'"?\n\nNo orders reference it. This removes its saved setup (flags, contact info, revenue, courier) for good.');
   if(!confirm(warn)) return;
   try{
+    // 1) Remove its orders durably (records each in the deleted-orders set + best-effort DB delete).
+    for(const o of linked){
+      DATA.orders = DATA.orders.filter(x=>x.order_id!==o.order_id);
+      if(typeof recordDeletedOrder==='function') await recordDeletedOrder(o.order_id);
+      if(typeof sb!=='undefined' && sb){ try{ await sb.from('orders').delete().eq('order_id', o.order_id); }catch(e){} }
+    }
+    // 2) Remove the store record (local flags + best-effort DB delete) and remember it as deleted.
     if(window.__HOSTED && window.__HOSTED.storeFlags){ delete window.__HOSTED.storeFlags[name]; }
     if(typeof sb!=='undefined' && sb){
-      await sb.from('stores').delete().eq('name', name);
+      try{ await sb.from('stores').delete().eq('name', name); }catch(e){}
       try{ await sb.from('audit_log').insert({ entity:'store', entity_id:name, action:'delete' }); }catch(e){}
     }
-    if(typeof showToast==='function') showToast('Store "'+name+'" deleted', 'success');
+    await recordDeletedStore(name);
+    if(typeof saveData==='function') saveData();
+    if(typeof showToast==='function') showToast('Store "'+name+'" deleted'+(n>0?(' with '+n+' order'+(n>1?'s':'')):''), 'success');
   }catch(e){ if(typeof showToast==='function') showToast('Delete failed: '+(e&&e.message||e), 'error'); }
   storeOpenIdx = null;
-  renderStores();
+  if(typeof renderAll==='function') renderAll(); else renderStores();
 }
 function setStoreFilter(f){ storeFilter=f; renderStores(); }
 function toggleStore(i){ storeOpenIdx = storeOpenIdx===i?null:i; renderStores(); }
@@ -7991,7 +8031,7 @@ function openStoreForm(name) {
   const COURIERS=['DPD','Royal Mail','Parcelforce','Evri','DHL','FedEx','UPS','Yodel','Other'];
   const rlcOpts=['',...COURIERS].map(c=>`<option value="${escAttr(c)}" ${r.return_label_courier===c?'selected':''}>${c||'unknown'}</option>`).join('');
   const inbOpts=['',...COURIERS].map(c=>`<option value="${escAttr(c)}" ${r.inbound_courier===c?'selected':''}>${c||'unknown'}</option>`).join('');
-  const CATS=['clothes','tech','large furniture items','home items'];
+  const CATS=['clothes','tech','large furniture items','home items','tools'];
   const curCats = Array.isArray(r.cat)?r.cat:(r.cat?[r.cat]:[]);
   const catChecks=CATS.map(c=>`<label style="display:inline-flex;align-items:center;gap:5px;margin:0 14px 6px 0;font-size:13px;font-weight:400"><input type="checkbox" class="sf_cat_cb" value="${c}" ${curCats.includes(c)?'checked':''}> ${c}</label>`).join('');
   const ov=document.createElement('div');
