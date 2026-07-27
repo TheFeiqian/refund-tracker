@@ -2721,8 +2721,6 @@ function getAllTasksWithPriority() {
   const out = [];
   DATA.orders.forEach(order => {
     getTasksForOrder(order).forEach(task => {
-      // choose_method is pure admin (decided in the Method Choice tab) — never a delegable queue task.
-      if(task.type && task.type.code === 'choose_method') return;
       const p = computePriority(task, order);
       out.push({ task, order, ...p });
     });
@@ -2737,9 +2735,9 @@ function getAllTasksWithPriority() {
 // Orders with no computable next task are flagged red as "needs attention".
 // ============================================================
 // Does this order have an active task that appears in the queue/Delegation?
-// (choose_method is decided in the Method Choice tab, so it does NOT count as a queue task.)
+// choose_method now surfaces in the Priority Queue as the admin decision task, so it counts.
 function orderHasQueueTask(order){
-  return (getTasksForOrder(order)||[]).some(t=> t.type && t.type.code!=='choose_method');
+  return (getTasksForOrder(order)||[]).length > 0;
 }
 function _taskCodeDone(order, code){
   const tt = TASK_CATALOG.find(t=>t.code===code);
@@ -4440,7 +4438,8 @@ function openDelgTaskDetailFor(orderId, code){
     : '<div class="delg-note-empty">No files uploaded to this order yet.</div>';
 
   const assignedTo = delgEffectiveAssignee(orderId, code) || 'Unassigned';
-  const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre></div>'
+  const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre>'
+    + (code==='choose_method' && typeof methodDecisionHtml==='function' ? methodDecisionHtml(order) : '') + '</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Files &amp; documents — return label, proof of postage, etc.</div>'+filesHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Information needed to complete — fill in / upload below</div>'+completeHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Missing information (needed to do the task)</div>'+missingHtml+'</div>'
@@ -4788,10 +4787,11 @@ function renderPriorityQueue() {
                 ${hasMissing ? '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">HAS MISSING DATA</span>' : ''}
               </div>
               <pre class="instruction-box" id="instr_${rowKey}">${instructionHtml}</pre>
+              ${t.task.type.code==='choose_method' ? methodDecisionHtml(t.order) : ''}
               ${taskFilesHtml(t.order, t.task.type.code)}
               <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
                 <button class="small" onclick="copyInstruction('${rowKey}'); event.stopPropagation();">Copy text</button>
-                <button class="small" onclick="sendAsForm('${rowKey}','${escAttr(t.task.type.code)}','${escAttr(t.order.order_id)}'); event.stopPropagation();" title="Send the task as a Google Form. The assignee fills the form to mark it complete; their answers flow into the order. They never have to come into this app.">Send as form ↗</button>
+                ${t.task.type.code!=='choose_method' ? `<button class="small" onclick="sendAsForm('${rowKey}','${escAttr(t.task.type.code)}','${escAttr(t.order.order_id)}'); event.stopPropagation();" title="Send the task as a Google Form. The assignee fills the form to mark it complete; their answers flow into the order. They never have to come into this app.">Send as form ↗</button>` : ''}
                 <button class="small" onclick="openOrderModal('${escAttr(t.order.order_id)}'); event.stopPropagation();">Open order</button>
               </div>
             </div>
@@ -7661,6 +7661,90 @@ function mcSendInfoTask(orderId, need){
   document.body.appendChild(ov);
 }
 
+// ============================================================
+// METHOD-DECISION TASK (choose_method) — the admin's after-delivery decision.
+// Shows the full BBM→Q1..Q6 criteria with each answer, the resolved method (or where it
+// stalls), and EVERY still-missing field the decision needs — each collectable (delegate an
+// info request) or, for store drop-off flags, assessable in Stores. Confirm writes the method.
+// ============================================================
+function methodDecisionState(order){
+  const flags = (typeof getStoreFlags==='function') ? getStoreFlags() : {};
+  const v = mcVarsForOrder(order, flags);
+  const r = mcEvaluate(v);
+  const blocked = !!r.blocked;
+  const missing = [];
+  if(blocked){
+    // All decision fields still empty — everything the admin needs to reach a method.
+    if(!v.assessed) missing.push('store_unwanted');
+    if(!v.inbound_courier) missing.push('inbound_courier');
+    if(!v.delivery_photo_shows_person) missing.push('delivery_photo_shows_person');
+    if(!v.weight) missing.push('weight');
+  }
+  return { v, r, blocked, missing };
+}
+function methodDecisionHtml(order){
+  const st = methodDecisionState(order); const v = st.v, r = st.r, blocked = st.blocked, missing = st.missing;
+  const answer = (m)=>{ switch(m){
+    case 'BBM': return v.bbm?'yes':'no';
+    case 'Q1': return !v.assessed?'not assessed':(v.store_unwanted?'yes':'no');
+    case 'Q2': return !v.assessed?'—':(v.store_damaged?'yes':'no');
+    case 'Q3': return v.inbound_courier||'—';
+    case 'Q4': return v.delivery_photo_shows_person||'—';
+    case 'Q5': return v.qty||'—';
+    case 'Q6': return v.weight||'—';
+    default: return '';
+  } };
+  const Q=[
+    ['BBM','Bought by mistake?', v.bbm?'→ BBM chain':'no → continue'],
+    ['Q1','Parcel-shop label for unwanted?', !v.assessed?'assess store first':(v.store_unwanted===true?'→ LIT':'no → continue')],
+    ['Q2','Parcel-shop label for damaged?', !v.assessed?'—':(v.store_damaged===true?'→ LIT with pic':'no → continue')],
+    ['Q3','Inbound courier DPD/RM/Parcelforce?', v.inbound_courier?(RET_COURIERS.includes(v.inbound_courier)?'→ RTS':'no → continue'):'need courier'],
+    ['Q4','Delivery photo shows recipient?', v.delivery_photo_shows_person==='no'?'→ DNA':(v.delivery_photo_shows_person==='yes'?'shows person → continue':'need proof')],
+    ['Q5','Quantity over 10?', (v.qty||0)>10?'→ PEB':'no → continue'],
+    ['Q6','Weight under 2 kg?', v.weight?((parseFloat(v.weight)<2)?'→ EB':'no → purchased as normal'):'need weight']
+  ];
+  const rowsHtml = Q.map(([id,q,out])=>{
+    const isBlk = blocked && r.blocked===id;
+    const isRes = !blocked && r.at===id;
+    const bg = isBlk?'var(--amber-soft)':isRes?'var(--green-soft)':'transparent';
+    const fg = isBlk?'var(--amber)':isRes?'var(--green)':'var(--ink-faded)';
+    return '<div style="display:flex;gap:10px;align-items:center;padding:4px 8px;border-radius:5px;background:'+bg+'">'
+      +'<span style="font-family:var(--mono);font-size:11px;min-width:26px;color:var(--ink-faded)">'+id+'</span>'
+      +'<span style="flex:1;font-size:12.5px">'+escapeHtml(q)+' <strong>'+escapeHtml(String(answer(id)))+'</strong></span>'
+      +'<span style="font-size:11.5px;color:'+fg+'">'+escapeHtml(out)+'</span></div>';
+  }).join('');
+  let head, actions='';
+  if(!blocked){
+    head='<span style="background:var(--green-soft);color:var(--green);padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600">Resolves to '+escapeHtml(r.method)+'</span>';
+    if(r.method && r.method!=='purchased as normal'){
+      actions='<button class="primary tiny" onclick="event.stopPropagation();mcConfirm(\''+escAttr(order.order_id)+'\',\''+escAttr(r.method)+'\')">✓ Confirm '+escapeHtml(r.method)+'</button> ';
+    }
+  } else {
+    head='<span style="background:var(--amber-soft);color:var(--amber);padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600">Stalls at '+r.blocked+' — needs '+escapeHtml(MC_NEED_LABEL[r.need]||r.need)+'</span>';
+  }
+  let missingHtml='';
+  if(missing.length){
+    missingHtml='<div style="margin-top:8px;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-soft)">Information needed to make the decision — collect these</div>';
+    missingHtml+=missing.map(need=>{
+      const isStore = need==='store_unwanted';
+      const label = MC_NEED_LABEL[need]||need;
+      const isNext = (r.need===need);
+      const act = isStore
+        ? '<button class="tiny" onclick="event.stopPropagation();openStoreByName(\''+jsAttr(order.store)+'\')">Assess store</button>'
+        : '<button class="tiny" onclick="event.stopPropagation();mcSendInfoTask(\''+escAttr(order.order_id)+'\',\''+escAttr(need)+'\')">📋 Delegate</button>'
+          +' <button class="tiny" onclick="event.stopPropagation();openOrderModal(\''+escAttr(order.order_id)+'\')">Open order</button>';
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:3px 0;padding:4px 8px;border:1px solid var(--line);border-radius:6px;'+(isNext?'background:var(--amber-soft)':'')+'">'
+        +'<span style="font-size:12px">'+(isNext?'▶ needed now — ':'')+escapeHtml(label)+'</span><span style="white-space:nowrap">'+act+'</span></div>';
+    }).join('');
+  }
+  return '<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">'+head
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap">'+actions
+    +'<button class="tiny" onclick="event.stopPropagation();setBBM(\''+escAttr(order.order_id)+'\',\'yes\',true)" title="mark bought-by-mistake → BBM chain (skips the tree)">Mark BBM</button></div></div>'
+    +rowsHtml
+    +missingHtml
+    +'</div>';
+}
 // ---- Admin CONFIRM: write method to order, lock it (sticky) ----
 function mcConfirm(orderId, method){
   const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
