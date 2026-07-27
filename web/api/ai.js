@@ -20,10 +20,45 @@ function jsonFromText(text) {
   try { return JSON.parse(cleaned); } catch (e) {}
   const m = cleaned.match(/[\[{][\s\S]*[\]}]/);
   if (m) { try { return JSON.parse(m[0]); } catch (e) {} }
+  // Truncation-tolerant salvage: a long parse (many items) can get cut off before the JSON
+  // closes. Trim to the last complete key/value, then close any still-open brackets/braces.
+  const salvaged = repairTruncatedJson(cleaned);
+  if (salvaged) { try { return JSON.parse(salvaged); } catch (e) {} }
   return null;
 }
 
-async function callAnthropic(apiKey, { system, userText, image, webSearch }) {
+// Best-effort repair of a JSON object/array that was cut off mid-stream (e.g. output token limit).
+// Cuts back to the last comma or closing token at the top parse point, then appends the missing
+// closing brackets/braces (tracking nesting and string state) so JSON.parse can succeed.
+function repairTruncatedJson(s) {
+  if (!s) return null;
+  const start = s.search(/[\[{]/);
+  if (start < 0) return null;
+  s = s.slice(start);
+  const stack = [];
+  let inStr = false, esc = false, lastSafe = -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) { esc = false; }
+      else if (c === '\\') { esc = true; }
+      else if (c === '"') { inStr = false; lastSafe = i; }
+      continue;
+    }
+    if (c === '"') { inStr = true; }
+    else if (c === '{' || c === '[') { stack.push(c === '{' ? '}' : ']'); }
+    else if (c === '}' || c === ']') { stack.pop(); lastSafe = i; }
+    else if (c === ',') { lastSafe = i - 1; } // safe to cut just before a comma (drops the partial trailing element)
+    else if (/[0-9truefalsn.]/i.test(c)) { lastSafe = i; } // end of a bare value token
+  }
+  if (lastSafe < 0) return null;
+  let out = s.slice(0, lastSafe + 1);
+  // Close whatever nesting remained open, innermost first.
+  for (let i = stack.length - 1; i >= 0; i--) out += stack[i];
+  return out;
+}
+
+async function callAnthropic(apiKey, { system, userText, image, webSearch, maxTokens }) {
   const content = [];
   if (image && image.image_base64) {
     const mt = image.media_type || 'image/jpeg';
@@ -37,7 +72,7 @@ async function callAnthropic(apiKey, { system, userText, image, webSearch }) {
 
   const body = {
     model: MODEL,
-    max_tokens: webSearch ? 2048 : 1024,
+    max_tokens: maxTokens || (webSearch ? 2048 : 1024),
     messages: [{ role: 'user', content }],
   };
   if (system) body.system = system;
@@ -158,6 +193,7 @@ module.exports = async (req, res) => {
         userText: 'Extract from this order confirmation. Return ONLY JSON: '
           + '{"store":"","item_lines":[{"name":"","qty":1,"price":0,"weight_kg":0,"volume_l":0}],"items":"every item with its quantity, comma-separated","item_quantity":0,"total_weight_kg":0,"total_volume_l":0,"store_order_number":"","price":0,"card_used":"bank + type if identifiable, else the network/last-4 as printed, else empty","delivery_name":"","email":"","phone":"","address":"full delivery address joined with commas","order_date":"DD/MM/YYYY as printed, else empty","inbound_courier":"named delivery courier or empty","inbound_tracking":"genuine tracking only, else empty"}.',
         image: { image_base64: payload.image_base64, media_type: payload.media_type },
+        maxTokens: 16000, // order confirmations can carry many item lines — avoid truncating the JSON
       });
       return res.status(200).json({ fields: jsonFromText(text) || {} });
     }

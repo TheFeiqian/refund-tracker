@@ -1701,7 +1701,7 @@ const COURIERS = {
   'Royal Mail':  { track: t => 'https://www.royalmail.com/track-your-item#/tracking-results/' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below. Royal Mail shows the proof-of-delivery photo there using just the delivery postcode and the tracking number — screenshot it and upload it.' },
   'Evri':        { track: t => 'https://www.evri.com/track/parcel/' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below. Evri shows the delivery photo there using just the delivery postcode and the tracking number — screenshot it and upload it.' },
   'Parcelforce': { track: t => 'https://www.parcelforce.com/track-trace?trackNumber=' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below. Parcelforce shows the proof-of-delivery photo there using just the delivery postcode and the tracking number — screenshot it and upload it.' },
-  'DPD':         { track: t => 'https://track.dpd.co.uk/parcels/' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below — DPD shows the delivery photo on the tracking page once you enter the tracking number. Screenshot it and upload it.' },
+  'DPD':         { track: t => 'https://www.dpd.co.uk/apps/tracking/?reference=' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below — DPD shows the delivery photo on the tracking page once you enter the tracking number. Screenshot it and upload it.' },
   'DHL':         { track: t => 'https://www.dhl.com/gb-en/home/tracking/tracking-parcel.html?tracking-id=' + encodeURIComponent(t), proof: 'Delivery photo: DHL does NOT show it on the tracking page — call DHL, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
   'FedEx':       { track: t => 'https://www.fedex.com/fedextrack/?trknbr=' + encodeURIComponent(t), proof: 'Delivery photo: FedEx does NOT show it on the tracking page — call FedEx, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
   'UPS':         { track: t => 'https://www.ups.com/track?tracknum=' + encodeURIComponent(t), proof: 'Delivery photo: UPS does NOT reliably show it on the tracking page — call UPS, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
@@ -2331,6 +2331,9 @@ function recordBurndownSnapshot() {
 // ---- Evidence -> stage-trigger wiring ----
 function parseDateLoose(s){
   if(!s) return null; s=String(s).trim(); if(!s) return null;
+  // ISO YYYY-MM-DD (native <input type="date"> value) → build a LOCAL date (avoid UTC off-by-one).
+  let mi=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(mi){ const y=+mi[1],mo=+mi[2],d=+mi[3]; const dt=new Date(y,mo-1,d); return isNaN(dt.getTime())?null:dt; }
   let m=s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
   if(m){ let d=+m[1],mo=+m[2],y=+m[3]; if(y<100)y+=2000; const dt=new Date(y,mo-1,d); return isNaN(dt.getTime())?null:dt; }
   const dt=new Date(s); return isNaN(dt.getTime())?null:dt;
@@ -2730,9 +2733,15 @@ function _taskCodeDone(order, code){
 // Pending date + trigger label for a given upcoming task code (real date only where one exists).
 function upcomingDateFor(order, code){
   if(code==='contact_retailer_investigation'){
+    // DNA / PEB / EB have no physical return to post — the first retailer contact is due immediately.
+    const mth = (order.method||'');
+    if(mth==='DNA' || mth==='PEB' || mth==='EB') return { date:'', trigger:'first retailer contact — due now' };
     const d = order.contact_retailer_date || (order.postage_date && typeof contactRetailerDateFrom==='function' ? contactRetailerDateFrom(order.postage_date) : '');
     return d ? { date:d, trigger:'5 working days after posting' } : { date:'', trigger:'once the return is posted' };
   }
+  if(code==='submit_chargeback') return { date: order.refund_refused_date||'', trigger:'refund refused — file the chargeback now' };
+  if(code==='file_court_claim') return { date:'', trigger:'chargeback exhausted — escalate to court' };
+  if(code==='awaiting_outcome') return { date:'', trigger:'chargeback filed — awaiting bank/retailer outcome' };
   if(code==='chase_investigation'){
     return order.investigation_deadline ? { date:order.investigation_deadline, trigger:'investigation deadline' } : { date:'', trigger:'once the investigation deadline is set / passes' };
   }
@@ -2759,11 +2768,26 @@ function computeUpcomingTask(order){
   if(cm) return wrap('choose_method', cm.type.name);
   const waiting = all.filter(t=>t.type && !t.completed && !t.prereqs_met);   // blocked on a prerequisite
   if(waiting.length) return wrap(waiting[0].type.code, waiting[0].type.name);
-  // 2) Nothing to do at the current stage → walk the method chain for the next not-done step.
+  // 2) Nothing to do at the current stage → walk the method chain for the next not-done step,
+  //    but ONLY at or after the order's current stage. An order that has advanced (e.g. a DNA order
+  //    now at stage 7 after a refund refusal) must never surface a task from a stage it already
+  //    passed (the old walk-from-start showed "notify retailer once the return is posted" on
+  //    chargeback-stage orders).
+  const stageNum = (stage==='done') ? 99 : (parseInt(stage)||1);
   const mk = (typeof methodKey==='function') ? methodKey(order) : '';
   const chain = (typeof METHOD_CHAINS!=='undefined' && METHOD_CHAINS[mk]) ? METHOD_CHAINS[mk] : ['place_order','upload_tracking','choose_method'];
   let nextCode=null;
-  for(const code of chain){ if(!_taskCodeDone(order,code)){ nextCode=code; break; } }
+  for(const code of chain){
+    if((TASK_STAGE[code]||99) < stageNum) continue;        // skip steps from already-passed stages
+    if(!_taskCodeDone(order,code)){ nextCode=code; break; }
+  }
+  // Escalation tasks (chargeback, court) are contingent — not in the method chain — so surface them by stage.
+  if(!nextCode){
+    if(stageNum>=7 && !_taskCodeDone(order,'submit_chargeback')) nextCode='submit_chargeback';
+    else if(stageNum>=8 && !_taskCodeDone(order,'file_court_claim')) nextCode='file_court_claim';
+  }
+  // At the chargeback/court stage with the escalation already filed → awaiting the outcome, not a stale earlier task.
+  if(!nextCode && stageNum>=7) return wrap('awaiting_outcome', 'Awaiting refund after chargeback');
   if(!nextCode) return { broken:true, reason:'Every step in this order’s chain is marked done, but the order is still open — its stage didn’t advance to Done.' };
   return wrap(nextCode);
 }
@@ -5994,9 +6018,9 @@ function openOrderModal(orderId) {
           <textarea id="f_collection_address" rows="2" placeholder="The store address where the item is collected" oninput="onCollectionAddressInput()">${escapeHtml(order.collection_address || '')}</textarea>
         </div>
       </div>
-      <div class="form-field"><label>Order date</label><input type="text" id="f_order_date" value="${escAttr(order.order_date)}" placeholder="DD/MM/YYYY"></div>
+      <div class="form-field"><label>Order date</label><input type="date" id="f_order_date" value="${escAttr(ukToIso(order.order_date||''))}"></div>
       <div id="f_delivery_info_wrap" style="display:${order.click_and_collect ? 'none' : 'contents'}">
-      <div class="form-field"><label>Delivery date</label><input type="text" id="f_delivery_date_text" value="${escAttr(order.delivery_date_text)}" placeholder="DD/MM/YYYY" onchange="onDeliveryDateInput()"></div>
+      <div class="form-field"><label>Delivery date</label><input type="date" id="f_delivery_date_text" value="${escAttr(ukToIso(order.delivery_date_text||''))}" onchange="onDeliveryDateInput()"></div>
       <div class="form-field full"><label>Tracking parcels <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">each parcel: tracking number + its courier + the items inside it. The first parcel's courier drives the collect-tracking proof steps.</span></label>
         <div id="f_trackings_list"></div>
         <button type="button" class="small" onclick="ofAddTracking()" style="margin-top:4px">+ Add tracking number</button>
@@ -6038,16 +6062,16 @@ function openOrderModal(orderId) {
           ${order.return_label_pdf_file ? `<div class="file-attached-preview">${(order.return_label_pdf_filetype || '').startsWith('image/') ? `<img src="${order.return_label_pdf_file}" alt="${escAttr(order.return_label_pdf_filename || '')}" onclick="window.open(this.src)">` : `<div class="file-icon-large">📄</div>`}<div class="file-meta"><div class="file-name-line">${escapeHtml(order.return_label_pdf_filename || '')}</div><div class="file-meta-line">${escapeHtml(order.return_label_pdf_filetype || '')}</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="tiny" onclick="viewAttachedFile('return_label_pdf', 'order'); event.preventDefault();">View</button><button type="button" class="tiny danger" onclick="removeAttachedFile('return_label_pdf', 'order'); event.preventDefault();">Remove</button></div></div></div>` : ''}
         </div>
       </div>
-      <div class="form-field"><label>Return label date</label><input type="text" id="f_return_label_date" value="${escAttr(order.return_label_date)}"></div>
+      <div class="form-field"><label>Return label date</label><input type="date" id="f_return_label_date" value="${escAttr(ukToIso(order.return_label_date||''))}"></div>
       <div class="form-field"><label>Outbound tracking <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_outbound_tracking" value="${escAttr(order.outbound_tracking)}" oninput="updateTrackingLinks()"><div id="f_outbound_tracking_link" style="font-size:11px;margin-top:3px">${(function(){const u=trackingLink(order.outbound_courier, order.outbound_tracking); return u?'<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(order.outbound_courier))+'</a>':'';})()}</div></div>
       <div class="form-field full" id="f_outbound_tracking_extra"></div>
       <div class="form-field"><label>Outbound courier <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">return-label courier · informs the store's LIT courier</span></label><select id="f_outbound_courier">${(function(){ const cur=normCourier(order.outbound_courier||''); let opts=['',...COURIER_LIST]; if(cur && opts.indexOf(cur)<0) opts.splice(opts.length-1,0,cur); return opts.map(c=>'<option value="'+escAttr(c)+'"'+(cur===c?' selected':'')+'>'+(c||'(none)')+'</option>').join(''); })()}</select></div>
-      <div class="form-field"><label>Postage date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_postage_date" value="${escAttr(order.postage_date)}" placeholder="DD/MM/YYYY" oninput="updateContactRetailerDate()"></div>
+      <div class="form-field"><label>Postage date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="date" id="f_postage_date" value="${escAttr(ukToIso(order.postage_date||''))}" onchange="updateContactRetailerDate()"></div>
       <div class="form-field"><label>Date to contact retailer <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto · postage + 5 working days</span></label><input type="text" id="f_contact_retailer_date" value="${escAttr(order.contact_retailer_date||'')}" readonly title="Auto-calculated from the proof-of-postage postage date" style="background:var(--line-soft);color:var(--ink-soft)"></div>
       <div class="form-field"><label>Posted from <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">auto from receipt</span></label><input type="text" id="f_posted_from" value="${escAttr(order.posted_from)}" placeholder="Post Office / parcelshop name"></div>
-      <div class="form-field"><label>Collection date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">BBM collection path</span></label><input type="text" id="f_collection_date" value="${escAttr(order.collection_date)}" placeholder="DD/MM/YYYY — if collected, not posted"></div>
+      <div class="form-field"><label>Collection date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">BBM collection path · if collected, not posted</span></label><input type="date" id="f_collection_date" value="${escAttr(ukToIso(order.collection_date||''))}"></div>
       <div class="form-field"><label>Handed over for collection <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">BBM collection path</span></label><input type="text" id="f_collection_handover" value="${escAttr(order.collection_handover)}" placeholder="Driver/receipt confirmation" onchange="onEvidenceProvided('collection_handover')"></div>
-      <div class="form-field"><label>Investigation deadline</label><input type="text" id="f_investigation_deadline" value="${escAttr(order.investigation_deadline)}"></div>
+      <div class="form-field"><label>Investigation deadline</label><input type="date" id="f_investigation_deadline" value="${escAttr(ukToIso(order.investigation_deadline||''))}"></div>
       <div class="form-field full">
         <label>Proof of postage <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none;letter-spacing:0.5px">file or text</span></label>
         <div style="display:flex;gap:8px;align-items:flex-start">
@@ -6061,12 +6085,12 @@ function openOrderModal(orderId) {
     </div>
     <div class="form-section-title">Chargeback (if applicable)</div>
     <div class="form-grid">
-      <div class="form-field"><label>Refund refused date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">from refusal email</span></label><input type="text" id="f_refund_refused_date" value="${escAttr(order.refund_refused_date)}" placeholder="DD/MM/YYYY" onchange="onEvidenceProvided('refund_refused_date')"></div>
+      <div class="form-field"><label>Refund refused date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">from refusal email</span></label><input type="date" id="f_refund_refused_date" value="${escAttr(ukToIso(order.refund_refused_date||''))}" onchange="onEvidenceProvided('refund_refused_date')"></div>
       <div class="form-field"><label>Chargeback bank</label><input type="text" id="f_chargeback_bank" value="${escAttr(order.chargeback_bank)}"></div>
       <div class="form-field"><label>Chargeback amount</label><input type="text" id="f_chargeback_amount" value="${escAttr(order.chargeback_amount)}"></div>
-      <div class="form-field"><label>Chargeback date</label><input type="text" id="f_chargeback_date" value="${escAttr(order.chargeback_date)}"></div>
+      <div class="form-field"><label>Chargeback date</label><input type="date" id="f_chargeback_date" value="${escAttr(ukToIso(order.chargeback_date||''))}"></div>
       <div class="form-field"><label>Invoice ref</label><input type="text" id="f_invoice" value="${escAttr(order.invoice)}"></div>
-      <div class="form-field"><label>Refund received date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">from refund email</span></label><input type="text" id="f_refund_received_date" value="${escAttr(order.refund_received_date)}" placeholder="DD/MM/YYYY" onchange="onEvidenceProvided('refund_received_date')"></div>
+      <div class="form-field"><label>Refund received date <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">from refund email</span></label><input type="date" id="f_refund_received_date" value="${escAttr(ukToIso(order.refund_received_date||''))}" onchange="onEvidenceProvided('refund_received_date')"></div>
       <div class="form-field"><label>Refund received (£)</label><input type="number" step="0.01" id="f_refund_received_amount" value="${order.refund_received_amount || ''}"></div>
       <div class="form-field full"><label>Refund narrative</label><textarea id="f_refund_narrative" rows="2">${escapeHtml(order.refund_narrative)}</textarea></div>
     </div>
@@ -6080,7 +6104,7 @@ function openOrderModal(orderId) {
       <div class="form-field"><label>Court claim reference</label><input type="text" id="f_court_claim_ref" value="${escAttr(order.court_claim_ref)}"></div>
       <div class="form-field"><label>Court fee paid (£)</label><input type="number" step="0.01" id="f_court_fee_paid" value="${order.court_fee_paid || ''}"></div>
       <div class="form-field"><label>Defendant legal entity <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faded);text-transform:none">Companies House name</span></label><input type="text" id="f_defendant_legal_entity" value="${escAttr(order.defendant_legal_entity)}"></div>
-      <div class="form-field"><label>Hearing date</label><input type="text" id="f_hearing_date" value="${escAttr(order.hearing_date)}" placeholder="DD/MM/YYYY"></div>
+      <div class="form-field"><label>Hearing date</label><input type="date" id="f_hearing_date" value="${escAttr(ukToIso(order.hearing_date||''))}"></div>
       <div class="form-field"><label>Court outcome</label><select id="f_court_outcome">${['','won','lost','partial','settled'].map(o => `<option ${order.court_outcome === o ? 'selected' : ''}>${o}</option>`).join('')}</select></div>
       <div class="form-field"><label>Total recovered (£)</label><input type="number" step="0.01" id="f_total_recovered" value="${order.total_recovered || ''}" onchange="onEvidenceProvided('refund_received_date')"></div>
     </div>
@@ -6337,7 +6361,7 @@ function ofRenderTrackings(){
       + (OF_TRACKINGS.length>1?'<button type="button" class="small" onclick="ofRemoveTracking('+i+')" title="remove">×</button>':'<span style="width:24px"></span>')
       + '</div>'
       + '<div style="display:flex;gap:6px;align-items:center;margin-top:5px"><span style="font-size:11px;color:var(--ink-faded);min-width:74px">Delivered:</span>'
-      + '<input type="text" placeholder="DD/MM/YYYY" value="'+escAttr(tk.date||'')+'" oninput="ofTrackingFieldNoRerender('+i+',\'date\',this.value)" style="width:130px" title="delivery date for this parcel"></div>'
+      + '<input type="date" value="'+escAttr(ukToIso(tk.date||''))+'" onchange="ofTrackingFieldNoRerender('+i+',\'date\',this.value?isoToUK(this.value):\'\')" style="width:150px" title="delivery date for this parcel"></div>'
       + (link?'<div style="font-size:11px;margin-top:4px"><a href="'+link+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(tk.courier))+'</a></div>':'')
       + itemsUi
       + '</div>';
@@ -6401,7 +6425,14 @@ function saveOrderEdit() {
   let order;
   if (isNew) { order = { triggers: {}, days_back: 0 }; DATA.orders.push(order); }
   else { order = DATA.orders.find(o => o.order_id === editingOrderId); }
-  fields.forEach(f => { const el = document.getElementById('f_' + f); if (el) order[f] = el.value.trim(); });
+  fields.forEach(f => {
+    const el = document.getElementById('f_' + f);
+    if (!el) return;
+    let v = el.value.trim();
+    // Calendar (date) pickers return ISO YYYY-MM-DD — store back in the app's DD/MM/YYYY format.
+    if (el.type === 'date' && v) v = isoToUK(v);
+    order[f] = v;
+  });
   // Outbound tracking rows: row 0 mirrors the primary field; keep any extra rows that have a value.
   if (order.outbound_tracking || (Array.isArray(order.outbound_trackings) && order.outbound_trackings.length)) {
     if (!Array.isArray(order.outbound_trackings)) order.outbound_trackings = [];
