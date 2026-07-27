@@ -1258,7 +1258,8 @@ document.addEventListener('DOMContentLoaded', bootHosted);
   </section>
 
   <section class="tab-section" data-tab="missing">
-    <div class="section-intro"><h2>Missing Information</h2><p>Every gap across all open orders, grouped by impact: information a task needs <strong>right now</strong>, information a <strong>later</strong> task on the order's path will need, and information that <strong>no task depends on</strong> (informational backfill or fields that don't apply to this order's method). Click any order to fill it in.</p></div>
+    <div class="section-intro"><h2>Missing Information</h2><p><strong>Missing information</strong> is information that should already have been collected but wasn't — not the fields the current task exists to collect (those complete the task, they aren't missing). Grouped by impact: info that <strong>should already be on the order</strong> (affects current work), info a <strong>later</strong> task will need, and info <strong>no task depends on</strong>. Click any missing field to jump straight to it in the order for data entry.</p></div>
+    <div class="queue-toolbar"><div class="filter-group"><label>Search information type</label><input type="text" id="missingSearch" placeholder="e.g. courier, weight, email…" oninput="renderMissingInfoTab()" style="padding:7px 11px;border:1px solid var(--line);border-radius:7px;font-size:13px;min-width:220px"></div></div>
     <div id="missingBody"></div>
   </section>
 
@@ -7779,78 +7780,130 @@ function setBBM(orderId, val, fromMC){
 let storeFilter='all', storeOpenIdx=null, STORE_REG_CACHE=[];
 // ============================================================
 // MISSING INFORMATION TAB
-// For each open order, split its still-empty fields into three impact buckets:
-//   current → the field's essential stage IS the order's current stage (blocks a task now)
-//   future  → the field is needed at a LATER stage on this order's method path
-//   none    → nothing depends on it (a past-stage backfill field, a non-blocking/display field,
-//             or a field that belongs to a method this order isn't using)
+// IMPORTANT distinction: the fields that COMPLETE the current task are NOT "missing" — they are
+// the information the current task exists to collect. They are excluded here. "Missing" means
+// information that should already have been collected but wasn't. Each missing field is bucketed:
+//   current → previously-due info (essential at/before the current stage) that isn't the current
+//             task's own output — it should already be on the order and its absence affects the
+//             work happening now.
+//   future  → information a LATER task on the order's path will need.
+//   none    → nothing depends on it (non-blocking/display field, or a field for a method the
+//             order isn't using).
 // ============================================================
 function categorizeOrderMissing(order){
   const stage = (typeof computeStage==='function') ? computeStage(order) : 1;
-  const out = { current:[], future:[], none:[] };
+  const out = { current:[], future:[], none:[], completes:[] };
   if(stage==='done') return out;
   const cur = stage;
   const mk = (typeof methodKey==='function') ? methodKey(order) : '';
-  Object.keys(FIELD_MODEL).forEach(f=>{
-    const dm = FIELD_MODEL[f];
-    if(!dm) return;
-    if(!FIELD_DEFS[f]) return;               // only real, editable fields
+  // Fields that COMPLETE the current active task(s) — the task's own deliverable, not "missing".
+  const completesCur = {};
+  try {
+    (getTasksForOrder(order)||[]).forEach(t=>{
+      const code = t.type && t.type.code; if(!code) return;
+      (TASK_FORM_FIELDS[code]||[]).forEach(f=> completesCur[f]=true);
+    });
+  } catch(e){}
+  // The "due stage" of a field = when it should have been collected. FIELD_BLOCKING is authoritative
+  // (e.g. invoice is available early but only DUE at chargeback/stage 7); fall back to FIELD_MODEL.avail
+  // for fields FIELD_BLOCKING doesn't list (e.g. refusal/confirmation PDFs).
+  const hasFB = (typeof FIELD_BLOCKING!=='undefined');
+  const dueStageOf = (f)=>{
+    if(hasFB && Object.prototype.hasOwnProperty.call(FIELD_BLOCKING, f)) return FIELD_BLOCKING[f]; // may be null (non-blocking)
+    const dm = FIELD_MODEL[f]; return dm && dm.avail ? dm.avail : null;
+  };
+  // Consider the union of blocking fields and modelled fields, so nothing (e.g. delivery address) is missed.
+  const keys = {};
+  if(hasFB) Object.keys(FIELD_BLOCKING).forEach(k=>keys[k]=1);
+  Object.keys(FIELD_MODEL).forEach(k=>keys[k]=1);
+  Object.keys(keys).forEach(f=>{
+    if(!FIELD_DEFS[f]) return;               // only real, editable fields (skips spec-only labels)
+    const dm = FIELD_MODEL[f] || {};
     if(dm.aiDerived) return;                 // auto-extracted from an upload — not chased as "missing"
     if(dm.inForm === false) return;          // derived (e.g. chargeback_bank) — never hand-entered
     if(fieldFilled(order, f)) return;        // already present
-    const ess = dm.avail || (typeof FIELD_BLOCKING!=='undefined' ? FIELD_BLOCKING[f] : null) || null;
+    if(completesCur[f]){ out.completes.push(f); return; }   // completes the current task → NOT missing
+    const ess = dueStageOf(f);
     // Does this field apply to the order's chosen method? (method-specific fields for other methods never matter here)
     let applies = true;
     if(Array.isArray(dm.methods) && mk){ applies = dm.methods.indexOf(mk) >= 0; }
     if(ess == null || !applies){ out.none.push(f); return; }
-    if(ess === cur) out.current.push(f);
-    else if(ess > cur) out.future.push(f);
-    else out.none.push(f);                   // essential stage already passed
+    if(ess > cur) out.future.push(f);        // a later task will need it
+    else out.current.push(f);                // due at/before now, but NOT the current task's output → should already be collected
   });
   return out;
 }
-function _miChips(order, arr, bg, fg){
-  if(!arr.length) return '<span style="color:var(--ink-faded);font-size:12px">—</span>';
-  return arr.map(f=>{
+// Open the order editor and jump straight to a field for data entry (expands its section,
+// scrolls to it, focuses and briefly highlights it).
+function openOrderToField(orderId, field){
+  if(typeof openOrderModal==='function') openOrderModal(orderId);
+  setTimeout(()=>{
+    const el = document.getElementById('f_'+field);
+    if(!el) return;
+    // If the field sits in a collapsed stage section, expand it first.
+    const sec = el.closest('.stage-section-content');
+    if(sec && sec.classList.contains('hidden')){
+      const title = sec.previousElementSibling;
+      if(title && title.classList.contains('form-section-title')) title.click();
+    }
+    try{ el.scrollIntoView({behavior:'smooth', block:'center'}); }catch(e){}
+    try{ el.focus({preventScroll:true}); }catch(e){}
+    const prev = el.style.boxShadow;
+    el.style.boxShadow = '0 0 0 3px var(--amber)';
+    setTimeout(()=>{ el.style.boxShadow = prev; }, 2200);
+  }, 140);
+}
+function _miChips(order, arr, bg, fg, filter){
+  const shown = filter ? arr.filter(f=> fieldLabel(f).toLowerCase().includes(filter)) : arr;
+  if(!shown.length) return '<span style="color:var(--ink-faded);font-size:12px">—</span>';
+  return shown.map(f=>{
     const help = (FIELD_DEFS[f]||{}).help || '';
     const tk = (FIELD_MODEL[f]||{}).task || '';
-    const title = (help ? help : fieldLabel(f)) + (tk ? ' · needed for: '+tk.replace(/_/g,' ') : '');
-    return '<span title="'+escAttr(title)+'" style="display:inline-block;background:'+bg+';color:'+fg+';border-radius:10px;padding:2px 8px;margin:2px 3px 2px 0;font-size:11.5px">'+escapeHtml(fieldLabel(f))+'</span>';
+    const title = (help ? help : fieldLabel(f)) + (tk ? ' · needed for: '+tk.replace(/_/g,' ') : '') + ' · click to enter';
+    return '<span title="'+escAttr(title)+'" onclick="event.stopPropagation();openOrderToField(\''+escAttr(order.order_id)+'\',\''+escAttr(f)+'\')" style="display:inline-block;cursor:pointer;background:'+bg+';color:'+fg+';border-radius:10px;padding:2px 8px;margin:2px 3px 2px 0;font-size:11.5px">'+escapeHtml(fieldLabel(f))+'</span>';
   }).join('');
 }
 function renderMissingInfoTab(){
   const body = document.getElementById('missingBody'); if(!body) return;
+  const filter = ((document.getElementById('missingSearch')||{}).value || '').trim().toLowerCase();
+  const matches = (arr)=> !filter ? arr : arr.filter(f=> fieldLabel(f).toLowerCase().includes(filter));
   const open = (DATA.orders||[]).filter(o => (typeof computeStage==='function' ? computeStage(o) : 1) !== 'done');
-  const rows = open.map(o => ({ o, m: categorizeOrderMissing(o) }))
-                   .filter(x => x.m.current.length || x.m.future.length || x.m.none.length);
+  let rows = open.map(o => ({ o, m: categorizeOrderMissing(o) }))
+                 .filter(x => x.m.current.length || x.m.future.length || x.m.none.length);
+  // When searching, keep only orders that have a missing field matching the search.
+  if(filter){
+    rows = rows.filter(x => matches(x.m.current).length || matches(x.m.future).length || matches(x.m.none).length);
+  }
   rows.sort((a,b)=> (b.o.price||0) - (a.o.price||0));
-  const totCur = rows.reduce((s,x)=>s+x.m.current.length,0);
-  const totFut = rows.reduce((s,x)=>s+x.m.future.length,0);
-  const totNone= rows.reduce((s,x)=>s+x.m.none.length,0);
+  const totCur = rows.reduce((s,x)=>s+matches(x.m.current).length,0);
+  const totFut = rows.reduce((s,x)=>s+matches(x.m.future).length,0);
+  const totNone= rows.reduce((s,x)=>s+matches(x.m.none).length,0);
   const countEl = document.getElementById('missingCount'); if(countEl) countEl.textContent = rows.length;
   if(!rows.length){
-    body.innerHTML = '<div class="empty-state" style="padding:26px;text-align:center;color:var(--ink-faded)">No open order is missing anything its tasks need — every field is filled in.</div>';
+    body.innerHTML = filter
+      ? '<div class="empty-state" style="padding:26px;text-align:center;color:var(--ink-faded)">No open order is missing a field matching “'+escapeHtml(filter)+'”.</div>'
+      : '<div class="empty-state" style="padding:26px;text-align:center;color:var(--ink-faded)">Nothing is missing — every field that should already be collected is on the order.</div>';
     return;
   }
   let h = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">'
-    + '<div style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:10px 12px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--amber)">Affecting current tasks</div><div style="font-size:22px;font-weight:700">'+totCur+'</div><div style="font-size:11px;color:var(--ink-faded)">fields blocking a task now</div></div>'
-    + '<div style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:10px 12px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--blue)">Affecting future tasks</div><div style="font-size:22px;font-weight:700">'+totFut+'</div><div style="font-size:11px;color:var(--ink-faded)">needed later on the order’s path</div></div>'
+    + '<div style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:10px 12px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--amber)">Should already be collected</div><div style="font-size:22px;font-weight:700">'+totCur+'</div><div style="font-size:11px;color:var(--ink-faded)">overdue — affects current work</div></div>'
+    + '<div style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:10px 12px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--blue)">Needed for a future task</div><div style="font-size:22px;font-weight:700">'+totFut+'</div><div style="font-size:11px;color:var(--ink-faded)">a later step will need it</div></div>'
     + '<div style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:10px 12px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-faded)">No task impact</div><div style="font-size:22px;font-weight:700">'+totNone+'</div><div style="font-size:11px;color:var(--ink-faded)">informational / not applicable</div></div>'
     + '</div>';
   h += '<div class="orders-table-wrap"><table class="orders-table"><thead><tr>'
     + '<th>Order</th><th class="r">Value</th><th>Stage</th>'
-    + '<th style="color:var(--amber)">Affects current task</th>'
-    + '<th style="color:var(--blue)">Affects a future task</th>'
+    + '<th style="color:var(--amber)">Should already be collected</th>'
+    + '<th style="color:var(--blue)">Needed for a future task</th>'
     + '<th style="color:var(--ink-faded)">No task impact</th></tr></thead><tbody>';
   rows.forEach(({o,m})=>{
     const st = (typeof computeStage==='function') ? computeStage(o) : 1;
-    h += '<tr onclick="openOrderModal(\''+escAttr(o.order_id)+'\')" style="cursor:pointer">'
-      + '<td><div class="ostore" style="font-weight:600">'+escapeHtml(o.store||'?')+'</div><div style="font-family:var(--mono);font-size:11px;color:var(--ink-faded)">#'+escapeHtml(o.order_id)+'</div></td>'
+    h += '<tr style="cursor:default">'
+      + '<td onclick="openOrderModal(\''+escAttr(o.order_id)+'\')" style="cursor:pointer"><div class="ostore" style="font-weight:600">'+escapeHtml(o.store||'?')+'</div><div style="font-family:var(--mono);font-size:11px;color:var(--ink-faded)">#'+escapeHtml(o.order_id)+'</div></td>'
       + '<td class="r val">'+fmtMoney(o.price||0)+'</td>'
       + '<td><span class="stage-pill s'+st+'">'+(st==='done'?'DONE':'Stage '+st)+'</span></td>'
-      + '<td>'+_miChips(o, m.current, 'var(--amber-soft)', 'var(--amber)')+'</td>'
-      + '<td>'+_miChips(o, m.future, 'var(--blue-soft)', 'var(--blue)')+'</td>'
-      + '<td>'+_miChips(o, m.none, 'var(--line-soft)', 'var(--ink-faded)')+'</td>'
+      + '<td>'+_miChips(o, m.current, 'var(--amber-soft)', 'var(--amber)', filter)+'</td>'
+      + '<td>'+_miChips(o, m.future, 'var(--blue-soft)', 'var(--blue)', filter)+'</td>'
+      + '<td>'+_miChips(o, m.none, 'var(--line-soft)', 'var(--ink-faded)', filter)+'</td>'
       + '</tr>';
   });
   h += '</tbody></table></div>';
