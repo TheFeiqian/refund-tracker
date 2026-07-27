@@ -1116,7 +1116,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
     <button class="tab-btn" data-tab="priority">Priority Queue <span class="count" id="priorityCount">0</span></button>
     <button class="tab-btn" data-tab="inprogress">Delegation <span class="count" id="inProgressCount">0</span></button>
     <button class="tab-btn" data-tab="orders">Orders Database <span class="count" id="ordersCount">0</span></button>
-    <button class="tab-btn" data-tab="method">Method Choice</button>
+    <button class="tab-btn" data-tab="missing">Missing Information <span class="count" id="missingCount">0</span></button>
     <button class="tab-btn" data-tab="delivery">Delivery <span class="count" id="deliveryCount">0</span></button>
     <button class="tab-btn" data-tab="stores">Stores <span class="count" id="storesCount">0</span></button>
     <button class="tab-btn" data-tab="parcel">Parcelshop</button>
@@ -1257,9 +1257,9 @@ document.addEventListener('DOMContentLoaded', bootHosted);
     </div>
   </section>
 
-  <section class="tab-section" data-tab="method">
-    <div class="section-intro"><h2>Method Choice</h2><p>Where the recovery method is decided per order. The method auto-resolves once all the variables the tree needs are present — orders split into auto-decided and missing-info-to-decide. Use the explorer to test variables and commit a method, or set BBM. Time awaiting decision is tracked per order and surfaced as a bottleneck on the dashboard.</p></div>
-    <div id="methodBody"></div>
+  <section class="tab-section" data-tab="missing">
+    <div class="section-intro"><h2>Missing Information</h2><p>Every gap across all open orders, grouped by impact: information a task needs <strong>right now</strong>, information a <strong>later</strong> task on the order's path will need, and information that <strong>no task depends on</strong> (informational backfill or fields that don't apply to this order's method). Click any order to fill it in.</p></div>
+    <div id="missingBody"></div>
   </section>
 
   <section class="tab-section" data-tab="delivery">
@@ -1381,7 +1381,7 @@ const TASK_CATALOG = [
     completed_when: (o) => fieldFilled(o, 'method'),
     completed_via: 'method is selected (LIT / LIT with pic / RTS / DNA / PEB / EB)',
     info_needed: 'Whichever decision variable is still missing — courier, delivery-photo answer, or weight',
-    instruction_template: 'ADMIN TASK — decide the return method for {store} order {order_id} ({items}, £{price}).\n\nThis decision is made in the Method Choice tab and is not delegated. If it can’t resolve yet it is blocked on one missing variable (inbound courier, whether the delivery photo shows the recipient, or the parcel weight) — delegate the fact-finding for that one field, then the method auto-resolves.\n\nDelivery date on file: {delivery_date_text}' },
+    instruction_template: 'ADMIN TASK — decide the return method for {store} order {order_id} ({items}, £{price}).\n\nThis decision is not delegated — open the order and set the Method field. If it can’t resolve yet it is blocked on one missing variable (inbound courier, whether the delivery photo shows the recipient, or the parcel weight) — delegate the fact-finding for that one field, then set the method.\n\nDelivery date on file: {delivery_date_text}' },
 
   { code: 'damage_photo_check', name: 'Damage photo/video + get return label', stage: 4, sla: 6, owner_only: false, info_only: false,
     applies_when: (o)=> o.method === 'LIT with pic',
@@ -2761,7 +2761,7 @@ function upcomingDateFor(order, code){
   if(code==='chase_investigation'){
     return order.investigation_deadline ? { date:order.investigation_deadline, trigger:'investigation deadline' } : { date:'', trigger:'once the investigation deadline is set / passes' };
   }
-  if(code==='choose_method') return { date:'', trigger:'awaiting return-method decision (Method Choice tab)' };
+  if(code==='choose_method') return { date:'', trigger:'awaiting return-method decision (set the Method on the order)' };
   if(code==='upload_tracking') return { date:'', trigger:'when the item is delivered / tracking added' };
   if(code==='place_order') return { date:'', trigger:'once the order is placed' };
   if(code==='generate_return_label'||code==='damage_photo_check'||code==='rts_photograph_label') return { date:'', trigger:'once delivered & return method is chosen' };
@@ -4746,7 +4746,7 @@ function renderPriorityQueue() {
     const delegateHtml = t.task.type.admin_only ?
       `<div class="locked-assign">
         <span class="badge-mini badge-owner" style="margin-right:6px">ADMIN ONLY</span><br><br>
-        This is the admin's decision and is <strong>not delegated</strong>. Make it in the Method Choice tab. If it's blocked on missing info, delegate the fact-finding for that one field instead.
+        This is the admin's decision and is <strong>not delegated</strong>. Open the order and set the Method field. If it's blocked on missing info, delegate the fact-finding for that one field instead.
       </div>` :
       t.task.type.owner_only ?
       `<div class="locked-assign">
@@ -7693,6 +7693,85 @@ function setBBM(orderId, val, fromMC){
 
 // ---------- STORES TAB ----------
 let storeFilter='all', storeOpenIdx=null, STORE_REG_CACHE=[];
+// ============================================================
+// MISSING INFORMATION TAB
+// For each open order, split its still-empty fields into three impact buckets:
+//   current → the field's essential stage IS the order's current stage (blocks a task now)
+//   future  → the field is needed at a LATER stage on this order's method path
+//   none    → nothing depends on it (a past-stage backfill field, a non-blocking/display field,
+//             or a field that belongs to a method this order isn't using)
+// ============================================================
+function categorizeOrderMissing(order){
+  const stage = (typeof computeStage==='function') ? computeStage(order) : 1;
+  const out = { current:[], future:[], none:[] };
+  if(stage==='done') return out;
+  const cur = stage;
+  const mk = (typeof methodKey==='function') ? methodKey(order) : '';
+  Object.keys(FIELD_MODEL).forEach(f=>{
+    const dm = FIELD_MODEL[f];
+    if(!dm) return;
+    if(!FIELD_DEFS[f]) return;               // only real, editable fields
+    if(dm.aiDerived) return;                 // auto-extracted from an upload — not chased as "missing"
+    if(dm.inForm === false) return;          // derived (e.g. chargeback_bank) — never hand-entered
+    if(fieldFilled(order, f)) return;        // already present
+    const ess = dm.avail || (typeof FIELD_BLOCKING!=='undefined' ? FIELD_BLOCKING[f] : null) || null;
+    // Does this field apply to the order's chosen method? (method-specific fields for other methods never matter here)
+    let applies = true;
+    if(Array.isArray(dm.methods) && mk){ applies = dm.methods.indexOf(mk) >= 0; }
+    if(ess == null || !applies){ out.none.push(f); return; }
+    if(ess === cur) out.current.push(f);
+    else if(ess > cur) out.future.push(f);
+    else out.none.push(f);                   // essential stage already passed
+  });
+  return out;
+}
+function _miChips(order, arr, bg, fg){
+  if(!arr.length) return '<span style="color:var(--ink-faded);font-size:12px">—</span>';
+  return arr.map(f=>{
+    const help = (FIELD_DEFS[f]||{}).help || '';
+    const tk = (FIELD_MODEL[f]||{}).task || '';
+    const title = (help ? help : fieldLabel(f)) + (tk ? ' · needed for: '+tk.replace(/_/g,' ') : '');
+    return '<span title="'+escAttr(title)+'" style="display:inline-block;background:'+bg+';color:'+fg+';border-radius:10px;padding:2px 8px;margin:2px 3px 2px 0;font-size:11.5px">'+escapeHtml(fieldLabel(f))+'</span>';
+  }).join('');
+}
+function renderMissingInfoTab(){
+  const body = document.getElementById('missingBody'); if(!body) return;
+  const open = (DATA.orders||[]).filter(o => (typeof computeStage==='function' ? computeStage(o) : 1) !== 'done');
+  const rows = open.map(o => ({ o, m: categorizeOrderMissing(o) }))
+                   .filter(x => x.m.current.length || x.m.future.length || x.m.none.length);
+  rows.sort((a,b)=> (b.o.price||0) - (a.o.price||0));
+  const totCur = rows.reduce((s,x)=>s+x.m.current.length,0);
+  const totFut = rows.reduce((s,x)=>s+x.m.future.length,0);
+  const totNone= rows.reduce((s,x)=>s+x.m.none.length,0);
+  const countEl = document.getElementById('missingCount'); if(countEl) countEl.textContent = rows.length;
+  if(!rows.length){
+    body.innerHTML = '<div class="empty-state" style="padding:26px;text-align:center;color:var(--ink-faded)">No open order is missing anything its tasks need — every field is filled in.</div>';
+    return;
+  }
+  let h = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">'
+    + '<div style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:10px 12px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--amber)">Affecting current tasks</div><div style="font-size:22px;font-weight:700">'+totCur+'</div><div style="font-size:11px;color:var(--ink-faded)">fields blocking a task now</div></div>'
+    + '<div style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:10px 12px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--blue)">Affecting future tasks</div><div style="font-size:22px;font-weight:700">'+totFut+'</div><div style="font-size:11px;color:var(--ink-faded)">needed later on the order’s path</div></div>'
+    + '<div style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:10px 12px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-faded)">No task impact</div><div style="font-size:22px;font-weight:700">'+totNone+'</div><div style="font-size:11px;color:var(--ink-faded)">informational / not applicable</div></div>'
+    + '</div>';
+  h += '<div class="orders-table-wrap"><table class="orders-table"><thead><tr>'
+    + '<th>Order</th><th class="r">Value</th><th>Stage</th>'
+    + '<th style="color:var(--amber)">Affects current task</th>'
+    + '<th style="color:var(--blue)">Affects a future task</th>'
+    + '<th style="color:var(--ink-faded)">No task impact</th></tr></thead><tbody>';
+  rows.forEach(({o,m})=>{
+    const st = (typeof computeStage==='function') ? computeStage(o) : 1;
+    h += '<tr onclick="openOrderModal(\''+escAttr(o.order_id)+'\')" style="cursor:pointer">'
+      + '<td><div class="ostore" style="font-weight:600">'+escapeHtml(o.store||'?')+'</div><div style="font-family:var(--mono);font-size:11px;color:var(--ink-faded)">#'+escapeHtml(o.order_id)+'</div></td>'
+      + '<td class="r val">'+fmtMoney(o.price||0)+'</td>'
+      + '<td><span class="stage-pill s'+st+'">'+(st==='done'?'DONE':'Stage '+st)+'</span></td>'
+      + '<td>'+_miChips(o, m.current, 'var(--amber-soft)', 'var(--amber)')+'</td>'
+      + '<td>'+_miChips(o, m.future, 'var(--blue-soft)', 'var(--blue)')+'</td>'
+      + '<td>'+_miChips(o, m.none, 'var(--line-soft)', 'var(--ink-faded)')+'</td>'
+      + '</tr>';
+  });
+  h += '</tbody></table></div>';
+  body.innerHTML = h;
+}
 function renderStores() {
   STORE_REG_CACHE = buildStoreRegistry();
   const reg = STORE_REG_CACHE;
@@ -7730,7 +7809,8 @@ function renderStores() {
           <div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>Contact info</span>${r.contact?'<span style="color:var(--green)">on file</span>':'<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">missing</span>'}</div>
           ${r.contact_info?`<div style="font-size:12px;color:var(--ink-faded);line-height:1.7;padding:4px 0 0 8px;border-left:2px solid var(--line);margin-left:2px">${r.contact_info.phone?'📞 '+escapeHtml(r.contact_info.phone)+'<br>':''}${r.contact_info.email?'✉️ '+escapeHtml(r.contact_info.email)+'<br>':''}${r.contact_info.portal?'🔗 <a href="'+escAttr(r.contact_info.portal)+'" target="_blank" style="color:var(--blue)">returns portal</a><br>':''}${r.contact_info.chat?'💬 live chat available':''}</div>`:''}
           <div style="margin-top:10px;padding:8px 10px;background:var(--bg-card);border-radius:6px;font-size:13px">Resolves to <span class="badge-mini" style="${methodBadgeClass(r.auto_method)}">${escapeHtml(r.auto_method)}</span>${(r.auto_method.indexOf('LIT')===0 && r.return_label_courier)?' via '+escapeHtml(r.return_label_courier):''} for every order from this store.</div>
-          <button class="primary small" style="margin-top:10px" onclick="event.stopPropagation();openStoreForm('${jsAttr(r.name)}')">${r.complete?'Edit store':'Fill missing fields ('+r.missing.length+')'}</button></div>
+          <button class="primary small" style="margin-top:10px" onclick="event.stopPropagation();openStoreForm('${jsAttr(r.name)}')">${r.complete?'Edit store':'Fill missing fields ('+r.missing.length+')'}</button>
+          <button class="small" style="margin-top:10px;margin-left:6px;background:var(--red-soft);color:var(--red);border-color:var(--red)" onclick="event.stopPropagation();deleteStore('${jsAttr(r.name)}', ${r.order_count})">Delete store</button></div>
         </div></td></tr>`;
     }
   });
@@ -7739,6 +7819,25 @@ function renderStores() {
   document.getElementById('storesBody').innerHTML=h;
 }
 function storeFlagRow(label,v){ const val = v===null||v===undefined ? '<span class="badge-mini" style="background:var(--amber-soft);color:var(--amber)">missing</span>' : (v?'yes':'no'); return `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>${label}</span>${val}</div>`; }
+// Delete a store's saved record (flags, contact info, revenue, courier). If orders still reference
+// the store by name it will reappear rebuilt from those orders (with its setup cleared) until they
+// are reassigned — we warn about that up front.
+async function deleteStore(name, orderCount){
+  const warn = (orderCount>0)
+    ? ('Delete the saved setup for "'+name+'"?\n\nThis clears its flags, contact info, revenue and courier. '+orderCount+' order'+(orderCount>1?'s':'')+' still reference this store by name, so it will reappear here (rebuilt from those orders, with its setup blank) until those orders are reassigned or removed.')
+    : ('Delete the store "'+name+'"?\n\nNo orders reference it, so it will be removed completely. This clears its saved flags, contact info, revenue and courier.');
+  if(!confirm(warn)) return;
+  try{
+    if(window.__HOSTED && window.__HOSTED.storeFlags){ delete window.__HOSTED.storeFlags[name]; }
+    if(typeof sb!=='undefined' && sb){
+      await sb.from('stores').delete().eq('name', name);
+      try{ await sb.from('audit_log').insert({ entity:'store', entity_id:name, action:'delete' }); }catch(e){}
+    }
+    if(typeof showToast==='function') showToast('Store "'+name+'" deleted', 'success');
+  }catch(e){ if(typeof showToast==='function') showToast('Delete failed: '+(e&&e.message||e), 'error'); }
+  storeOpenIdx = null;
+  renderStores();
+}
 function setStoreFilter(f){ storeFilter=f; renderStores(); }
 function toggleStore(i){ storeOpenIdx = storeOpenIdx===i?null:i; renderStores(); }
 function openStoreByName(name){ document.querySelector('.tab-btn[data-tab="stores"]').click(); storeFilter='all'; const reg=buildStoreRegistry(); storeOpenIdx=reg.findIndex(r=>r.name===name); renderStores(); }
@@ -8158,7 +8257,7 @@ function renderAll() {
   renderPriorityQueue();
   renderDelegation();
   renderOrdersDB();
-  renderMethodLogic();
+  renderMissingInfoTab();
   renderDelivery();
   renderStores();
   renderParcelshop();
