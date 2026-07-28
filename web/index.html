@@ -7856,15 +7856,26 @@ function effectiveMethodKey(order){
 }
 // Escalation tasks aren't in a method chain (they're contingent) but can still apply to any escalating order.
 const _ESCALATION_TASKS = { submit_chargeback:1, file_court_claim:1, submit_small_claims_court:1 };
+// ---- Field-classification rules for the Missing Information tab (confirmed with the user) ----
+// Delivery-proof fields: relevant ONLY to a DNA (did-not-arrive) claim (or an undecided order).
+const MI_DNA_ONLY   = { delivery_photo:1, delivery_photo_shows_person:1 };
+// Method-DECISION inputs: only used to pick the method → no task impact once a method is chosen.
+// (weight / volume / quantity are AI-derived and already skipped.)
+const MI_DECISION_ONLY = { item_damaged:1, bought_by_mistake:1 };
+// OUTCOME fields: recorded when a later event happens → always "needed for a future task" until reached.
+const MI_OUTCOME    = { refund_received_date:1, refund_received_amount:1, refund_confirmation_pdf:1, refund_refused_date:1, refund_refused_pdf:1 };
+// CHARGEBACK fields: no task impact until the refund is actually REFUSED, then future.
+const MI_CHARGEBACK = { refund_narrative:1, chargeback_amount:1, chargeback_date:1, chargeback_reference:1, chargeback_type:1, invoice:1, retailer_rebuttal_received:1 };
+// COURT fields: no task impact until a chargeback has actually been FILED, then future.
+const MI_COURT      = { court_claim_ref:1, court_fee_paid:1, defendant_legal_entity:1, hearing_date:1, court_outcome:1, total_recovered:1 };
 function categorizeOrderMissing(order){
   const stage = (typeof computeStage==='function') ? computeStage(order) : 1;
   const out = { current:[], future:[], none:[], completes:[] };
   if(stage==='done') return out;
   const cur = stage;
   const mk = effectiveMethodKey(order);
-  // The tasks that actually apply to this order = its method chain (+ escalation). Once the method is
-  // known, a field whose task is NOT on this order's path represents a task that will NEVER come up —
-  // it is not "missing information", so it's dropped entirely.
+  const chosen = !!mk;
+  // Tasks that apply to this order = its method chain (+ escalation tasks, gated separately below).
   const chain = (mk && typeof METHOD_CHAINS!=='undefined' && METHOD_CHAINS[mk]) ? METHOD_CHAINS[mk] : null;
   const chainSet = {}; if(chain) chain.forEach(c=>chainSet[c]=1);
   const taskApplies = (code)=>{
@@ -7872,6 +7883,9 @@ function categorizeOrderMissing(order){
     if(!code) return true;                  // no task association → can't rule out
     return !!chainSet[code] || !!_ESCALATION_TASKS[code];
   };
+  const _filled = (f)=> (typeof fieldFilled==='function') ? fieldFilled(order,f) : !!order[f];
+  const refused = cur>=6 || !!(order.triggers && order.triggers.refund_unsuccessful) || _filled('refund_refused_date');
+  const chargebackFiled = _filled('chargeback_date') || cur>=8;
   // Fields that COMPLETE the current active task(s) — the task's own deliverable, not "missing".
   const completesCur = {};
   try {
@@ -7880,12 +7894,11 @@ function categorizeOrderMissing(order){
       (TASK_FORM_FIELDS[code]||[]).forEach(f=> completesCur[f]=true);
     });
   } catch(e){}
-  // The "due stage" of a field = when it should have been collected. FIELD_BLOCKING is authoritative
-  // (e.g. invoice is available early but only DUE at chargeback/stage 7); fall back to FIELD_MODEL.avail
-  // for fields FIELD_BLOCKING doesn't list (e.g. refusal/confirmation PDFs).
+  // The "due stage" of a field = when it should have been collected. FIELD_BLOCKING is authoritative;
+  // fall back to FIELD_MODEL.avail for fields FIELD_BLOCKING doesn't list.
   const hasFB = (typeof FIELD_BLOCKING!=='undefined');
   const dueStageOf = (f)=>{
-    if(hasFB && Object.prototype.hasOwnProperty.call(FIELD_BLOCKING, f)) return FIELD_BLOCKING[f]; // may be null (non-blocking)
+    if(hasFB && Object.prototype.hasOwnProperty.call(FIELD_BLOCKING, f)) return FIELD_BLOCKING[f]; // may be null
     const dm = FIELD_MODEL[f]; return dm && dm.avail ? dm.avail : null;
   };
   // Consider the union of blocking fields and modelled fields, so nothing (e.g. delivery address) is missed.
@@ -7897,16 +7910,27 @@ function categorizeOrderMissing(order){
     const dm = FIELD_MODEL[f] || {};
     if(dm.aiDerived) return;                 // auto-extracted from an upload — not chased as "missing"
     if(dm.inForm === false) return;          // derived (e.g. chargeback_bank) — never hand-entered
-    if(fieldFilled(order, f)) return;        // already present
+    if(_filled(f)) return;                    // already present
     if(completesCur[f]){ out.completes.push(f); return; }   // completes the current task → NOT missing
-    // Drop fields whose task never applies to this order's method (e.g. LIT fields on a DNA order).
-    if(!taskApplies(dm.task)) return;
-    // Also honour explicit per-field method lists (e.g. box_photo only for PEB/EB).
-    if(Array.isArray(dm.methods) && mk && dm.methods.indexOf(mk) < 0) return;
+
+    // 1) Delivery-proof fields — only a DNA (or undecided) order needs them; else no task impact.
+    if(MI_DNA_ONLY[f]){ if(chosen && mk!=='DNA'){ out.none.push(f); return; } }
+    // 2) Method-decision inputs — irrelevant once the method is chosen.
+    else if(MI_DECISION_ONLY[f]){ if(chosen){ out.none.push(f); return; } }
+    // 3) Court fields — no impact until a chargeback is filed; then future.
+    else if(MI_COURT[f]){ if(!chargebackFiled){ out.none.push(f); return; } out.future.push(f); return; }
+    // 4) Chargeback fields — no impact until the refund is refused; then future.
+    else if(MI_CHARGEBACK[f]){ if(!refused){ out.none.push(f); return; } out.future.push(f); return; }
+    // 5) Outcome fields — always future until the event is recorded.
+    else if(MI_OUTCOME[f]){ out.future.push(f); return; }
+
+    // 6) Everything else: method applicability, then bucket an INPUT by its due stage.
+    if(!taskApplies(dm.task)){ out.none.push(f); return; }                 // task never comes up for this method → no impact
+    if(Array.isArray(dm.methods) && mk && dm.methods.indexOf(mk) < 0){ out.none.push(f); return; }
     const ess = dueStageOf(f);
     if(ess == null){ out.none.push(f); return; }
     if(ess > cur) out.future.push(f);        // a later task will need it
-    else out.current.push(f);                // due at/before now, but NOT the current task's output → should already be collected
+    else out.current.push(f);                // due at/before now, not the current task's output → should already be collected
   });
   return out;
 }
