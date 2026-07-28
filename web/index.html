@@ -6508,11 +6508,27 @@ function ofRenderTrackings(){
       + (OF_TRACKINGS.length>1?'<button type="button" class="small" onclick="ofRemoveTracking('+i+')" title="remove">×</button>':'<span style="width:24px"></span>')
       + '</div>'
       + '<div style="display:flex;gap:6px;align-items:center;margin-top:5px"><span style="font-size:11px;color:var(--ink-faded);min-width:74px">Delivered:</span>'
-      + '<input type="date" value="'+escAttr(ukToIso(tk.date||''))+'" onchange="ofTrackingFieldNoRerender('+i+',\'date\',this.value?isoToUK(this.value):\'\')" style="width:150px" title="delivery date for this parcel"></div>'
+      + '<input type="date" value="'+escAttr(ukToIso(tk.date||''))+'" onchange="ofTrackingFieldNoRerender('+i+',\'date\',this.value?isoToUK(this.value):\'\');ofSyncDeliveryDate();" style="width:150px" title="delivery date for this parcel"></div>'
       + (link?'<div style="font-size:11px;margin-top:4px"><a href="'+link+'" target="_blank" rel="noopener" style="color:var(--blue)">↗ track on '+escapeHtml(normCourier(tk.courier))+'</a></div>':'')
       + itemsUi
       + '</div>';
   }).join('');
+  ofSyncDeliveryDate();
+}
+// The order's Delivery date auto-fills to the LATEST delivery date across the parcels. Only fills
+// when at least one parcel has a date (never clears a manually-entered date if no parcel dates exist).
+function ofSyncDeliveryDate(){
+  const el = document.getElementById('f_delivery_date_text'); if(!el) return;
+  const times = (OF_TRACKINGS||[]).map(t=>t&&t.date).filter(Boolean)
+    .map(d=>{ const dt=(typeof parseDateLoose==='function')?parseDateLoose(d):null; return dt?dt.getTime():null; })
+    .filter(v=>v!=null);
+  if(!times.length) return;
+  const latest = new Date(Math.max.apply(null, times));
+  const pad=x=>String(x).padStart(2,'0');
+  const iso = latest.getFullYear()+'-'+pad(latest.getMonth()+1)+'-'+pad(latest.getDate());
+  if(el.value === iso) return;
+  el.value = iso;
+  if(typeof onDeliveryDateInput==='function') onDeliveryDateInput();   // re-evaluate the "delivered" trigger
 }
 function ofTrackingField(i,k,v){ if(OF_TRACKINGS[i]){ OF_TRACKINGS[i][k]=v; ofRenderTrackings(); } }
 // Update a parcel field WITHOUT re-rendering (so a text input keeps focus while typing).
