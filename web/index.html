@@ -6547,7 +6547,7 @@ async function ofEstimateWV(){
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ task:'estimate_wv', prompt })
     });
-    if(!res.ok) throw new Error('AI endpoint returned '+res.status);
+    if(!res.ok){ let _m=''; try{ const _d=await res.json(); _m=(_d&&_d.error)||''; }catch(_e){} throw new Error(_m || ('AI endpoint returned '+res.status)); }
     const data = await res.json();
     let arr = data.result || data.items || data;
     if(typeof arr==='string') arr = JSON.parse(arr.replace(/```json|```/g,'').trim());
@@ -8145,7 +8145,7 @@ async function researchRevenue(){
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ task:'company_revenue', store: name || website, website })
     });
-    if(!res.ok) throw new Error('AI endpoint returned '+res.status);
+    if(!res.ok){ let _m=''; try{ const _d=await res.json(); _m=(_d&&_d.error)||''; }catch(_e){} throw new Error(_m || ('AI endpoint returned '+res.status)); }
     const data = await res.json();
     const f=(data&&data.fields)||{};
     btn.disabled=false; btn.textContent=orig;
@@ -8174,7 +8174,7 @@ async function autofillStore(){
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ task:'store_autofill', store: name || website, website })
     });
-    if(!res.ok) throw new Error('AI endpoint returned '+res.status);
+    if(!res.ok){ let _m=''; try{ const _d=await res.json(); _m=(_d&&_d.error)||''; }catch(_e){} throw new Error(_m || ('AI endpoint returned '+res.status)); }
     const data = await res.json();
     if(!data || !data.fields){ status.textContent='Could not find structured details — fill in manually'; status.style.color='var(--amber)'; btn.disabled=false; btn.textContent=orig; return; }
     const f=data.fields;
