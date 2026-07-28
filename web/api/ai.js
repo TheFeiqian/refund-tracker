@@ -11,7 +11,10 @@
 // Configure in Vercel: Project → Settings → Environment Variables → ANTHROPIC_API_KEY.
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-sonnet-4-5-20250929';
+// Cost lever: all tasks here (document/receipt/label parsing, photo vision, retailer-reply reading,
+// and the web-search research) are structured extraction that Claude Haiku 4.5 handles well at ~3x
+// lower token cost than Sonnet. Switch this back to a Sonnet id if a task needs the larger model.
+const MODEL = 'claude-haiku-4-5-20251001';
 
 function jsonFromText(text) {
   if (!text) return null;
