@@ -780,6 +780,30 @@ function __dataUrlParts(dataUrl) {
   const mt = (meta.match(/data:([^;]+)/) || [])[1] || 'image/jpeg';
   return { media_type: mt, image_base64: b64 };
 }
+// Shrink a large IMAGE data URL so the parse POST fits Vercel's ~4.5MB request-body limit (a big
+// confirmation screenshot — e.g. a long Ralph Lauren email — otherwise fails to upload and can't be
+// parsed). PDFs and already-small images are returned unchanged. Re-encodes to JPEG, reducing scale
+// then quality until the payload is safely under the limit while keeping text as legible as possible.
+async function prepImageForParse(dataUrl){
+  try{
+    if(typeof dataUrl!=='string' || dataUrl.indexOf('data:')!==0) return dataUrl;
+    const mt = (dataUrl.slice(0, dataUrl.indexOf(',')).match(/data:([^;]+)/)||[])[1] || '';
+    if(mt==='application/pdf' || !/^image\//.test(mt)) return dataUrl;   // PDFs handled server-side
+    const LIMIT = 3_600_000;                                             // target data-URL string length
+    if(dataUrl.length < LIMIT) return dataUrl;                            // already small enough
+    const img = await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=dataUrl; });
+    const drawAt = (s)=>{ const cw=Math.max(1,Math.round(img.width*s)), ch=Math.max(1,Math.round(img.height*s));
+      const c=document.createElement('canvas'); c.width=cw; c.height=ch; const x=c.getContext('2d');
+      x.fillStyle='#fff'; x.fillRect(0,0,cw,ch); x.drawImage(img,0,0,cw,ch); return c; };
+    let scale=1, q=0.85, out=dataUrl;
+    for(let i=0;i<10;i++){
+      const c=drawAt(scale); out=c.toDataURL('image/jpeg', q);
+      if(out.length < LIMIT) return out;
+      if(Math.max(c.width,c.height) > 1800) scale*=0.82; else { q-=0.12; if(q<0.4) q=0.4; }
+    }
+    return out;
+  }catch(e){ return dataUrl; }
+}
 window.__parseReceiptImpl = async function (file, dataUrl) {
   try {
     const { media_type, image_base64 } = __dataUrlParts(dataUrl);
@@ -4003,6 +4027,7 @@ async function parseAttachedConfirmation(){
   const hints = (typeof parseHintsFor==='function') ? parseHintsFor(storeNow) : '';
   const parsed = (typeof window.__parseOrderImpl==='function') ? await window.__parseOrderImpl(dataUrl, hints) : {};
   if(btn){ btn.disabled=false; btn.textContent='Re-parse'; }
+  if(parsed && parsed.__error){ if(status) status.innerHTML='<span style="color:var(--red)">Parse failed: '+escapeHtml(parsed.__error)+'. Try a smaller/clearer file (or a PDF), or fill in manually.</span>'; showToast('Parse failed: '+parsed.__error,'error'); return; }
   if(!parsed || !Object.keys(parsed).length){ if(status) status.innerHTML='<span style="color:var(--amber)">Couldn’t read the details — check the file is a clear confirmation, or fill in manually.</span>'; showToast('Could not read that confirmation','info'); return; }
   // Confirm before overwriting existing details.
   const hasData = ((document.getElementById('f_store')||{}).value||'').trim() || (typeof OF_ITEMS!=='undefined' && (OF_ITEMS||[]).some(it=>it&&it.name));
@@ -4015,15 +4040,16 @@ async function parseAttachedConfirmation(){
 // Hosted AI hook: extract structured fields from an order confirmation (with per-store learning hints).
 window.__parseOrderImpl = async function(dataUrl, hints){
   try{
+    dataUrl = await prepImageForParse(dataUrl);                       // shrink big images so the POST fits
     const { media_type, image_base64 } = __dataUrlParts(dataUrl);
     const res = await fetch((window.APP_CONFIG&&window.APP_CONFIG.aiProxyUrl)||'/api/ai', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ task:'parse_order', image_base64, media_type, hints: hints||'' })
     });
-    if(!res.ok) return {};
+    if(!res.ok){ let msg=''; try{ const d=await res.json(); msg=(d&&d.error)||''; }catch(e){} return {__error: msg || ('the AI endpoint returned '+res.status+(res.status===413?' — the file is too large':''))}; }
     const data = await res.json();
     return (data && data.fields) || {};
-  }catch(e){ return {}; }
+  }catch(e){ return {__error: (e&&e.message)||'network error'}; }
 };
 // Auto-fill the OPEN order editor from parsed fields (only fills empty fields — the user edits inline).
 // Apply parsed fields to the OPEN order editor. override=true replaces existing details with the
@@ -7799,12 +7825,41 @@ let storeFilter='all', storeOpenIdx=null, STORE_REG_CACHE=[];
 //   none    → nothing depends on it (non-blocking/display field, or a field for a method the
 //             order isn't using).
 // ============================================================
+// The order's effective method key — o.method if set, otherwise inferred from its triggers/state so
+// method-specific filtering still works for orders whose method was reached via triggers not the field.
+function effectiveMethodKey(order){
+  let mk = (typeof methodKey==='function') ? methodKey(order) : '';
+  if(mk) return mk;
+  const t = (order && order.triggers) || {};
+  if(t.lit_created) return (order.method==='LIT with pic') ? 'LITPIC' : 'LIT';
+  if(t.rts_created) return 'RTS';
+  if(t.dna_email_sent) return 'DNA';  // DNA/PEB/EB share the same chain, so this suffices for filtering
+  try{
+    const d = (typeof deriveMethod==='function') ? deriveMethod(order, (typeof getStoreFlags==='function')?getStoreFlags():{}) : null;
+    if(d && d.method && !d.blocked_at){ const m=(''+d.method).toLowerCase();
+      if(m.indexOf('lit with pic')>=0) return 'LITPIC'; if(m==='lit') return 'LIT'; if(m==='rts') return 'RTS';
+      if(m==='dna') return 'DNA'; if(m==='peb') return 'PEB'; if(m==='eb') return 'EB'; }
+  }catch(e){}
+  return '';
+}
+// Escalation tasks aren't in a method chain (they're contingent) but can still apply to any escalating order.
+const _ESCALATION_TASKS = { submit_chargeback:1, file_court_claim:1, submit_small_claims_court:1 };
 function categorizeOrderMissing(order){
   const stage = (typeof computeStage==='function') ? computeStage(order) : 1;
   const out = { current:[], future:[], none:[], completes:[] };
   if(stage==='done') return out;
   const cur = stage;
-  const mk = (typeof methodKey==='function') ? methodKey(order) : '';
+  const mk = effectiveMethodKey(order);
+  // The tasks that actually apply to this order = its method chain (+ escalation). Once the method is
+  // known, a field whose task is NOT on this order's path represents a task that will NEVER come up —
+  // it is not "missing information", so it's dropped entirely.
+  const chain = (mk && typeof METHOD_CHAINS!=='undefined' && METHOD_CHAINS[mk]) ? METHOD_CHAINS[mk] : null;
+  const chainSet = {}; if(chain) chain.forEach(c=>chainSet[c]=1);
+  const taskApplies = (code)=>{
+    if(!chain) return true;                 // method undecided → every path still possible
+    if(!code) return true;                  // no task association → can't rule out
+    return !!chainSet[code] || !!_ESCALATION_TASKS[code];
+  };
   // Fields that COMPLETE the current active task(s) — the task's own deliverable, not "missing".
   const completesCur = {};
   try {
@@ -7832,11 +7887,12 @@ function categorizeOrderMissing(order){
     if(dm.inForm === false) return;          // derived (e.g. chargeback_bank) — never hand-entered
     if(fieldFilled(order, f)) return;        // already present
     if(completesCur[f]){ out.completes.push(f); return; }   // completes the current task → NOT missing
+    // Drop fields whose task never applies to this order's method (e.g. LIT fields on a DNA order).
+    if(!taskApplies(dm.task)) return;
+    // Also honour explicit per-field method lists (e.g. box_photo only for PEB/EB).
+    if(Array.isArray(dm.methods) && mk && dm.methods.indexOf(mk) < 0) return;
     const ess = dueStageOf(f);
-    // Does this field apply to the order's chosen method? (method-specific fields for other methods never matter here)
-    let applies = true;
-    if(Array.isArray(dm.methods) && mk){ applies = dm.methods.indexOf(mk) >= 0; }
-    if(ess == null || !applies){ out.none.push(f); return; }
+    if(ess == null){ out.none.push(f); return; }
     if(ess > cur) out.future.push(f);        // a later task will need it
     else out.current.push(f);                // due at/before now, but NOT the current task's output → should already be collected
   });
@@ -8156,6 +8212,12 @@ async function autofillStore(){
 }
 function saveStoreForm(){
   const name=document.getElementById('sf_name').value.trim(); if(!name){alert('Store name required');return;}
+  // Saving a store with this name clears any prior "deleted" tombstone on it (so it isn't hidden).
+  if(DATA._deletedStores && DATA._deletedStores.indexOf(name)>=0){
+    DATA._deletedStores = DATA._deletedStores.filter(n=>n!==name);
+    if(window.__HOSTED) window.__HOSTED.deletedStores = DATA._deletedStores.slice();
+    if(typeof sb!=='undefined' && sb){ try{ sb.from('app_state').upsert({key:'deleted_stores', value:DATA._deletedStores}, {onConflict:'key'}); }catch(e){} }
+  }
   const cv=id=>{const el=document.getElementById(id);return el?el.value.trim():'';};
   const contactInfo={
     website: cv('sfc_website_v'),
@@ -8172,6 +8234,15 @@ function saveStoreForm(){
     collection:document.getElementById('sf_collection').checked, cat:cats,
     contactInfo:contactInfo, courier:document.getElementById('sf_courier').value,
     inbound_courier:document.getElementById('sf_inbound').value, revenue:revenue };
+  // RENAME in place: if the store's name was changed while editing an existing store, move every
+  // linked order onto the new name and remove the old record — instead of leaving a duplicate.
+  const oldName = (window._editStore && window._editStore.name) ? window._editStore.name : '';
+  if(oldName && oldName !== name){
+    DATA.orders.forEach(o=>{ if(o.store===oldName) o.store=name; });
+    if(window.__HOSTED && window.__HOSTED.storeFlags){ delete window.__HOSTED.storeFlags[oldName]; }
+    if(typeof sb!=='undefined' && sb){ try{ sb.from('stores').delete().eq('name', oldName); }catch(e){} }
+    if(typeof recordDeletedStore==='function'){ try{ recordDeletedStore(oldName); }catch(e){} }
+  }
   setStoreFlags(name, rec);
   // Setting store flags makes blocked orders RESOLVE in Method Choice, where the
   // admin confirms. We do NOT silently write o.method here — manual confirmation
