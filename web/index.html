@@ -1738,7 +1738,7 @@ const COURIERS = {
   'FedEx':       { track: t => 'https://www.fedex.com/fedextrack/?trknbr=' + encodeURIComponent(t), proof: 'Delivery photo: FedEx does NOT show it on the tracking page — call FedEx, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
   'UPS':         { track: t => 'https://www.ups.com/track?tracknum=' + encodeURIComponent(t), proof: 'Delivery photo: UPS does NOT reliably show it on the tracking page — call UPS, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
   'Yodel':       { track: t => 'https://www.yodel.co.uk/tracking/' + encodeURIComponent(t), proof: 'Delivery photo: if it is not on the Yodel tracking page, call Yodel, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
-  'Other':       { track: t => '', proof: 'Delivery photo: if it is not on the courier’s tracking page, call the courier, quote the tracking number, and ask them to send you the proof-of-delivery photo. Then upload it.' },
+  'Other':       { track: t => 'https://parcelsapp.com/en/tracking/' + encodeURIComponent(t), proof: 'Delivery photo: open the tracking link below (parcelsapp.com auto-detects the courier from the tracking number). If the photo isn’t shown, call the courier, quote the tracking number, and ask them to send the proof-of-delivery photo. Then upload it.' },
 };
 const COURIER_LIST = ['Royal Mail','Evri','Parcelforce','DPD','DHL','FedEx','UPS','Yodel','Other'];
 function normCourier(c){
