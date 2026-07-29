@@ -3382,8 +3382,26 @@ function instructionHasMissingTokens(text) {
 function escapeHtmlPreserveTokens(text) {
   return escapeHtml(text).replace(/\[([\w\s]+) - TBD\]/g, '<span class="placeholder-token">[$1 — TBD]</span>');
 }
-// The PDFs/files each task needs on hand to be carried out (so its description can link them).
-function taskRelevantFiles(code){
+// The evidence file(s) a given METHOD produces — what a claim/return actually has on file. This is
+// what makes the retailer-contact / chase / chargeback tasks method-aware instead of one-size-fits-all.
+//   DNA  → a delivery photo (parcel marked delivered but not received); NO return, NO box photo.
+//   PEB/EB → a box photo (missing items removed / empty box); NO return posted.
+//   LIT / LIT with pic / BBM-label → the return label + proof of postage.
+//   RTS  → the RTS label photo + proof of postage.
+//   BBM-collection → the collection hand-over confirmation.
+function methodEvidenceFiles(mk){
+  if(mk==='DNA') return ['delivery_photo'];
+  if(mk==='PEB' || mk==='EB') return ['box_photo'];
+  if(mk==='RTS') return ['rts_label_photo','proof_of_postage'];
+  if(mk==='LIT' || mk==='LITPIC' || mk==='BBML') return ['return_label_pdf','proof_of_postage'];
+  if(mk==='BBMC') return ['collection_handover'];
+  return [];   // method not decided yet — no return/claim evidence exists
+}
+// The files each task needs on hand to be carried out (so its description can link them). Tasks whose
+// evidence depends on the method (contact retailer, chase, chargeback, court) resolve it per order.
+function taskRelevantFiles(order, code){
+  const mk = (typeof effectiveMethodKey==='function') ? effectiveMethodKey(order||{}) : '';
+  const ev = methodEvidenceFiles(mk);
   const M = {
     place_order:                    ['order_confirmation'],
     generate_return_label:          ['order_confirmation'],
@@ -3394,18 +3412,19 @@ function taskRelevantFiles(code){
     bbm_book_label:                 ['order_confirmation','return_label_pdf'],
     bbm_book_collection:            ['order_confirmation'],
     hand_over_collection:           ['collection_handover'],
-    contact_retailer_investigation: ['order_confirmation','proof_of_postage','box_photo'],
-    chase_investigation:            ['order_confirmation','proof_of_postage','refund_refused_pdf'],
-    bbm_confirm_refund:             ['proof_of_postage','collection_handover','refund_confirmation_pdf'],
-    submit_chargeback:              ['order_confirmation','proof_of_postage','return_label_pdf','refund_refused_pdf','invoice'],
-    file_court_claim:               ['order_confirmation','proof_of_postage','return_label_pdf','refund_refused_pdf','invoice'],
+    // Method-aware: contact/chase/chargeback/court reference whatever the METHOD's evidence is.
+    contact_retailer_investigation: ['order_confirmation'].concat(ev),
+    chase_investigation:            ['order_confirmation'].concat(ev).concat(['refund_refused_pdf']),
+    bbm_confirm_refund:             ev.concat(['refund_confirmation_pdf']),
+    submit_chargeback:              ['order_confirmation'].concat(ev).concat(['refund_refused_pdf','invoice']),
+    file_court_claim:               ['order_confirmation'].concat(ev).concat(['refund_refused_pdf','invoice']),
   };
-  return M[code] || [];
+  return [...new Set(M[code] || [])];
 }
 // HTML block of clickable links to the task's relevant PDFs (Download + Copy link). Files that
 // haven't been uploaded yet are listed greyed-out so it's clear what the task still needs.
 function taskFilesHtml(order, code){
-  const rel = taskRelevantFiles(code);
+  const rel = taskRelevantFiles(order, code);
   if(!rel.length || !order) return '';
   const has = (f)=> (typeof fieldFilled==='function'?fieldFilled(order,f):!!order[f]) || !!order[f+'_path'] || !!order[f+'_file'];
   const rows = rel.map(f=>{
