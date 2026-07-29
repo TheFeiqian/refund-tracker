@@ -1130,7 +1130,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
         <button class="role-opt active" data-role="admin" onclick="applyRole('admin')">Admin</button>
         <button class="role-opt" data-role="member" onclick="applyRole('member')">Member</button>
       </span>
-      <span id="whoami" style="font-size:12px;color:var(--ink-faded)"></span><span id="saveStatus" class="save-status saved">All changes saved</span><button onclick="__signOut()" class="ghost-light">Sign out</button>
+      <span id="whoami" style="font-size:12px;color:var(--ink-faded)"></span><span id="saveStatus" class="save-status saved">All changes saved</span><button onclick="openGmailSettingsFresh()" class="ghost-light" title="Connect the Gmail accounts you send retailer emails from">✉ Email accounts</button><button onclick="__signOut()" class="ghost-light">Sign out</button>
       <button onclick="exportData()" class="ghost-light admin-only">Export JSON</button>
       <button onclick="importData()" class="ghost-light admin-only">Import JSON</button>
       <input type="file" id="importFile" accept="application/json" style="display:none">
@@ -3443,6 +3443,138 @@ function taskFilesHtml(order, code){
 }
 
 // ============================================================
+// EMAIL THE RETAILER — send from the order's (team-owned) Gmail account, via connected OAuth.
+// Backend: /api/gmail/{start,callback,accounts,send}. Accounts each connect their own Gmail once.
+// ============================================================
+window.__gmailAccounts = null;
+async function refreshGmailAccounts(force){
+  if(!force && Array.isArray(window.__gmailAccounts)) return window.__gmailAccounts;
+  try{ const r = await fetch('/api/gmail/accounts'); if(r.ok){ const d = await r.json(); window.__gmailAccounts = d.accounts||[]; } else { window.__gmailAccounts = window.__gmailAccounts||[]; } }
+  catch(e){ window.__gmailAccounts = window.__gmailAccounts||[]; }
+  return window.__gmailAccounts;
+}
+function connectGmail(){ window.location.href = '/api/gmail/start'; }
+async function disconnectGmail(email){
+  if(!confirm('Disconnect '+email+'? It will no longer be able to send until reconnected.')) return;
+  try{ await fetch('/api/gmail/accounts?email='+encodeURIComponent(email), { method:'DELETE' }); }catch(e){}
+  await refreshGmailAccounts(true); openGmailSettings();
+}
+// Retailer email address from the store's saved contact details.
+function storeRetailerEmail(order){
+  if(!order||!order.store) return '';
+  let ci=null;
+  try{ const flags=(typeof getStoreFlags==='function')?getStoreFlags()[order.store]:null; ci=(flags&&flags.contactInfo)||(typeof CONTACT_DATA!=='undefined'?CONTACT_DATA[order.store]:null)||null; }catch(e){}
+  return (ci&&ci.email)||'';
+}
+function isRetailerEmailTask(code){ return ['contact_retailer_investigation','chase_investigation','generate_return_label','bbm_book','bbm_book_label','bbm_book_collection'].indexOf(code)>=0; }
+// A retailer-facing draft (editable before sending) for a given task.
+function buildRetailerDraft(order, taskCode){
+  const store=order.store||'the retailer';
+  const orderNo=order.store_order_number||order.order_id||'';
+  const name=order.delivery_name||order.person||'';
+  const addr=(order.use_specified_address&&order.specified_address)?order.specified_address:(order.address||'');
+  const narrative=(typeof tplVal==='function')?tplVal(order,'retailer_narrative'):null;
+  let subject, intro;
+  if(taskCode==='chase_investigation'){
+    subject='Follow-up — order '+orderNo;
+    intro='I am following up on my previous contact regarding order '+orderNo+'. I have not yet received a resolution and would be grateful for an update.';
+  } else if(taskCode==='generate_return_label' || taskCode==='bbm_book' || taskCode==='bbm_book_label' || taskCode==='bbm_book_collection'){
+    subject='Return request — order '+orderNo;
+    intro='I would like to return my order '+orderNo+'. Please could you send a return label or advise on how to arrange the return.';
+  } else {
+    subject=store+' order '+orderNo+' — issue with my order';
+    intro=narrative || ('I am writing regarding my order '+orderNo+'. I would like to open an investigation and request a refund. Please advise on the next steps.');
+  }
+  const id='\n\nOrder details:\n  Name: '+name+'\n  Email: '+(order.email||'')+'\n  Order number: '+orderNo+(addr?('\n  Delivery address: '+addr):'');
+  const body='Hello '+store+' Customer Service,\n\n'+intro+id+'\n\nI have attached the relevant documents for your reference.\n\nKind regards,\n'+name;
+  return { subject, body };
+}
+async function openRetailerEmail(orderId, taskCode){
+  const order=DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
+  const accounts=await refreshGmailAccounts(true);
+  const to=storeRetailerEmail(order);
+  const from=order.email||'';
+  const draft=buildRetailerDraft(order, taskCode);
+  // relevant files that actually exist → offered as attachments
+  let links={}; try{ links=(typeof resolveFileLinks==='function')?await resolveFileLinks(order):{}; }catch(e){}
+  const relFiles=(typeof taskRelevantFiles==='function')?taskRelevantFiles(order, taskCode):[];
+  const attach=relFiles.filter(f=>links[f]).map(f=>({ field:f, name:(links[f].name||f), url:links[f].url }));
+  const fromConnected = accounts.indexOf(from)>=0;
+  const fromOpts = accounts.map(a=>'<option value="'+escAttr(a)+'"'+(a===from?' selected':'')+'>'+escapeHtml(a)+'</option>').join('');
+  let ov=document.getElementById('emailRetailerOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='emailRetailerOv'; ov.className='modal-overlay active'; ov.style.cssText='display:flex';
+  ov.innerHTML='<div class="modal" style="max-width:600px"><div class="modal-head"><h2>Email retailer</h2><button class="modal-close" onclick="document.getElementById(\'emailRetailerOv\').remove()">&times;</button></div>'
+    + '<div class="modal-body">'
+    + (accounts.length
+        ? ('<div class="form-field"><label>From (order account)</label><select id="er_from">'+fromOpts+'</select>'
+            + (fromConnected?'':'<div style="font-size:11px;color:var(--amber);margin-top:4px">⚠ The order’s email ('+escapeHtml(from||'—')+') isn’t connected. Pick a connected account above, or connect it under Email accounts.</div>')+'</div>')
+        : '<div style="background:var(--amber-soft);color:var(--amber);border-radius:8px;padding:10px 12px;font-size:13px">No Gmail account is connected yet. <button class="small" onclick="connectGmail()">Connect Gmail</button></div>')
+    + '<div class="form-field"><label>To (retailer)</label><input type="text" id="er_to" value="'+escAttr(to)+'" placeholder="retailer customer-service email"></div>'
+    + '<div class="form-field"><label>Subject</label><input type="text" id="er_subject" value="'+escAttr(draft.subject)+'"></div>'
+    + '<div class="form-field full"><label>Message</label><textarea id="er_body" rows="10">'+escapeHtml(draft.body)+'</textarea></div>'
+    + '<div class="form-field full"><label>Attachments</label>'
+      + (attach.length ? attach.map((a,i)=>'<label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400"><input type="checkbox" class="er_att" data-i="'+i+'" checked style="width:auto;margin:0"> 📎 '+escapeHtml(a.name)+'</label>').join('')
+                       : '<div style="font-size:12px;color:var(--ink-faded)">No uploaded files for this task to attach.</div>')
+    + '</div>'
+    + '<div id="er_status" style="font-size:12px;margin-top:6px;min-height:16px"></div>'
+    + '</div>'
+    + '<div class="modal-foot">'
+    + (accounts.length ? '<button class="primary" id="er_send" onclick="sendRetailerEmail()">Send email</button>' : '')
+    + '<button onclick="document.getElementById(\'emailRetailerOv\').remove()">Cancel</button></div></div>';
+  document.body.appendChild(ov);
+  window.__erAttach = attach;
+}
+async function sendRetailerEmail(){
+  const fromEl=document.getElementById('er_from'); const from=fromEl?fromEl.value:'';
+  const to=(document.getElementById('er_to')||{}).value||'';
+  const subject=(document.getElementById('er_subject')||{}).value||'';
+  const body=(document.getElementById('er_body')||{}).value||'';
+  const status=document.getElementById('er_status'); const btn=document.getElementById('er_send');
+  if(!from){ if(status){status.style.color='var(--amber)';status.textContent='Pick a connected From account (or connect one).';} return; }
+  if(!to.trim()){ if(status){status.style.color='var(--amber)';status.textContent='Enter the retailer email address.';} return; }
+  const checked=[...document.querySelectorAll('.er_att:checked')].map(c=>+c.getAttribute('data-i'));
+  const attachmentUrls=(window.__erAttach||[]).filter((a,i)=>checked.indexOf(i)>=0).map(a=>({url:a.url,name:a.name}));
+  if(btn){ btn.disabled=true; btn.textContent='Sending…'; }
+  if(status){ status.style.color='var(--ink-faded)'; status.textContent='Sending via Gmail…'; }
+  try{
+    const r=await fetch('/api/gmail/send', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ from, to:to.trim(), subject, body, attachmentUrls }) });
+    const d=await r.json();
+    if(!r.ok || (d&&d.error)){ throw new Error((d&&d.error)||('send failed ('+r.status+')')); }
+    if(status){ status.style.color='var(--green)'; status.textContent='✓ Sent'+(d.attached?(' with '+d.attached+' attachment'+(d.attached>1?'s':'')):'')+'.'; }
+    if(typeof showToast==='function') showToast('Email sent to retailer','success');
+    setTimeout(()=>{ const ov=document.getElementById('emailRetailerOv'); if(ov) ov.remove(); }, 1200);
+  }catch(e){ if(status){ status.style.color='var(--red)'; status.textContent='Failed: '+(e.message||e); } if(btn){ btn.disabled=false; btn.textContent='Send email'; } }
+}
+function openGmailSettings(){
+  const accounts=window.__gmailAccounts||[];
+  let ov=document.getElementById('gmailSettingsOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='gmailSettingsOv'; ov.className='modal-overlay active'; ov.style.cssText='display:flex';
+  ov.innerHTML='<div class="modal" style="max-width:480px"><div class="modal-head"><h2>Email accounts</h2><button class="modal-close" onclick="document.getElementById(\'gmailSettingsOv\').remove()">&times;</button></div>'
+    + '<div class="modal-body">'
+    + '<div style="font-size:13px;color:var(--ink-faded);margin-bottom:10px">Connect the Gmail accounts you send retailer emails from. Each person connects their own account once (you’ll sign into Google and grant “send email” permission). Emails then send <strong>from that account</strong>.</div>'
+    + (accounts.length
+        ? '<div>'+accounts.map(a=>'<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--line)"><span style="font-size:13px">✅ '+escapeHtml(a)+'</span><button class="tiny" onclick="disconnectGmail(\''+escAttr(a)+'\')">Disconnect</button></div>').join('')+'</div>'
+        : '<div style="font-size:13px;color:var(--ink-faded)">No accounts connected yet.</div>')
+    + '</div>'
+    + '<div class="modal-foot"><button class="primary" onclick="connectGmail()">+ Connect a Gmail account</button><button onclick="document.getElementById(\'gmailSettingsOv\').remove()">Close</button></div></div>';
+  document.body.appendChild(ov);
+}
+async function openGmailSettingsFresh(){ await refreshGmailAccounts(true); openGmailSettings(); }
+// Handle the OAuth return (?gmail_connected / ?gmail_error) once the page is up.
+function handleGmailReturn(){
+  try{
+    const u=new URL(location.href);
+    const c=u.searchParams.get('gmail_connected'), e=u.searchParams.get('gmail_error');
+    if(!c && !e) return;
+    u.searchParams.delete('gmail_connected'); u.searchParams.delete('gmail_error');
+    history.replaceState({}, '', u.pathname+(u.search||'')+u.hash);
+    refreshGmailAccounts(true);
+    setTimeout(()=>{ if(typeof showToast==='function'){ if(c) showToast('Gmail connected: '+c,'success'); if(e) showToast('Gmail connect failed: '+e,'error'); } }, 600);
+  }catch(_){}
+}
+document.addEventListener('DOMContentLoaded', handleGmailReturn);
+
+// ============================================================
 // FORMATTING
 // ============================================================
 function fmtMoney(n) { if (!n) return '£0'; return '£' + Math.round(n).toLocaleString(); }
@@ -4491,7 +4623,9 @@ function openDelgTaskDetailFor(orderId, code){
 
   const assignedTo = delgEffectiveAssignee(orderId, code) || 'Unassigned';
   const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre>'
-    + (code==='choose_method' && typeof methodDecisionHtml==='function' ? methodDecisionHtml(order) : '') + '</div>'
+    + (code==='choose_method' && typeof methodDecisionHtml==='function' ? methodDecisionHtml(order) : '')
+    + (isRetailerEmailTask(code) ? '<div style="margin-top:8px"><button type="button" class="delg-detail-btn" onclick="openRetailerEmail(\''+escAttr(orderId)+'\',\''+escAttr(code)+'\')">✉ Email retailer from the order account</button></div>' : '')
+    + '</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Files &amp; documents — return label, proof of postage, etc.</div>'+filesHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Information needed to complete — fill in / upload below</div>'+completeHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Missing information (needed to do the task)</div>'+missingHtml+'</div>'
@@ -4844,6 +4978,7 @@ function renderPriorityQueue() {
               <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
                 <button class="small" onclick="copyInstruction('${rowKey}'); event.stopPropagation();">Copy text</button>
                 ${t.task.type.code!=='choose_method' ? `<button class="small" onclick="sendAsForm('${rowKey}','${escAttr(t.task.type.code)}','${escAttr(t.order.order_id)}'); event.stopPropagation();" title="Send the task as a Google Form. The assignee fills the form to mark it complete; their answers flow into the order. They never have to come into this app.">Send as form ↗</button>` : ''}
+                ${isRetailerEmailTask(t.task.type.code) ? `<button class="small" onclick="openRetailerEmail('${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();" title="Email this to the retailer from the order's Gmail account">✉ Email retailer</button>` : ''}
                 <button class="small" onclick="openOrderModal('${escAttr(t.order.order_id)}'); event.stopPropagation();">Open order</button>
               </div>
             </div>
