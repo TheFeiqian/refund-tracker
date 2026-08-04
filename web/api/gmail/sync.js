@@ -134,12 +134,18 @@ module.exports = async (req, res) => {
       const refresh = await getToken(s.account);
       if (!refresh) return res.status(400).json({ error: 'The account ' + s.account + ' is not connected. Connect it under Email accounts first.' });
       const access = await accessFromRefresh(refresh);
-      const terms = [];
-      if (s.retailerEmail) terms.push('(from:' + s.retailerEmail + ' OR to:' + s.retailerEmail + ')');
-      if (s.orderNo) terms.push('"' + String(s.orderNo).replace(/"/g, '') + '"');
-      const query = terms.join(' ');
-      if (!query) return res.status(400).json({ error: 'Need a retailer email or order number to search for.' });
-      const threadIds = await searchThreadIds(access, query);
+      // Retailer emails don't always contain the order number, so match by email first (with the order
+      // number to disambiguate if it helps), then loosen: email alone, then order number alone.
+      const emailClause = s.retailerEmail ? '(from:' + s.retailerEmail + ' OR to:' + s.retailerEmail + ')' : '';
+      const numClause = s.orderNo ? '"' + String(s.orderNo).replace(/"/g, '') + '"' : '';
+      const queries = [];
+      if (emailClause && numClause) queries.push(emailClause + ' ' + numClause);
+      if (emailClause) queries.push(emailClause);
+      if (numClause) queries.push(numClause);
+      if (!queries.length) return res.status(400).json({ error: 'Need a retailer email or order number to search for.' });
+      let threadIds = [], usedQuery = '';
+      for (const q of queries) { threadIds = await searchThreadIds(access, q); usedQuery = q; if (threadIds.length) break; }
+      out.query = usedQuery;
       const chosen = threadIds.slice(0, 1); // link the most-recent matching thread
       for (const tid of chosen) { await processThread({ account: s.account, threadId: tid, orderId: s.orderId, ctx: s.ctx || {} }, kb, out); }
       out.linkedThreadId = chosen[0] || '';
