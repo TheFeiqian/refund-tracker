@@ -3682,6 +3682,49 @@ function convMetaHtml(order){
     +'<button class="small" onclick="checkOrderReplies(\''+escAttr(order.order_id)+'\', this)">↻ Check this claim</button>'
     +'</div></div>';
 }
+// Inline replies panel for the CHASE-INVESTIGATION task — this is where the collected retailer replies live.
+function chaseConversationHtml(order){
+  if(!order) return '';
+  if(!order.gmail_thread_id){
+    return '<div style="border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin-top:10px;font-size:12px;color:var(--ink-faded)">No retailer email thread linked yet — send the first email from the contact-retailer task, then replies collect here automatically.</div>';
+  }
+  return '<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div style="font-weight:600;font-size:12px">Retailer replies</div>'
+    +'<div style="display:flex;gap:6px"><button type="button" class="tiny" onclick="event.stopPropagation();checkOrderReplies(\''+escAttr(order.order_id)+'\', this)">↻ Check for replies</button>'
+    +'<button type="button" class="tiny" onclick="event.stopPropagation();openConversation(\''+escAttr(order.order_id)+'\')">💬 Open &amp; reply</button></div></div>'
+    +convMetaHtml(order)
+    +'<div class="chaseconv-body" data-order="'+escAttr(order.order_id)+'" style="font-size:12px;color:var(--ink-faded)">Loading replies…</div>'
+    +'</div>';
+}
+// Read-only inline timeline (reply/approve actions happen in the full modal to keep per-panel state clean).
+function renderConversationInline(order, messages){
+  if(!messages.length) return '<div style="font-size:12px;color:var(--ink-faded)">No replies collected yet. Press “Check for replies” above.</div>';
+  return messages.slice().sort((a,b)=>(a.internal_ts||0)-(b.internal_ts||0)).map(m=>{
+    const when=m.internal_ts?new Date(m.internal_ts).toLocaleString():'';
+    const inbound=m.direction==='in';
+    let h='<div style="border-top:1px solid var(--line);padding:6px 0"><div style="display:flex;justify-content:space-between"><span style="font-size:11px;font-weight:600;color:'+(inbound?'var(--accent-deep)':'var(--ink-soft)')+'">'+(inbound?'← Retailer':'→ You')+'</span><span style="font-size:10px;color:var(--ink-faded)">'+escapeHtml(when)+'</span></div>'
+      +'<div style="font-size:12px;white-space:pre-wrap">'+escapeHtml((m.snippet||m.body||'').slice(0,400))+'</div>';
+    if(inbound && m.ai_processed){
+      const ex=m.ai_extract||{};
+      h+='<div style="margin-top:4px">'+convOutcomeBadge(m.ai_outcome)+(ex.summary?' <span style="font-size:11px;color:var(--ink-soft)">'+escapeHtml(ex.summary)+'</span>':'');
+      if(m.status==='suggested') h+=' <span style="font-size:11px;color:var(--amber)">· suggested reply ready — Open to send</span>';
+      if(m.status==='troubleshoot') h+=' <span style="font-size:11px;color:var(--red)">· needs your answer — Open to reply</span>';
+      if(m.status==='replied') h+=' <span style="font-size:11px;color:var(--green)">· replied</span>';
+      h+='</div>';
+    }
+    return h+'</div>';
+  }).join('');
+}
+// After any render, load the stored replies into each chase-investigation panel.
+async function hydrateChaseConvs(){
+  const nodes=document.querySelectorAll('.chaseconv-body:not([data-done])');
+  for(const el of nodes){
+    el.setAttribute('data-done','1');
+    const oid=el.getAttribute('data-order'); const order=(DATA.orders||[]).find(o=>o.order_id===oid); if(!order) continue;
+    try{ const r=await fetch('/api/gmail/thread?order_id='+encodeURIComponent(oid)); const d=await r.json(); el.innerHTML=renderConversationInline(order, d.messages||[]); }
+    catch(e){ el.innerHTML='<div style="font-size:12px;color:var(--red)">Could not load replies.</div>'; }
+  }
+}
 // List of claims that have a retailer conversation, newest activity first, with attention flags.
 async function openConversations(){
   const orders=trackedThreadOrders();
@@ -4898,6 +4941,7 @@ function openDelgTaskDetailFor(orderId, code){
   const assignedTo = delgEffectiveAssignee(orderId, code) || 'Unassigned';
   const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre>'
     + (code==='choose_method' && typeof methodDecisionHtml==='function' ? methodDecisionHtml(order) : '')
+    + (code==='chase_investigation' ? chaseConversationHtml(order) : '')
     + pebPanelForTask(order, code)
     + (isRetailerEmailTask(code) ? '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="delg-detail-btn" onclick="openRetailerEmail(\''+escAttr(orderId)+'\',\''+escAttr(code)+'\')">✉ Email retailer from the order account</button>'
         + (order.gmail_thread_id ? '<button type="button" class="delg-detail-btn" onclick="checkOrderReplies(\''+escAttr(orderId)+'\', this)">↻ Check this claim for replies</button><button type="button" class="delg-detail-btn" onclick="openConversation(\''+escAttr(orderId)+'\')">💬 View conversation</button>' : '') + '</div>' : '')
@@ -5250,6 +5294,7 @@ function renderPriorityQueue() {
               </div>
               <pre class="instruction-box" id="instr_${rowKey}">${instructionHtml}</pre>
               ${t.task.type.code==='choose_method' ? methodDecisionHtml(t.order) : ''}
+              ${t.task.type.code==='chase_investigation' ? chaseConversationHtml(t.order) : ''}
               ${pebPanelForTask(t.order, t.task.type.code)}
               ${taskFilesHtml(t.order, t.task.type.code)}
               <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
@@ -9060,6 +9105,7 @@ function renderAll() {
   renderStores();
   renderParcelshop();
   renderDashExtra();
+  if(typeof hydrateChaseConvs==='function') hydrateChaseConvs();
 }
 /* hosted boot runs after auth (see bootHosted) */
 
