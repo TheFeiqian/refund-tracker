@@ -5356,16 +5356,6 @@ function renderPriorityQueue() {
               ${delegateHtml}
               <div class="send-row" onclick="event.stopPropagation()" style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
-                  <button class="small" onclick="copyTaskMessage('${escAttr(t.task.task_id)}','${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();">📋 Copy message</button>
-                  <button class="small" style="background:var(--accent-soft);color:var(--accent-deep);font-weight:600" onclick="showTaskFormLinks('${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}','${escAttr(t.task.type.label||'')}'); event.stopPropagation();" title="Generate a link to send the assignee — they upload the photo/PDF/details that mark this task complete, and it lands back on the order automatically">🔗 Send completion form</button>
-                  ${(function(){
-                    const FF = ['order_confirmation','return_label_pdf','proof_of_postage','delivery_photo','damage_photo','collection_handover','invoice'];
-                    // show a download button for ANY file the order actually has uploaded,
-                    // so proof of postage, labels, photos etc. are always reachable from the task.
-                    const show = FF.filter(f => hasOrderFile(t.order,f));
-                    const labelFor = {order_confirmation:'order confirmation', return_label_pdf:'label', proof_of_postage:'proof of postage', delivery_photo:'delivery photo', damage_photo:'damage photo', collection_handover:'handover proof', invoice:'invoice'};
-                    return show.map(f=>'<button class="small" onclick="downloadOrderFile(\''+escAttr(t.order.order_id)+'\',\''+f+'\'); event.stopPropagation();" title="Download the uploaded file to attach to an email">📄 Download '+labelFor[f]+'</button>').join(' ');
-                  })()}
                   ${(function(){ const st=getTaskStatus(t.task.task_id); const sent = st && st.sent_at && !st.completed_at; return sent
                     ? '<button class="small" style="background:var(--green,#2f9e44);color:#fff;font-weight:600" onclick="event.stopPropagation()" disabled>✓ Sent</button>'
                     : '<button class="primary small" onclick="markSentFromQueue(\''+rowKey+'\',\''+escAttr(t.task.task_id)+'\', '+t.task.type.owner_only+', \''+escAttr(t.order.person || '')+'\'); event.stopPropagation();">✓ Mark as sent</button>'; })()}
