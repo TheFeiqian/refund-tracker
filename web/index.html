@@ -3398,11 +3398,22 @@ function methodEvidenceFiles(mk){
   if(mk==='BBMC') return ['collection_handover'];
   return [];   // method not decided yet — no return/claim evidence exists
 }
+// The SINGLE proof file the retailer-contact (start investigation) email attaches for each method:
+//   DNA → proof of delivery (the courier photo)   LIT/LIT-pic/BBM-label → proof of postage
+//   RTS → proof of postage                        PEB/EB → box photo    BBM-collection → hand-over
+function methodPrimaryEvidenceFile(mk){
+  if(mk==='DNA') return 'delivery_photo';
+  if(mk==='PEB' || mk==='EB') return 'box_photo';
+  if(mk==='RTS' || mk==='LIT' || mk==='LITPIC' || mk==='BBML') return 'proof_of_postage';
+  if(mk==='BBMC') return 'collection_handover';
+  return '';
+}
 // The files each task needs on hand to be carried out (so its description can link them). Tasks whose
 // evidence depends on the method (contact retailer, chase, chargeback, court) resolve it per order.
 function taskRelevantFiles(order, code){
   const mk = (typeof effectiveMethodKey==='function') ? effectiveMethodKey(order||{}) : '';
   const ev = methodEvidenceFiles(mk);
+  const primary = methodPrimaryEvidenceFile(mk); // the ONE file the contact-retailer email attaches
   const M = {
     place_order:                    ['order_confirmation'],
     generate_return_label:          ['order_confirmation'],
@@ -3414,7 +3425,7 @@ function taskRelevantFiles(order, code){
     bbm_book_collection:            ['order_confirmation'],
     hand_over_collection:           ['collection_handover'],
     // Method-aware: contact/chase/chargeback/court reference whatever the METHOD's evidence is.
-    contact_retailer_investigation: ['order_confirmation'].concat(ev),
+    contact_retailer_investigation: primary ? [primary] : [],
     chase_investigation:            ['order_confirmation'].concat(ev).concat(['refund_refused_pdf']),
     bbm_confirm_refund:             ev.concat(['refund_confirmation_pdf']),
     submit_chargeback:              ['order_confirmation'].concat(ev).concat(['refund_refused_pdf','invoice']),
@@ -4845,6 +4856,7 @@ function openDelgTaskDetailFor(orderId, code){
   const assignedTo = delgEffectiveAssignee(orderId, code) || 'Unassigned';
   const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre>'
     + (code==='choose_method' && typeof methodDecisionHtml==='function' ? methodDecisionHtml(order) : '')
+    + pebPanelForTask(order, code)
     + (isRetailerEmailTask(code) ? '<div style="margin-top:8px"><button type="button" class="delg-detail-btn" onclick="openRetailerEmail(\''+escAttr(orderId)+'\',\''+escAttr(code)+'\')">✉ Email retailer from the order account</button></div>' : '')
     + '</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Files &amp; documents — return label, proof of postage, etc.</div>'+filesHtml+'</div>'
@@ -5195,6 +5207,7 @@ function renderPriorityQueue() {
               </div>
               <pre class="instruction-box" id="instr_${rowKey}">${instructionHtml}</pre>
               ${t.task.type.code==='choose_method' ? methodDecisionHtml(t.order) : ''}
+              ${pebPanelForTask(t.order, t.task.type.code)}
               ${taskFilesHtml(t.order, t.task.type.code)}
               <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
                 <button class="small" onclick="copyInstruction('${rowKey}'); event.stopPropagation();">Copy text</button>
@@ -7734,26 +7747,36 @@ function renderPebPanelHtml(order){
   const rows = pebRows(order);
   if(!rows.length || !rows.some(r=>r.unitPrice>0 || r.unitWeight>0)) return '<div style="font-size:11px;color:var(--ink-faded)">Add per-item prices and weights in the items list above to get a PEB missing-items recommendation.</div>';
   const sel = pebSelectedIdx(order, rows);
+  const oid = order.order_id || '';
   const disp = rows.slice().sort((a,b)=> (b.lineValue-a.lineValue) || (b.lineWeight-a.lineWeight));
-  let h = '<div style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--red-soft)">'
+  let h = '<div class="peb-panel" data-order="'+escAttr(oid)+'" style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--red-soft)">'
     + '<div style="font-weight:600;font-size:12px;margin-bottom:2px">PEB — items to claim missing</div>'
-    + '<div style="font-size:11px;color:var(--ink-faded);margin-bottom:8px">Recommended set stays under '+PEB_WEIGHT_CAP+' kg and aims for ≥20% of order value &amp; ≥30% of order weight, favouring the highest value + weight. Tick/untick to adjust — totals update live.</div>'
+    + '<div style="font-size:11px;color:var(--ink-faded);margin-bottom:8px">Recommended set stays under '+PEB_WEIGHT_CAP+' kg and aims for ≥20% of order value &amp; ≥30% of order weight, favouring the highest value + weight. Tick/untick to adjust — totals update live and save to the claim.</div>'
     + '<div style="display:flex;font-size:10px;color:var(--ink-faded);text-transform:uppercase;letter-spacing:.4px;gap:8px;padding:0 4px 3px"><span style="width:20px"></span><span style="flex:1">Item</span><span style="width:64px">£ line</span><span style="width:80px">weight</span></div>';
   h += disp.map(r=>'<label style="display:flex;gap:8px;align-items:center;font-size:12px;padding:3px 4px;font-weight:400">'
-    + '<input type="checkbox" class="peb_chk" data-name="'+escAttr(r.name)+'" '+(sel.has(r.idx)?'checked':'')+' onchange="pebRecalc()" style="width:auto;margin:0">'
+    + '<input type="checkbox" class="peb_chk" data-name="'+escAttr(r.name)+'" '+(sel.has(r.idx)?'checked':'')+' onchange="pebRecalc(this)" style="width:auto;margin:0">'
     + '<span style="flex:1">'+escapeHtml(r.name)+(r.qty>1?' <span style="color:var(--ink-faded)">×'+r.qty+'</span>':'')+'</span>'
     + '<span style="width:64px">£'+r.lineValue.toFixed(2)+'</span>'
     + '<span style="width:80px;color:var(--ink-faded)">'+r.lineWeight.toFixed(2)+' kg</span></label>').join('');
-  h += '<div id="peb_totals">'+pebTotalsHtml(order)+'</div>';
+  h += '<div class="peb-totals">'+pebTotalsHtml(order)+'</div>';
   h += '</div>';
   return h;
 }
-function pebRecalc(){
-  const order = DATA.orders.find(o=>o.order_id===editingOrderId); if(!order) return;
-  const names = [...document.querySelectorAll('.peb_chk:checked')].map(c=>c.getAttribute('data-name'));
+// Panel-scoped so it works anywhere the panel appears (choose-method task, contact-retailer task, editor).
+function pebRecalc(el){
+  const panel = (el && el.closest) ? el.closest('.peb-panel') : null;
+  const oid = panel ? panel.getAttribute('data-order') : '';
+  const order = DATA.orders.find(o=>o.order_id===oid); if(!order || !panel) return;
+  const names = [...panel.querySelectorAll('.peb_chk:checked')].map(c=>c.getAttribute('data-name'));
   order.peb_claim = names;
-  const box = document.getElementById('peb_totals'); if(box) box.innerHTML = pebTotalsHtml(order);
+  const box = panel.querySelector('.peb-totals'); if(box) box.innerHTML = pebTotalsHtml(order);
   try{ if(typeof saveData==='function') saveData(); }catch(e){}
+}
+// PEB selector to embed under a task (choose-method shows it via methodDecisionHtml; contact-retailer via this).
+function pebPanelForTask(order, code){
+  if(!order || order.method !== 'PEB') return '';
+  if(code !== 'contact_retailer_investigation') return '';
+  return '<div style="margin-top:8px">'+renderPebPanelHtml(order)+'</div>';
 }
 function renderPebPanel(){
   const order = DATA.orders.find(o=>o.order_id===editingOrderId);
@@ -8205,11 +8228,15 @@ function methodDecisionHtml(order){
         +'<span style="font-size:12px">'+(isNext?'▶ needed now — ':'')+escapeHtml(label)+'</span><span style="white-space:nowrap">'+act+'</span></div>';
     }).join('');
   }
+  // When the decision is (or resolves to) PEB, show the missing-items selector right here in the task.
+  const pebActive = (order.method==='PEB') || (!blocked && r.method==='PEB');
+  const pebHtml = pebActive ? ('<div style="margin-top:10px">'+renderPebPanelHtml(Object.assign({}, order, { method:'PEB' }))+'</div>') : '';
   return '<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px">'
     +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">'+head
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'+actions
     +'<button class="tiny" onclick="event.stopPropagation();setBBM(\''+escAttr(order.order_id)+'\',\'yes\',true)" title="mark bought-by-mistake → BBM chain (skips the tree)">Mark BBM</button></div></div>'
     +rowsHtml
+    +pebHtml
     +missingHtml
     +'</div>';
 }
