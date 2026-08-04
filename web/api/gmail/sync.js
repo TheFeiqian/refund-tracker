@@ -11,9 +11,9 @@ const {
   messageExists, saveMessage, updateMessage, listKb, listTrackedOrders,
   anthropicText, jsonFrom,
 } = require('./_util');
-
+ 
 function emailAddr(s) { const m = String(s || '').match(/<([^>]+)>/); return (m ? m[1] : String(s || '')).trim().toLowerCase(); }
-
+ 
 // One AI call per new inbound message: extract the facts, match the knowledge base, draft a reply.
 async function analyseMessage(msg, ctx, kb) {
   const kbCompact = (kb || []).slice(0, 40).map(k => ({ id: k.id, question: k.question, answer: k.approved_answer }));
@@ -51,7 +51,7 @@ async function analyseMessage(msg, ctx, kb) {
     return { outcome: 'unclear', needs_human: true, missing_info: 'AI analysis failed: ' + (e.message || e), suggested_reply: '' };
   }
 }
-
+ 
 async function processThread(t, kb, out) {
   const { account, threadId, orderId } = t;
   if (!account || !threadId || !orderId) return;
@@ -61,11 +61,11 @@ async function processThread(t, kb, out) {
     if (!refresh) { out.errors.push('Account ' + account + ' is not connected.'); return; }
     access = await accessFromRefresh(refresh);
   } catch (e) { out.errors.push('Auth failed for ' + account + ': ' + (e.message || e)); return; }
-
+ 
   let thread;
   try { thread = await gmailGet(access, 'threads/' + encodeURIComponent(threadId) + '?format=full'); }
   catch (e) { out.errors.push('Read failed for thread ' + threadId + ': ' + (e.message || e)); return; }
-
+ 
   const acct = emailAddr(account);
   const msgs = (thread.messages || []);
   for (const gm of msgs) {
@@ -103,18 +103,53 @@ async function processThread(t, kb, out) {
   }
   out.checked++;
 }
-
+ 
+// Find thread IDs in an account's mailbox matching a search query (newest first).
+async function searchThreadIds(access, query) {
+  const d = await gmailGet(access, 'messages?q=' + encodeURIComponent(query) + '&maxResults=25');
+  const seen = [];
+  (d.messages || []).forEach(m => { if (m.threadId && seen.indexOf(m.threadId) < 0) seen.push(m.threadId); });
+  return seen;
+}
+ 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'content-type');
   if (req.method === 'OPTIONS') return res.status(200).end();
-
+ 
   let payload = req.body;
   if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch (e) { payload = {}; } }
   payload = payload || {};
-
+ 
   const out = { checked: 0, newInbound: 0, attention: [], errors: [] };
+ 
+  // SEARCH mode: no thread linked yet — search the order's mailbox for the retailer conversation,
+  // link the best-matching thread, and collect it. { search: {account, orderId, retailerEmail, orderNo, ctx} }
+  if (payload.search) {
+    const s = payload.search;
+    try {
+      if (!s.account || !s.orderId) return res.status(400).json({ error: 'account and orderId are required' });
+      const kb = await listKb();
+      const refresh = await getToken(s.account);
+      if (!refresh) return res.status(400).json({ error: 'The account ' + s.account + ' is not connected. Connect it under Email accounts first.' });
+      const access = await accessFromRefresh(refresh);
+      const terms = [];
+      if (s.retailerEmail) terms.push('(from:' + s.retailerEmail + ' OR to:' + s.retailerEmail + ')');
+      if (s.orderNo) terms.push('"' + String(s.orderNo).replace(/"/g, '') + '"');
+      const query = terms.join(' ');
+      if (!query) return res.status(400).json({ error: 'Need a retailer email or order number to search for.' });
+      const threadIds = await searchThreadIds(access, query);
+      const chosen = threadIds.slice(0, 1); // link the most-recent matching thread
+      for (const tid of chosen) { await processThread({ account: s.account, threadId: tid, orderId: s.orderId, ctx: s.ctx || {} }, kb, out); }
+      out.linkedThreadId = chosen[0] || '';
+      out.threadIds = threadIds;
+      return res.status(200).json({ ok: true, ...out });
+    } catch (e) {
+      return res.status(502).json({ error: String((e && e.message) || e), ...out });
+    }
+  }
+ 
   try {
     const kb = await listKb();
     let threads = Array.isArray(payload.threads) ? payload.threads : null;
@@ -135,3 +170,4 @@ module.exports = async (req, res) => {
     return res.status(502).json({ error: String((e && e.message) || e), ...out });
   }
 };
+ 
