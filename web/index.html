@@ -3573,6 +3573,7 @@ async function sendRetailerEmail(){
         order.gmail_thread_id = order.gmail_thread_id || d.threadId;
         order.gmail_account = from;
         order.retailer_email = order.retailer_email || to.trim();
+        order.retailer_name = order.retailer_name || order.store || '';
         order.email_subject = order.email_subject || subject;
         order.gmail_participants = Array.from(new Set([].concat(order.gmail_participants||[], [from, to.trim()]).filter(Boolean)));
         if(firstLink) order.thread_linked_at = new Date().toISOString();
@@ -3619,18 +3620,27 @@ document.addEventListener('DOMContentLoaded', handleGmailReturn);
 // Server: /api/gmail/{sync,thread,kb}. Messages + KB live in Supabase (service-role only).
 // ============================================================
 function trackedThreadOrders(){ return (DATA.orders||[]).filter(o=>o && o.gmail_thread_id && o.gmail_account); }
-// Poll Gmail for new replies on every tracked thread. AI runs server-side ONCE per new message.
+// Build the sync descriptor for one order (thread ID is the key — one claim = one Gmail thread).
+function threadDescriptorFor(o){
+  return { account:o.gmail_account, threadId:o.gmail_thread_id, orderId:o.order_id,
+    ctx:{ store:o.store, method:o.method, orderNo:o.store_order_number, name:o.delivery_name||o.person } };
+}
+// POST a set of tracked threads to the monitor; the server pulls each thread's full conversation and
+// stores any messages not seen before (running the AI once per new inbound message).
+async function syncThreads(threads){
+  const r=await fetch('/api/gmail/sync', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ threads }) });
+  const d=await r.json();
+  if(!r.ok||d.error) throw new Error(d.error||('sync failed ('+r.status+')'));
+  return d;
+}
+// Poll Gmail for new replies on EVERY tracked thread. AI runs server-side ONCE per new message.
 async function checkForReplies(silent){
   const btn=document.getElementById('checkRepliesBtn');
   const orders=trackedThreadOrders();
   if(!orders.length){ if(!silent) showToast('No tracked email threads yet — send a retailer email first.','warn'); return null; }
-  const threads=orders.map(o=>({ account:o.gmail_account, threadId:o.gmail_thread_id, orderId:o.order_id,
-    ctx:{ store:o.store, method:o.method, orderNo:o.store_order_number, name:o.delivery_name||o.person } }));
   if(btn){ btn.disabled=true; btn.textContent='↻ Checking…'; }
   try{
-    const r=await fetch('/api/gmail/sync', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ threads }) });
-    const d=await r.json();
-    if(!r.ok||d.error) throw new Error(d.error||('sync failed ('+r.status+')'));
+    const d=await syncThreads(orders.map(threadDescriptorFor));
     if(!silent){
       if(d.newInbound>0) showToast(d.newInbound+' new retailer repl'+(d.newInbound>1?'ies':'y')+' — see Conversations.','success');
       else showToast('No new replies.','info');
@@ -3641,6 +3651,36 @@ async function checkForReplies(silent){
     return d;
   }catch(e){ if(!silent) showToast('Check failed: '+(e.message||e),'error'); return null; }
   finally{ if(btn){ btn.disabled=false; btn.textContent='↻ Check for replies'; } }
+}
+// Poll Gmail for new replies on ONE claim's thread only (by its stored Gmail Thread ID).
+async function checkOrderReplies(orderId, btnEl){
+  const o=DATA.orders.find(x=>x.order_id===orderId);
+  if(!o){ return null; }
+  if(!o.gmail_thread_id || !o.gmail_account){ showToast('This claim has no linked email thread yet — email the retailer from a task first.','warn'); return null; }
+  let restore='';
+  if(btnEl){ restore=btnEl.textContent; btnEl.disabled=true; btnEl.textContent='↻ Checking…'; }
+  try{
+    const d=await syncThreads([threadDescriptorFor(o)]);
+    const n=d.newInbound||0;
+    showToast(n>0?(n+' new repl'+(n>1?'ies':'y')+' for this claim.'):'No new replies for this claim.', n>0?'success':'info');
+    if(d.errors&&d.errors.length) console.warn('sync issues:', d.errors);
+    if(document.getElementById('convOv')) await refreshConversationModal(orderId);
+    if(document.getElementById('convListOv')) openConversations();
+    return d;
+  }catch(e){ showToast('Check failed: '+(e.message||e),'error'); return null; }
+  finally{ if(btnEl){ btnEl.disabled=false; btnEl.textContent=restore||'↻ Check this claim'; } }
+}
+// The claim↔thread tracking block (Thread ID is the key link). Shown atop each conversation.
+function convMetaHtml(order){
+  const parts=(order.gmail_participants||[]).map(escapeHtml).join('<br>');
+  return '<div style="border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin-bottom:10px;background:var(--line-soft);font-size:12px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">'
+    +'<div><div><span style="color:var(--ink-faded)">Claim:</span> <strong>#'+escapeHtml(order.store_order_number||order.order_id)+'</strong></div>'
+    +'<div><span style="color:var(--ink-faded)">Retailer:</span> '+escapeHtml(order.retailer_name||order.store||'?')+(order.retailer_email?(' &lt;'+escapeHtml(order.retailer_email)+'&gt;'):'')+'</div>'
+    +'<div style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);margin-top:2px"><span style="color:var(--ink-faded);font-family:inherit">Thread ID:</span> '+escapeHtml(order.gmail_thread_id||'—')+'</div>'
+    +(parts?'<div style="margin-top:3px"><span style="color:var(--ink-faded)">Participants:</span><br>'+parts+'</div>':'')+'</div>'
+    +'<button class="small" onclick="checkOrderReplies(\''+escAttr(order.order_id)+'\', this)">↻ Check this claim</button>'
+    +'</div></div>';
 }
 // List of claims that have a retailer conversation, newest activity first, with attention flags.
 async function openConversations(){
@@ -3664,10 +3704,12 @@ async function openConversations(){
       const flag=troubleshoot?'<span style="background:var(--red-soft);color:var(--red);border-radius:10px;padding:1px 7px;font-size:11px">'+troubleshoot+' needs answer</span>'
         : suggested?'<span style="background:var(--amber-soft);color:var(--amber);border-radius:10px;padding:1px 7px;font-size:11px">'+suggested+' suggested</span>'
         : '<span style="color:var(--ink-faded);font-size:11px">up to date</span>';
-      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);cursor:pointer" onclick="openConversation(\''+escAttr(o.order_id)+'\')">'
-        +'<div style="min-width:0"><div style="font-size:13px;font-weight:600">'+escapeHtml(o.store||'?')+' · #'+escapeHtml(o.store_order_number||o.order_id)+'</div>'
-        +'<div style="font-size:11px;color:var(--ink-faded);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px">'+escapeHtml(last?(last.snippet||last.subject||''):(o.retailer_email||''))+'</div></div>'
-        +'<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">'+flag+'<button class="tiny">Open</button></div></div>';
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)">'
+        +'<div style="min-width:0;cursor:pointer" onclick="openConversation(\''+escAttr(o.order_id)+'\')"><div style="font-size:13px;font-weight:600">'+escapeHtml(o.store||'?')+' · #'+escapeHtml(o.store_order_number||o.order_id)+'</div>'
+        +'<div style="font-size:11px;color:var(--ink-faded);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px">'+escapeHtml(last?(last.snippet||last.subject||''):(o.retailer_email||''))+'</div></div>'
+        +'<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">'+flag
+        +'<button class="tiny" title="Check this claim’s thread for new replies" onclick="event.stopPropagation();checkOrderReplies(\''+escAttr(o.order_id)+'\', this)">↻ Check</button>'
+        +'<button class="tiny" onclick="event.stopPropagation();openConversation(\''+escAttr(o.order_id)+'\')">Open</button></div></div>';
     }).join('');
   }
   ov.innerHTML='<div class="modal" style="max-width:640px"><div class="modal-head"><h2>Retailer conversations</h2><button class="modal-close" onclick="document.getElementById(\'convListOv\').remove()">&times;</button></div>'
@@ -3683,8 +3725,8 @@ async function refreshConversationModal(orderId){
   let ov=document.getElementById('convOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='convOv'; ov.className='modal-overlay active'; ov.style.cssText='display:flex';
   ov.innerHTML='<div class="modal" style="max-width:680px"><div class="modal-head"><h2>'+escapeHtml(order.store||'Claim')+' · #'+escapeHtml(order.store_order_number||order.order_id)+'</h2><button class="modal-close" onclick="document.getElementById(\'convOv\').remove()">&times;</button></div>'
-    +'<div class="modal-body">'+renderConversationTimeline(order, messages)+'</div>'
-    +'<div class="modal-foot"><button class="small" onclick="checkForReplies()">↻ Check for replies</button><button onclick="document.getElementById(\'convOv\').remove()">Close</button></div></div>';
+    +'<div class="modal-body">'+convMetaHtml(order)+renderConversationTimeline(order, messages)+'</div>'
+    +'<div class="modal-foot"><button class="small" onclick="checkOrderReplies(\''+escAttr(orderId)+'\', this)">↻ Check this claim for replies</button><button onclick="document.getElementById(\'convOv\').remove()">Close</button></div></div>';
   document.body.appendChild(ov);
 }
 function convOutcomeBadge(o){
@@ -4857,7 +4899,8 @@ function openDelgTaskDetailFor(orderId, code){
   const body = '<div class="delg-detail-sec"><div class="delg-detail-h">What to do</div><pre class="delg-desc">'+escapeHtml(desc||'(no description available)')+'</pre>'
     + (code==='choose_method' && typeof methodDecisionHtml==='function' ? methodDecisionHtml(order) : '')
     + pebPanelForTask(order, code)
-    + (isRetailerEmailTask(code) ? '<div style="margin-top:8px"><button type="button" class="delg-detail-btn" onclick="openRetailerEmail(\''+escAttr(orderId)+'\',\''+escAttr(code)+'\')">✉ Email retailer from the order account</button></div>' : '')
+    + (isRetailerEmailTask(code) ? '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="delg-detail-btn" onclick="openRetailerEmail(\''+escAttr(orderId)+'\',\''+escAttr(code)+'\')">✉ Email retailer from the order account</button>'
+        + (order.gmail_thread_id ? '<button type="button" class="delg-detail-btn" onclick="checkOrderReplies(\''+escAttr(orderId)+'\', this)">↻ Check this claim for replies</button><button type="button" class="delg-detail-btn" onclick="openConversation(\''+escAttr(orderId)+'\')">💬 View conversation</button>' : '') + '</div>' : '')
     + '</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Files &amp; documents — return label, proof of postage, etc.</div>'+filesHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Information needed to complete — fill in / upload below</div>'+completeHtml+'</div>'
