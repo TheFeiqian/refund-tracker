@@ -3513,6 +3513,7 @@ async function openRetailerEmail(orderId, taskCode, replyCtx){
     ? { subject:(replyCtx.subject||('Re: '+(order.email_subject||('order '+(order.store_order_number||order.order_id))))), body:replyCtx.body }
     : buildRetailerDraft(order, taskCode);
   window.__erOrderId = orderId;
+  window.__erTaskCode = taskCode || '';
   window.__erThread = replyCtx || null;      // { threadId, inReplyTo, references, msgId } when replying in-thread
   window.__erKbLearn = (replyCtx&&replyCtx.kbLearn) || null; // { question, category } → offer to save answer to KB after send
   // relevant files that actually exist → offered as attachments
@@ -3577,7 +3578,13 @@ async function sendRetailerEmail(){
         order.email_subject = order.email_subject || subject;
         order.gmail_participants = Array.from(new Set([].concat(order.gmail_participants||[], [from, to.trim()]).filter(Boolean)));
         if(firstLink) order.thread_linked_at = new Date().toISOString();
+        // Mark this task as sent (per order+task) so the queue shows a "✓ Sent" badge.
+        const nowIso = new Date().toISOString();
+        order.emails_sent = order.emails_sent || {};
+        if(window.__erTaskCode) order.emails_sent[window.__erTaskCode] = nowIso;
+        order.last_email_sent_at = nowIso;
         if(typeof saveData==='function') saveData();
+        if(typeof renderAll==='function') setTimeout(renderAll, 50);
       }
     }catch(_){}
     // If this was a troubleshooting reply, offer to teach the knowledge base.
@@ -3682,11 +3689,50 @@ function convMetaHtml(order){
     +'<button class="small" onclick="checkOrderReplies(\''+escAttr(order.order_id)+'\', this)">↻ Check this claim</button>'
     +'</div></div>';
 }
+// "✓ Sent" marker for a task once its retailer email has been sent (per order+task).
+function emailSentBadge(order, code){
+  const at = order && order.emails_sent && order.emails_sent[code];
+  if(!at) return '';
+  let when=''; try{ when=new Date(at).toLocaleDateString(); }catch(e){}
+  return '<span style="color:var(--green);font-size:11px;font-weight:600;margin-left:2px">✓ Sent'+(when?(' '+escapeHtml(when)):'')+'</span>';
+}
+// Search-based reply check for a claim with NO linked thread yet: search the order's mailbox for the
+// retailer conversation (by retailer email + order number), link the best thread, and collect it.
+async function searchOrderReplies(orderId, btnEl){
+  const o=DATA.orders.find(x=>x.order_id===orderId); if(!o) return null;
+  const account=o.gmail_account||o.email;
+  if(!account){ showToast('This order has no email address to search from — add the order email first.','warn'); return null; }
+  const retailerEmail=o.retailer_email||storeRetailerEmail(o);
+  const orderNo=o.store_order_number||o.order_id;
+  if(!retailerEmail && !orderNo){ showToast('Need the retailer email or an order number to search.','warn'); return null; }
+  let restore=''; if(btnEl){ restore=btnEl.textContent; btnEl.disabled=true; btnEl.textContent='↻ Searching…'; }
+  try{
+    const r=await fetch('/api/gmail/sync', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ search:{ account, orderId, retailerEmail, orderNo, ctx:{ store:o.store, method:o.method, orderNo, name:o.delivery_name||o.person } } }) });
+    const d=await r.json();
+    if(!r.ok||d.error) throw new Error(d.error||('search failed ('+r.status+')'));
+    if(d.linkedThreadId){
+      o.gmail_thread_id=d.linkedThreadId; o.gmail_account=account;
+      o.retailer_email=o.retailer_email||retailerEmail; o.retailer_name=o.retailer_name||o.store||'';
+      if(typeof saveData==='function') saveData();
+      showToast('Linked the retailer conversation'+(d.newInbound?(' — '+d.newInbound+' message'+(d.newInbound>1?'s':'')+' collected'):'')+'.','success');
+    } else {
+      showToast('No matching conversation found in '+account+'. If you sent the first email outside this app, make sure that account is connected.','info');
+    }
+    if(document.getElementById('convOv')) await refreshConversationModal(orderId);
+    if(typeof renderAll==='function') renderAll();
+    return d;
+  }catch(e){ showToast('Search failed: '+(e.message||e),'error'); return null; }
+  finally{ if(btnEl){ btnEl.disabled=false; btnEl.textContent=restore||'↻ Check for replies'; } }
+}
 // Inline replies panel for the CHASE-INVESTIGATION task — this is where the collected retailer replies live.
 function chaseConversationHtml(order){
   if(!order) return '';
   if(!order.gmail_thread_id){
-    return '<div style="border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin-top:10px;font-size:12px;color:var(--ink-faded)">No retailer email thread linked yet — send the first email from the contact-retailer task, then replies collect here automatically.</div>';
+    return '<div style="border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin-top:10px;font-size:12px;color:var(--ink-faded)">'
+      +'<div style="margin-bottom:6px">No retailer email thread linked yet.</div>'
+      +'<button type="button" class="tiny" onclick="event.stopPropagation();searchOrderReplies(\''+escAttr(order.order_id)+'\', this)">↻ Check for replies</button>'
+      +' <span>Searches this order’s mailbox for the retailer conversation and links it. (Or send the first email from the contact-retailer task to link it automatically.)</span></div>';
   }
   return '<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px">'
     +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div style="font-weight:600;font-size:12px">Retailer replies</div>'
@@ -4943,8 +4989,12 @@ function openDelgTaskDetailFor(orderId, code){
     + (code==='choose_method' && typeof methodDecisionHtml==='function' ? methodDecisionHtml(order) : '')
     + (code==='chase_investigation' ? chaseConversationHtml(order) : '')
     + pebPanelForTask(order, code)
-    + (isRetailerEmailTask(code) ? '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="delg-detail-btn" onclick="openRetailerEmail(\''+escAttr(orderId)+'\',\''+escAttr(code)+'\')">✉ Email retailer from the order account</button>'
-        + (order.gmail_thread_id ? '<button type="button" class="delg-detail-btn" onclick="checkOrderReplies(\''+escAttr(orderId)+'\', this)">↻ Check this claim for replies</button><button type="button" class="delg-detail-btn" onclick="openConversation(\''+escAttr(orderId)+'\')">💬 View conversation</button>' : '') + '</div>' : '')
+    + (isRetailerEmailTask(code) ? '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button type="button" class="delg-detail-btn" onclick="openRetailerEmail(\''+escAttr(orderId)+'\',\''+escAttr(code)+'\')">✉ Email retailer from the order account</button>'
+        + emailSentBadge(order, code)
+        + (order.gmail_thread_id
+            ? '<button type="button" class="delg-detail-btn" onclick="checkOrderReplies(\''+escAttr(orderId)+'\', this)">↻ Check this claim for replies</button><button type="button" class="delg-detail-btn" onclick="openConversation(\''+escAttr(orderId)+'\')">💬 View conversation</button>'
+            : '<button type="button" class="delg-detail-btn" onclick="searchOrderReplies(\''+escAttr(orderId)+'\', this)">↻ Check for replies</button>')
+        + '</div>' : '')
     + '</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Files &amp; documents — return label, proof of postage, etc.</div>'+filesHtml+'</div>'
     + '<div class="delg-detail-sec"><div class="delg-detail-h">Information needed to complete — fill in / upload below</div>'+completeHtml+'</div>'
@@ -5296,11 +5346,8 @@ function renderPriorityQueue() {
               ${t.task.type.code==='choose_method' ? methodDecisionHtml(t.order) : ''}
               ${t.task.type.code==='chase_investigation' ? chaseConversationHtml(t.order) : ''}
               ${pebPanelForTask(t.order, t.task.type.code)}
-              ${taskFilesHtml(t.order, t.task.type.code)}
-              <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-                <button class="small" onclick="copyInstruction('${rowKey}'); event.stopPropagation();">Copy text</button>
-                ${t.task.type.code!=='choose_method' ? `<button class="small" onclick="sendAsForm('${rowKey}','${escAttr(t.task.type.code)}','${escAttr(t.order.order_id)}'); event.stopPropagation();" title="Send the task as a Google Form. The assignee fills the form to mark it complete; their answers flow into the order. They never have to come into this app.">Send as form ↗</button>` : ''}
-                ${isRetailerEmailTask(t.task.type.code) ? `<button class="small" onclick="openRetailerEmail('${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();" title="Email this to the retailer from the order's Gmail account">✉ Email retailer</button>` : ''}
+              <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+                ${isRetailerEmailTask(t.task.type.code) ? `<button class="small" onclick="openRetailerEmail('${escAttr(t.order.order_id)}','${escAttr(t.task.type.code)}'); event.stopPropagation();" title="Email this to the retailer from the order's Gmail account">✉ Email retailer</button>${emailSentBadge(t.order, t.task.type.code)}` : ''}
                 <button class="small" onclick="openOrderModal('${escAttr(t.order.order_id)}'); event.stopPropagation();">Open order</button>
               </div>
             </div>
@@ -9055,40 +9102,118 @@ function markHandedOver(id){
   saveData(); renderAll(); showToast('Marked handed over', 'success');
 }
 
-function renderParcelshop() {
-  const returns = DATA.orders.filter(o=>{ const m=methodOfOrder(o); return (m==='LIT'||m==='LIT with pic'||m==='RTS') && (computeStage(o)>=4 || computeStage(o)==='done'); });
-  const shops=[
-    {id:'s1',name:'Ryman, Upper Street',dist:'0.4 km',couriers:['Royal Mail','Evri'],courier:'Royal Mail'},
-    {id:'s2',name:'Post Office, Essex Road',dist:'0.7 km',couriers:['Royal Mail','Parcelforce'],courier:'Royal Mail'},
-    {id:'s3',name:'Tesco Express, Angel',dist:'0.9 km',couriers:['DPD'],courier:'DPD'},
-    {id:'s4',name:'Co-op, Islington Green',dist:'1.2 km',couriers:['Evri','DPD'],courier:'Evri'},
-  ];
-  returns.forEach((o,i)=>{ (shops[i%shops.length].returns=shops[i%shops.length].returns||[]).push(o); });
-  let h=`<div class="queue-toolbar"><div class="filter-group"><label>Base postcode</label><input type="text" value="N1 9RB" style="width:120px"><label>Courier</label><select><option>All couriers</option><option>Royal Mail</option><option>DPD</option><option>Evri</option><option>Parcelforce</option><option>DHL</option><option>FedEx</option><option>UPS</option><option>Yodel</option></select></div></div>`;
-  h+=`<div style="position:relative;height:240px;background:var(--line-soft);border-radius:10px;overflow:hidden;margin-bottom:6px">
-    <div style="position:absolute;inset:0;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:40px 40px;opacity:.6"></div>
-    <div style="position:absolute;top:80px;left:200px;width:13px;height:13px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:var(--green);border:2px solid #fff"></div>
-    <div style="position:absolute;top:130px;left:330px;width:13px;height:13px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:var(--green);border:2px solid #fff"></div>
-    <div style="position:absolute;top:90px;left:440px;width:13px;height:13px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:var(--red);border:2px solid #fff"></div>
-    <div style="position:absolute;top:160px;left:280px;width:13px;height:13px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:var(--blue);border:2px solid #fff"></div>
-    <div style="position:absolute;top:120px;left:370px;width:13px;height:13px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:var(--ink);border:2px solid #fff"></div></div>`;
-  shops.forEach(sh=>{
-    const rs=sh.returns||[]; const succ=rs.filter(o=>computeStage(o)==='done').length;
-    const sr=rs.length?Math.round(100*succ/rs.length):null;
+// ---- Real parcel-shop map: OpenStreetMap (Leaflet) + postcodes.io geocoding + Overpass POI search.
+// No API key required. Locations are real, drawn from OpenStreetMap: Post Offices are well covered;
+// specific courier ParcelShops (DPD/Evri/InPost) appear where OSM has them tagged. For exact,
+// carrier-authoritative shop lists a courier API + key would be needed (see note in the panel).
+let __leafletLoading=null;
+function loadLeaflet(){
+  if(window.L) return Promise.resolve();
+  if(__leafletLoading) return __leafletLoading;
+  __leafletLoading=new Promise((resolve,reject)=>{
+    const css=document.createElement('link'); css.rel='stylesheet'; css.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'; document.head.appendChild(css);
+    const js=document.createElement('script'); js.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    js.onload=()=>resolve(); js.onerror=()=>reject(new Error('map library failed to load')); document.head.appendChild(js);
+  });
+  return __leafletLoading;
+}
+function haversineKm(lat1,lon1,lat2,lon2){ const R=6371,toR=x=>x*Math.PI/180; const dLat=toR(lat2-lat1),dLon=toR(lon2-lon1); const s=Math.sin(dLat/2)**2+Math.cos(toR(lat1))*Math.cos(toR(lat2))*Math.sin(dLon/2)**2; return R*2*Math.atan2(Math.sqrt(s),Math.sqrt(1-s)); }
+async function geocodePostcode(pc){
+  const clean=String(pc||'').trim(); if(!clean) return null;
+  try{ const r=await fetch('https://api.postcodes.io/postcodes/'+encodeURIComponent(clean)); if(r.ok){ const d=await r.json(); if(d.result) return {lat:d.result.latitude,lon:d.result.longitude,label:d.result.postcode}; } }catch(e){}
+  try{ const oc=clean.split(' ')[0]; const r=await fetch('https://api.postcodes.io/outcodes/'+encodeURIComponent(oc)); if(r.ok){ const d=await r.json(); if(d.result) return {lat:d.result.latitude,lon:d.result.longitude,label:d.result.outcode}; } }catch(e){}
+  return null;
+}
+async function fetchParcelShops(lat,lon,radiusM){
+  const q='[out:json][timeout:25];('
+    +'node["amenity"="post_office"](around:'+radiusM+','+lat+','+lon+');'
+    +'node["amenity"="parcel_locker"](around:'+radiusM+','+lat+','+lon+');'
+    +'node["shop"="parcel"](around:'+radiusM+','+lat+','+lon+');'
+    +'node["parcel_mail_in"="yes"](around:'+radiusM+','+lat+','+lon+');'
+    +');out body 80;';
+  const r=await fetch('https://overpass-api.de/api/interpreter',{method:'POST',headers:{'Content-Type':'text/plain'},body:q});
+  if(!r.ok) throw new Error('shop lookup failed ('+r.status+')');
+  const d=await r.json();
+  return (d.elements||[]).filter(e=>e.lat&&e.lon&&e.tags).map(e=>{
+    const t=e.tags;
+    const type=t.amenity==='parcel_locker'?'Locker':t.amenity==='post_office'?'Post Office':(t.shop==='parcel'?'Parcel shop':'Parcel point');
+    const couriers=[]; const hay=((t.brand||'')+' '+(t.operator||'')+' '+(t.name||'')).toLowerCase();
+    [['dpd','DPD'],['evri','Evri'],['hermes','Evri'],['royal','Royal Mail'],['parcelforce','Parcelforce'],['yodel','Yodel'],['inpost','InPost'],['ups','UPS'],['dhl','DHL'],['collectplus','CollectPlus'],['gls','GLS']].forEach(([k,label])=>{ if(hay.indexOf(k)>=0 && couriers.indexOf(label)<0) couriers.push(label); });
+    if(type==='Post Office' && couriers.indexOf('Royal Mail')<0) couriers.push('Royal Mail');
+    return { id:'osm_'+e.id, name:t.name||t.brand||type, type, lat:e.lat, lon:e.lon, couriers, addr:[t['addr:housenumber'],t['addr:street']].filter(Boolean).join(' ') };
+  });
+}
+// Real returns posted at a shop: match the order's "posted_from" text to the shop name (honest, no geo needed).
+function returnsForShop(shop){
+  const key=String(shop.name||'').toLowerCase().split(',')[0].trim(); if(!key||key.length<3) return [];
+  return DATA.orders.filter(o=> o.posted_from && String(o.posted_from).toLowerCase().indexOf(key)>=0);
+}
+function renderParcelshop(){
+  const body=document.getElementById('parcelBody'); if(!body) return;
+  if(window.__parcelShellBuilt && document.getElementById('parcelMap')) return; // keep the live map across re-renders
+  window.__parcelShellBuilt=true;
+  const pc = window.__parcelPostcode || 'N1 9RB';
+  body.innerHTML=`<div class="queue-toolbar"><div class="filter-group">
+      <label>Base postcode</label><input type="text" id="parcelPostcode" value="${escAttr(pc)}" style="width:120px" onkeydown="if(event.key==='Enter')loadParcelShops()">
+      <label>Courier</label><select id="parcelCourier" onchange="loadParcelShops()"><option value="">All couriers</option><option>Royal Mail</option><option>DPD</option><option>Evri</option><option>Parcelforce</option><option>InPost</option><option>Yodel</option><option>CollectPlus</option><option>DHL</option><option>UPS</option></select>
+      <label>Radius</label><select id="parcelRadius" onchange="loadParcelShops()"><option value="1500">1.5 km</option><option value="3000" selected>3 km</option><option value="5000">5 km</option></select>
+      <button class="small" onclick="loadParcelShops()">Search</button>
+    </div></div>
+    <div id="parcelMap" style="height:300px;border-radius:10px;overflow:hidden;margin-bottom:8px;background:var(--line-soft)"></div>
+    <div id="parcelStatus" style="font-size:12px;color:var(--ink-faded);margin-bottom:6px"></div>
+    <div id="parcelList"></div>`;
+  loadParcelShops();
+}
+async function loadParcelShops(){
+  const pcEl=document.getElementById('parcelPostcode'); const pc=pcEl?pcEl.value:(window.__parcelPostcode||'N1 9RB');
+  window.__parcelPostcode=pc;
+  const courier=(document.getElementById('parcelCourier')||{}).value||'';
+  const radius=parseInt((document.getElementById('parcelRadius')||{}).value)||3000;
+  const status=document.getElementById('parcelStatus'); const list=document.getElementById('parcelList');
+  const setStatus=(t)=>{ if(status) status.textContent=t; };
+  setStatus('Locating '+pc+'…');
+  const geo=await geocodePostcode(pc);
+  if(!geo){ setStatus('Couldn’t find that postcode. Check it and press Search.'); return; }
+  let map;
+  try{
+    await loadLeaflet();
+    if(window.__parcelMap){ try{ window.__parcelMap.remove(); }catch(e){} window.__parcelMap=null; }
+    map=window.L.map('parcelMap').setView([geo.lat,geo.lon],14);
+    window.__parcelMap=map;
+    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+    window.L.circleMarker([geo.lat,geo.lon],{radius:7,color:'#2563eb',fillColor:'#2563eb',fillOpacity:1}).addTo(map).bindPopup('Base: '+escapeHtml(geo.label||pc));
+  }catch(e){ setStatus('Map failed to load: '+(e.message||e)); }
+  setStatus('Finding parcel shops near '+pc+'…');
+  let shops=[];
+  try{ shops=await fetchParcelShops(geo.lat,geo.lon,radius); }
+  catch(e){ setStatus('Shop lookup failed: '+(e.message||e)+'. Try again in a moment (the free map service rate-limits).'); return; }
+  shops.forEach(s=>{ s.distKm=haversineKm(geo.lat,geo.lon,s.lat,s.lon); });
+  if(courier) shops=shops.filter(s=> s.couriers.some(c=>c.toLowerCase().indexOf(courier.toLowerCase())>=0) );
+  shops.sort((a,b)=>a.distKm-b.distKm);
+  setStatus(shops.length+' parcel shop'+(shops.length===1?'':'s')+' within '+(radius/1000)+' km of '+(geo.label||pc)+(courier?(' accepting '+courier):'')+'.');
+  // markers
+  if(map && window.L){ shops.forEach(s=>{ const rs=returnsForShop(s); window.L.marker([s.lat,s.lon]).addTo(map)
+    .bindPopup('<strong>'+escapeHtml(s.name)+'</strong><br>'+escapeHtml(s.type)+' · '+s.distKm.toFixed(1)+' km'+(s.couriers.length?('<br>'+escapeHtml(s.couriers.join(', '))):'')+(rs.length?('<br>'+rs.length+' return(s) posted here'):'')); }); }
+  // list
+  let h='';
+  if(!shops.length){ h='<div style="font-size:13px;color:var(--ink-faded)">No parcel shops found here in OpenStreetMap. Try a larger radius, or a different postcode. (OSM coverage of courier ParcelShops varies; Post Offices are the most complete.)</div>'; }
+  shops.slice(0,40).forEach(s=>{
+    const rs=returnsForShop(s); const succ=rs.filter(o=>computeStage(o)==='done').length; const sr=rs.length?Math.round(100*succ/rs.length):null;
     const srcol=sr===null?'var(--ink-faded)':sr>=80?'var(--green)':sr>=50?'var(--amber)':'var(--red)';
-    let note=''; try{ note=localStorage.getItem('shopnote_'+sh.id)||''; }catch(e){}
-    h+=`<div class="chart-card" style="margin-top:14px"><div style="display:flex;justify-content:space-between;align-items:baseline"><h3>${escapeHtml(sh.name)}</h3><span class="badge-mini" style="background:var(--green-soft);color:var(--green)">${sh.courier}</span></div>
-      <p style="color:var(--ink-faded);font-size:12px;margin:2px 0 10px">${sh.dist} · accepts ${sh.couriers.join(', ')}</p>
-      <div style="display:flex;gap:28px;margin-bottom:10px"><div><div style="font-size:12px;color:var(--ink-faded)">Returns posted here</div><div style="font-size:18px;font-weight:600;font-family:var(--mono)">${rs.length}</div></div>
-      <div><div style="font-size:12px;color:var(--ink-faded)">Success rate</div><div style="font-size:18px;font-weight:600;font-family:var(--mono);color:${srcol}">${sr===null?'—':sr+'%'}</div></div></div>`;
-    if(rs.length){ h+=`<div style="font-size:12px;color:var(--ink-faded);margin-bottom:4px">Returns (click to open the order):</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">`;
+    let note=''; try{ note=localStorage.getItem('shopnote_'+s.id)||''; }catch(e){}
+    h+=`<div class="chart-card" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h3>${escapeHtml(s.name)}</h3><span class="badge-mini" style="background:var(--line-soft)">${escapeHtml(s.type)}</span></div>
+      <p style="color:var(--ink-faded);font-size:12px;margin:2px 0 8px">${s.distKm.toFixed(1)} km${s.addr?(' · '+escapeHtml(s.addr)):''}${s.couriers.length?(' · '+escapeHtml(s.couriers.join(', '))):''}</p>`;
+    if(rs.length){ h+=`<div style="display:flex;gap:28px;margin-bottom:8px"><div><div style="font-size:12px;color:var(--ink-faded)">Returns posted here</div><div style="font-size:18px;font-weight:600;font-family:var(--mono)">${rs.length}</div></div>
+      <div><div style="font-size:12px;color:var(--ink-faded)">Success rate</div><div style="font-size:18px;font-weight:600;font-family:var(--mono);color:${srcol}">${sr===null?'—':sr+'%'}</div></div></div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">`;
       rs.forEach(o=>h+=`<span class="badge-mini" style="background:var(--line-soft);cursor:pointer" onclick="openOrderModal('${escAttr(o.order_id)}')">#${escapeHtml(o.order_id)} ${escapeHtml(o.person||'')} ${fmtMoney(o.price)}${computeStage(o)==='done'?' ✓':''}</span>`);
       h+=`</div>`; }
-    h+=`<div style="font-size:12px;color:var(--ink-faded);margin-bottom:4px">Notes</div><textarea id="note_${sh.id}" style="width:100%;min-height:50px;font-family:var(--sans);font-size:13px;padding:8px;border:1px solid var(--line);border-radius:6px" placeholder="Add a note...">${escapeHtml(note)}</textarea>
-      <button class="small" style="margin-top:6px" onclick="saveShopNote('${sh.id}')">Save note</button></div>`;
+    h+=`<textarea id="note_${s.id}" style="width:100%;min-height:44px;font-family:var(--sans);font-size:13px;padding:8px;border:1px solid var(--line);border-radius:6px" placeholder="Add a note…">${escapeHtml(note)}</textarea>
+      <button class="small" style="margin-top:6px" onclick="saveShopNote('${escAttr(s.id)}')">Save note</button></div>`;
   });
-  h+=`<p style="color:var(--ink-faded);font-size:12px;margin-top:10px">Shops seeded from courier APIs. Success rate is computed from real returns posted there (✓ = reached refund). Notes save to your browser.</p>`;
-  document.getElementById('parcelBody').innerHTML=h;
+  h+=`<p style="color:var(--ink-faded);font-size:12px;margin-top:10px">Locations are real, from OpenStreetMap (no API key). Post Offices are the most complete; specific courier ParcelShops show where OSM has them. Returns/success-rate match your orders’ “posted from” to the shop name. Notes save to your browser.</p>`;
+  if(list) list.innerHTML=h;
+  if(map) setTimeout(()=>{ try{ map.invalidateSize(); }catch(e){} }, 100);
 }
 function saveShopNote(id){ try{ localStorage.setItem('shopnote_'+id, document.getElementById('note_'+id).value); showToast('Note saved','success'); }catch(e){} }
 
