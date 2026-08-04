@@ -7745,13 +7745,15 @@ function pebTotalsHtml(order){
 function renderPebPanelHtml(order){
   if(!order || order.method !== 'PEB') return '';
   const rows = pebRows(order);
-  if(!rows.length || !rows.some(r=>r.unitPrice>0 || r.unitWeight>0)) return '<div style="font-size:11px;color:var(--ink-faded)">Add per-item prices and weights in the items list above to get a PEB missing-items recommendation.</div>';
+  if(!rows.length) return '<div style="font-size:11px;color:var(--ink-faded)">No items on this order yet — add the order items (ideally with per-item price &amp; weight) so you can choose which are missing.</div>';
+  const noWV = !rows.some(r=>r.unitPrice>0 || r.unitWeight>0);
   const sel = pebSelectedIdx(order, rows);
   const oid = order.order_id || '';
   const disp = rows.slice().sort((a,b)=> (b.lineValue-a.lineValue) || (b.lineWeight-a.lineWeight));
   let h = '<div class="peb-panel" data-order="'+escAttr(oid)+'" style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--red-soft)">'
     + '<div style="font-weight:600;font-size:12px;margin-bottom:2px">PEB — items to claim missing</div>'
     + '<div style="font-size:11px;color:var(--ink-faded);margin-bottom:8px">Recommended set stays under '+PEB_WEIGHT_CAP+' kg and aims for ≥20% of order value &amp; ≥30% of order weight, favouring the highest value + weight. Tick/untick to adjust — totals update live and save to the claim.</div>'
+    + (noWV ? '<div style="font-size:11px;color:var(--amber);margin-bottom:6px">Tip: add per-item price &amp; weight in the order items for an automatic recommendation and live totals.</div>' : '')
     + '<div style="display:flex;font-size:10px;color:var(--ink-faded);text-transform:uppercase;letter-spacing:.4px;gap:8px;padding:0 4px 3px"><span style="width:20px"></span><span style="flex:1">Item</span><span style="width:64px">£ line</span><span style="width:80px">weight</span></div>';
   h += disp.map(r=>'<label style="display:flex;gap:8px;align-items:center;font-size:12px;padding:3px 4px;font-weight:400">'
     + '<input type="checkbox" class="peb_chk" data-name="'+escAttr(r.name)+'" '+(sel.has(r.idx)?'checked':'')+' onchange="pebRecalc(this)" style="width:auto;margin:0">'
@@ -8204,14 +8206,26 @@ function methodDecisionHtml(order){
       +'<span style="flex:1;font-size:12.5px">'+escapeHtml(q)+' <strong>'+escapeHtml(String(answer(id)))+'</strong></span>'
       +'<span style="font-size:11.5px;color:'+fg+'">'+escapeHtml(out)+'</span></div>';
   }).join('');
-  let head, actions='';
+  // The method the admin is currently looking at: their explicit pick (if any), else the confirmed/derived one.
+  const picked = (window.__mcPick && window.__mcPick[order.order_id]) || '';
+  const shownMethod = picked || order.method || (!blocked ? r.method : '');
+  let head;
   if(!blocked){
-    head='<span style="background:var(--green-soft);color:var(--green);padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600">Resolves to '+escapeHtml(r.method)+'</span>';
-    if(r.method && r.method!=='purchased as normal'){
-      actions='<button class="primary tiny" onclick="event.stopPropagation();mcConfirm(\''+escAttr(order.order_id)+'\',\''+escAttr(r.method)+'\')">✓ Confirm '+escapeHtml(r.method)+'</button> ';
-    }
+    head='<span style="background:var(--green-soft);color:var(--green);padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600">Recommended: '+escapeHtml(r.method)+'</span>';
   } else {
-    head='<span style="background:var(--amber-soft);color:var(--amber);padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600">Stalls at '+r.blocked+' — needs '+escapeHtml(MC_NEED_LABEL[r.need]||r.need)+'</span>';
+    head='<span style="background:var(--amber-soft);color:var(--amber);padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600">Recommendation stalls at '+r.blocked+' — needs '+escapeHtml(MC_NEED_LABEL[r.need]||r.need)+'</span>';
+  }
+  // Method picker: the tree above informs the choice, but the admin chooses. Picking PEB reveals the
+  // missing-items sub-decision below (nothing is committed until "Confirm").
+  const METHOD_OPTS=['DNA','PEB','EB','LIT','LIT with pic','RTS'];
+  const pickerHtml='<div style="margin-top:9px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-soft);margin-bottom:4px">Choose the method</div>'
+    +'<div style="display:flex;gap:5px;flex-wrap:wrap">'
+    + METHOD_OPTS.map(m=>'<button class="tiny'+(shownMethod===m?' primary':'')+'" onclick="event.stopPropagation();mcPick(\''+escAttr(order.order_id)+'\',\''+jsAttr(m)+'\')">'+escapeHtml(m)+'</button>').join('')
+    +'<button class="tiny'+(shownMethod==='BBM'?' primary':'')+'" onclick="event.stopPropagation();setBBM(\''+escAttr(order.order_id)+'\',\'yes\',true)" title="bought by mistake → BBM chain">BBM</button>'
+    +'</div></div>';
+  let confirmHtml='';
+  if(shownMethod && shownMethod!=='purchased as normal' && shownMethod!=='BBM'){
+    confirmHtml='<button class="primary tiny" onclick="event.stopPropagation();mcConfirm(\''+escAttr(order.order_id)+'\',\''+jsAttr(shownMethod)+'\')">✓ Confirm '+escapeHtml(shownMethod)+'</button>';
   }
   let missingHtml='';
   if(missing.length){
@@ -8228,21 +8242,31 @@ function methodDecisionHtml(order){
         +'<span style="font-size:12px">'+(isNext?'▶ needed now — ':'')+escapeHtml(label)+'</span><span style="white-space:nowrap">'+act+'</span></div>';
     }).join('');
   }
-  // When the decision is (or resolves to) PEB, show the missing-items selector right here in the task.
-  const pebActive = (order.method==='PEB') || (!blocked && r.method==='PEB');
+  // Picking PEB reveals the missing-items sub-decision right here (before committing).
+  const pebActive = (shownMethod==='PEB');
   const pebHtml = pebActive ? ('<div style="margin-top:10px">'+renderPebPanelHtml(Object.assign({}, order, { method:'PEB' }))+'</div>') : '';
-  return '<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px">'
-    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">'+head
-    +'<div style="display:flex;gap:6px;flex-wrap:wrap">'+actions
-    +'<button class="tiny" onclick="event.stopPropagation();setBBM(\''+escAttr(order.order_id)+'\',\'yes\',true)" title="mark bought-by-mistake → BBM chain (skips the tree)">Mark BBM</button></div></div>'
+  return '<div class="md-panel" data-order="'+escAttr(order.order_id)+'" style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">'+head+'</div>'
     +rowsHtml
+    +pickerHtml
     +pebHtml
+    +(confirmHtml?('<div style="margin-top:9px;display:flex;gap:6px;flex-wrap:wrap">'+confirmHtml+'</div>'):'')
     +missingHtml
     +'</div>';
+}
+// ---- Admin PICK: choose a method to look at (not yet committed). Picking PEB reveals the item selector.
+function mcPick(orderId, method){
+  window.__mcPick = window.__mcPick || {};
+  window.__mcPick[orderId] = method;
+  const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
+  const panels = document.querySelectorAll('.md-panel[data-order="'+String(orderId).replace(/"/g,'\\"')+'"]');
+  if(panels.length){ panels.forEach(el=>{ el.outerHTML = methodDecisionHtml(o); }); }
+  else if(typeof renderAll==='function'){ renderAll(); }
 }
 // ---- Admin CONFIRM: write method to order, lock it (sticky) ----
 function mcConfirm(orderId, method){
   const o = DATA.orders.find(x=>x.order_id===orderId); if(!o) return;
+  if(window.__mcPick) delete window.__mcPick[orderId];
   if(method==='BBM'){ setBBM(orderId,'yes',true); return; }
   o.method = method;
   o.method_confirmed = true;          // sticky flag — auto-derivation won't override
