@@ -1,5 +1,8 @@
 {
   "cleanUrls": true,
+  "crons": [
+    { "path": "/api/gmail/sync", "schedule": "0 7 * * *" }
+  ],
   "headers": [
     {
       "source": "/app-config.js",

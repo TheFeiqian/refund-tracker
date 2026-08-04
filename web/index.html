@@ -1130,7 +1130,7 @@ document.addEventListener('DOMContentLoaded', bootHosted);
         <button class="role-opt active" data-role="admin" onclick="applyRole('admin')">Admin</button>
         <button class="role-opt" data-role="member" onclick="applyRole('member')">Member</button>
       </span>
-      <span id="whoami" style="font-size:12px;color:var(--ink-faded)"></span><span id="saveStatus" class="save-status saved">All changes saved</span><button onclick="openGmailSettingsFresh()" class="ghost-light" title="Connect the Gmail accounts you send retailer emails from">✉ Email accounts</button><button onclick="__signOut()" class="ghost-light">Sign out</button>
+      <span id="whoami" style="font-size:12px;color:var(--ink-faded)"></span><span id="saveStatus" class="save-status saved">All changes saved</span><button onclick="checkForReplies()" class="ghost-light" title="Fetch new retailer replies on tracked email threads" id="checkRepliesBtn">↻ Check for replies</button><button onclick="openConversations()" class="ghost-light" title="Retailer conversations and AI-suggested replies">💬 Conversations</button><button onclick="openKbAdmin()" class="ghost-light admin-only" title="Approved-reply knowledge base">🧠 Knowledge base</button><button onclick="openGmailSettingsFresh()" class="ghost-light" title="Connect the Gmail accounts you send retailer emails from">✉ Email accounts</button><button onclick="__signOut()" class="ghost-light">Sign out</button>
       <button onclick="exportData()" class="ghost-light admin-only">Export JSON</button>
       <button onclick="importData()" class="ghost-light admin-only">Import JSON</button>
       <input type="file" id="importFile" accept="application/json" style="display:none">
@@ -3275,7 +3275,8 @@ function tplVal(order, key) {
     const m = order.method || '';
     if (m === 'DNA') return 'According to the tracking information, my parcel has been marked as delivered; however, I have not received it. I have checked around my property, contacted my neighbours, and contacted the courier directly to investigate the delivery. Unfortunately, the parcel cannot be located and the courier has been unable to provide any further information regarding its whereabouts. As I have still not received my order, I would appreciate your assistance in resolving this issue.';
     if (m === 'PEB') return 'I received my parcel, but upon opening it, I discovered that some of the items from my order were missing. I have checked the packaging thoroughly and can confirm that the missing items were not included in the parcel. I would like to request a refund for the items that were not received. Please let me know if you require any additional information to process my request.';
-    if (m === 'EB') return 'I received the parcel associated with my order; however, when I opened it, there were no items inside. The package arrived empty and did not contain any of the products I purchased. I would like to report this issue and request a refund or replacement for the missing items. Please advise on the next steps required to resolve this matter.';
+    if (m === 'EB') return 'I received the parcel associated with my order; however, when I opened it, there were no items inside. The package arrived empty and did not contain any of the products I purchased. I would like to report this issue and request a refund for the missing items. Please advise on the next steps required to resolve this matter.';
+    if (m === 'LIT' || m === 'LIT with pic') return 'I am writing regarding my order ' + (order.store_order_number || order.order_id || '') + '. It has been over 5 working days and I have not received my refund. When can I expect to be refunded?';
     return null;
   }
   // Box-photo evidence steps for PEB / EB (told to the individual; included in the instructions).
@@ -3485,16 +3486,24 @@ function buildRetailerDraft(order, taskCode){
     subject=store+' order '+orderNo+' — issue with my order';
     intro=narrative || ('I am writing regarding my order '+orderNo+'. I would like to open an investigation and request a refund. Please advise on the next steps.');
   }
-  const id='\n\nOrder details:\n  Name: '+name+'\n  Email: '+(order.email||'')+'\n  Order number: '+orderNo+(addr?('\n  Delivery address: '+addr):'');
+  // Shared order-details block (same for every method). Tracking number = the return/outbound tracking
+  // for post-back methods, otherwise the inbound delivery tracking — whichever this order has.
+  const trackingNo=order.outbound_tracking||order.inbound_tracking||'';
+  const id='\n\nOrder details:\n  Order number: '+orderNo+(addr?('\n  Delivery address: '+addr):'')+'\n  Tracking number: '+trackingNo;
   const body='Hello '+store+' Customer Service,\n\n'+intro+id+'\n\nI have attached the relevant documents for your reference.\n\nKind regards,\n'+name;
   return { subject, body };
 }
-async function openRetailerEmail(orderId, taskCode){
+async function openRetailerEmail(orderId, taskCode, replyCtx){
   const order=DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
   const accounts=await refreshGmailAccounts(true);
-  const to=storeRetailerEmail(order);
-  const from=order.email||'';
-  const draft=buildRetailerDraft(order, taskCode);
+  const to=(replyCtx&&replyCtx.to)||storeRetailerEmail(order);
+  const from=(replyCtx&&replyCtx.from)||order.gmail_account||order.email||'';
+  const draft=(replyCtx&&replyCtx.body!=null)
+    ? { subject:(replyCtx.subject||('Re: '+(order.email_subject||('order '+(order.store_order_number||order.order_id))))), body:replyCtx.body }
+    : buildRetailerDraft(order, taskCode);
+  window.__erOrderId = orderId;
+  window.__erThread = replyCtx || null;      // { threadId, inReplyTo, references, msgId } when replying in-thread
+  window.__erKbLearn = (replyCtx&&replyCtx.kbLearn) || null; // { question, category } → offer to save answer to KB after send
   // relevant files that actually exist → offered as attachments
   let links={}; try{ links=(typeof resolveFileLinks==='function')?await resolveFileLinks(order):{}; }catch(e){}
   const relFiles=(typeof taskRelevantFiles==='function')?taskRelevantFiles(order, taskCode):[];
@@ -3536,13 +3545,33 @@ async function sendRetailerEmail(){
   const attachmentUrls=(window.__erAttach||[]).filter((a,i)=>checked.indexOf(i)>=0).map(a=>({url:a.url,name:a.name}));
   if(btn){ btn.disabled=true; btn.textContent='Sending…'; }
   if(status){ status.style.color='var(--ink-faded)'; status.textContent='Sending via Gmail…'; }
+  const orderId=window.__erOrderId||''; const thr=window.__erThread||null;
+  const payload={ from, to:to.trim(), subject, body, attachmentUrls, orderId };
+  if(thr){ if(thr.threadId) payload.threadId=thr.threadId; if(thr.inReplyTo) payload.inReplyTo=thr.inReplyTo; if(thr.references) payload.references=thr.references; }
   try{
-    const r=await fetch('/api/gmail/send', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ from, to:to.trim(), subject, body, attachmentUrls }) });
+    const r=await fetch('/api/gmail/send', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     const d=await r.json();
     if(!r.ok || (d&&d.error)){ throw new Error((d&&d.error)||('send failed ('+r.status+')')); }
     if(status){ status.style.color='var(--green)'; status.textContent='✓ Sent'+(d.attached?(' with '+d.attached+' attachment'+(d.attached>1?'s':'')):'')+'.'; }
     if(typeof showToast==='function') showToast('Email sent to retailer','success');
-    setTimeout(()=>{ const ov=document.getElementById('emailRetailerOv'); if(ov) ov.remove(); }, 1200);
+    // Link the claim to this Gmail thread the first time we email a retailer for it (so replies auto-track).
+    try{
+      const order=DATA.orders.find(o=>o.order_id===orderId);
+      if(order && d.threadId){
+        const firstLink=!order.gmail_thread_id;
+        order.gmail_thread_id = order.gmail_thread_id || d.threadId;
+        order.gmail_account = from;
+        order.retailer_email = order.retailer_email || to.trim();
+        order.email_subject = order.email_subject || subject;
+        order.gmail_participants = Array.from(new Set([].concat(order.gmail_participants||[], [from, to.trim()]).filter(Boolean)));
+        if(firstLink) order.thread_linked_at = new Date().toISOString();
+        if(typeof saveData==='function') saveData();
+      }
+    }catch(_){}
+    // If this was a troubleshooting reply, offer to teach the knowledge base.
+    if(thr && thr.msgId){ try{ await fetch('/api/gmail/thread', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: thr.msgId, patch:{ status:'replied' } }) }); }catch(_){} }
+    if(window.__erKbLearn){ const learn=window.__erKbLearn; setTimeout(()=>offerKbLearn(learn, body), 400); }
+    setTimeout(()=>{ const ov=document.getElementById('emailRetailerOv'); if(ov) ov.remove(); if(document.getElementById('convOv')) refreshConversationModal(orderId); }, 1200);
   }catch(e){ if(status){ status.style.color='var(--red)'; status.textContent='Failed: '+(e.message||e); } if(btn){ btn.disabled=false; btn.textContent='Send email'; } }
 }
 function openGmailSettings(){
@@ -3573,6 +3602,198 @@ function handleGmailReturn(){
   }catch(_){}
 }
 document.addEventListener('DOMContentLoaded', handleGmailReturn);
+
+// ============================================================
+// RETAILER CONVERSATIONS — auto-tracked reply threads, AI analysis, suggested replies, learning KB.
+// Server: /api/gmail/{sync,thread,kb}. Messages + KB live in Supabase (service-role only).
+// ============================================================
+function trackedThreadOrders(){ return (DATA.orders||[]).filter(o=>o && o.gmail_thread_id && o.gmail_account); }
+// Poll Gmail for new replies on every tracked thread. AI runs server-side ONCE per new message.
+async function checkForReplies(silent){
+  const btn=document.getElementById('checkRepliesBtn');
+  const orders=trackedThreadOrders();
+  if(!orders.length){ if(!silent) showToast('No tracked email threads yet — send a retailer email first.','warn'); return null; }
+  const threads=orders.map(o=>({ account:o.gmail_account, threadId:o.gmail_thread_id, orderId:o.order_id,
+    ctx:{ store:o.store, method:o.method, orderNo:o.store_order_number, name:o.delivery_name||o.person } }));
+  if(btn){ btn.disabled=true; btn.textContent='↻ Checking…'; }
+  try{
+    const r=await fetch('/api/gmail/sync', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ threads }) });
+    const d=await r.json();
+    if(!r.ok||d.error) throw new Error(d.error||('sync failed ('+r.status+')'));
+    if(!silent){
+      if(d.newInbound>0) showToast(d.newInbound+' new retailer repl'+(d.newInbound>1?'ies':'y')+' — see Conversations.','success');
+      else showToast('No new replies.','info');
+    }
+    if(d.errors&&d.errors.length&&!silent) console.warn('sync issues:', d.errors);
+    if(document.getElementById('convListOv')) openConversations();
+    if(document.getElementById('convOv')&&window.__conv) refreshConversationModal(window.__conv.orderId);
+    return d;
+  }catch(e){ if(!silent) showToast('Check failed: '+(e.message||e),'error'); return null; }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='↻ Check for replies'; } }
+}
+// List of claims that have a retailer conversation, newest activity first, with attention flags.
+async function openConversations(){
+  const orders=trackedThreadOrders();
+  let ov=document.getElementById('convListOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='convListOv'; ov.className='modal-overlay active'; ov.style.cssText='display:flex';
+  let rowsHtml;
+  if(!orders.length){
+    rowsHtml='<div style="font-size:13px;color:var(--ink-faded)">No tracked conversations yet. When you email a retailer from a task, that thread is linked to the claim and future replies appear here automatically.</div>';
+  } else {
+    // pull per-order attention counts in parallel
+    const summaries=await Promise.all(orders.map(async o=>{
+      try{ const r=await fetch('/api/gmail/thread?order_id='+encodeURIComponent(o.order_id)); const d=await r.json(); return { o, msgs:d.messages||[] }; }
+      catch(e){ return { o, msgs:[] }; }
+    }));
+    summaries.sort((a,b)=>{ const la=Math.max(0,...a.msgs.map(m=>m.internal_ts||0)); const lb=Math.max(0,...b.msgs.map(m=>m.internal_ts||0)); return lb-la; });
+    rowsHtml=summaries.map(({o,msgs})=>{
+      const troubleshoot=msgs.filter(m=>m.direction==='in'&&m.status==='troubleshoot').length;
+      const suggested=msgs.filter(m=>m.direction==='in'&&m.status==='suggested').length;
+      const last=msgs.slice().sort((a,b)=>(b.internal_ts||0)-(a.internal_ts||0))[0];
+      const flag=troubleshoot?'<span style="background:var(--red-soft);color:var(--red);border-radius:10px;padding:1px 7px;font-size:11px">'+troubleshoot+' needs answer</span>'
+        : suggested?'<span style="background:var(--amber-soft);color:var(--amber);border-radius:10px;padding:1px 7px;font-size:11px">'+suggested+' suggested</span>'
+        : '<span style="color:var(--ink-faded);font-size:11px">up to date</span>';
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);cursor:pointer" onclick="openConversation(\''+escAttr(o.order_id)+'\')">'
+        +'<div style="min-width:0"><div style="font-size:13px;font-weight:600">'+escapeHtml(o.store||'?')+' · #'+escapeHtml(o.store_order_number||o.order_id)+'</div>'
+        +'<div style="font-size:11px;color:var(--ink-faded);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px">'+escapeHtml(last?(last.snippet||last.subject||''):(o.retailer_email||''))+'</div></div>'
+        +'<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">'+flag+'<button class="tiny">Open</button></div></div>';
+    }).join('');
+  }
+  ov.innerHTML='<div class="modal" style="max-width:640px"><div class="modal-head"><h2>Retailer conversations</h2><button class="modal-close" onclick="document.getElementById(\'convListOv\').remove()">&times;</button></div>'
+    +'<div class="modal-body"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><div style="font-size:12px;color:var(--ink-faded)">'+orders.length+' tracked thread'+(orders.length===1?'':'s')+'</div><button class="small" onclick="checkForReplies()">↻ Check for replies</button></div>'+rowsHtml+'</div>'
+    +'<div class="modal-foot"><button onclick="document.getElementById(\'convListOv\').remove()">Close</button></div></div>';
+  document.body.appendChild(ov);
+}
+async function openConversation(orderId){ window.__conv={orderId,messages:[]}; await refreshConversationModal(orderId); }
+async function refreshConversationModal(orderId){
+  const order=DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
+  let messages=[]; try{ const r=await fetch('/api/gmail/thread?order_id='+encodeURIComponent(orderId)); const d=await r.json(); messages=d.messages||[]; }catch(e){}
+  window.__conv={orderId,messages};
+  let ov=document.getElementById('convOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='convOv'; ov.className='modal-overlay active'; ov.style.cssText='display:flex';
+  ov.innerHTML='<div class="modal" style="max-width:680px"><div class="modal-head"><h2>'+escapeHtml(order.store||'Claim')+' · #'+escapeHtml(order.store_order_number||order.order_id)+'</h2><button class="modal-close" onclick="document.getElementById(\'convOv\').remove()">&times;</button></div>'
+    +'<div class="modal-body">'+renderConversationTimeline(order, messages)+'</div>'
+    +'<div class="modal-foot"><button class="small" onclick="checkForReplies()">↻ Check for replies</button><button onclick="document.getElementById(\'convOv\').remove()">Close</button></div></div>';
+  document.body.appendChild(ov);
+}
+function convOutcomeBadge(o){
+  const map={refund_issued:['var(--green-soft)','var(--green)','Refund issued'],refund_refused:['var(--red-soft)','var(--red)','Refund refused'],
+    return_approved:['var(--green-soft)','var(--green)','Return approved'],label_provided:['var(--accent-soft)','var(--accent-deep)','Label provided'],
+    investigation_opened:['var(--amber-soft)','var(--amber)','Investigation opened'],more_info_requested:['var(--amber-soft)','var(--amber)','More info requested'],
+    acknowledged_no_decision:['var(--line-soft)','var(--ink-faded)','Acknowledged'],unclear:['var(--line-soft)','var(--ink-faded)','Unclear']};
+  const m=map[o]||map.unclear; return '<span style="background:'+m[0]+';color:'+m[1]+';border-radius:10px;padding:1px 8px;font-size:11px">'+m[2]+'</span>';
+}
+function renderConversationTimeline(order, messages){
+  if(!messages.length){
+    return '<div style="font-size:13px;color:var(--ink-faded)">No messages stored yet. If you\'ve emailed this retailer, press <strong>Check for replies</strong> to pull the thread. New replies will appear here automatically.</div>';
+  }
+  const rows=messages.slice().sort((a,b)=>(a.internal_ts||0)-(b.internal_ts||0)).map(m=>{
+    const when=m.internal_ts?new Date(m.internal_ts).toLocaleString():'';
+    const inbound=m.direction==='in';
+    const side=inbound?'← Retailer':'→ You';
+    const head='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:3px"><span style="font-size:11px;font-weight:600;color:'+(inbound?'var(--accent-deep)':'var(--ink-soft)')+'">'+side+'</span><span style="font-size:10px;color:var(--ink-faded)">'+escapeHtml(when)+'</span></div>';
+    let inner='<div style="font-size:12px;color:var(--ink);white-space:pre-wrap">'+escapeHtml((m.snippet||m.body||'').slice(0,600))+'</div>';
+    let ai='';
+    if(inbound && m.ai_processed){
+      const ex=m.ai_extract||{};
+      ai='<div style="border-top:1px dashed var(--line);margin-top:6px;padding-top:6px">'
+        +'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">'+convOutcomeBadge(m.ai_outcome)
+        +(ex.deadline?'<span style="font-size:11px;color:var(--ink-faded)">by '+escapeHtml(ex.deadline)+'</span>':'')
+        +(ex.reference?'<span style="font-size:11px;color:var(--ink-faded)">ref '+escapeHtml(ex.reference)+'</span>':'')+'</div>'
+        +(ex.summary?'<div style="font-size:12px;color:var(--ink-soft);margin-bottom:6px">'+escapeHtml(ex.summary)+'</div>':'');
+      if(m.status==='troubleshoot'){
+        ai+='<div style="background:var(--red-soft);color:var(--red);border-radius:6px;padding:7px 9px;font-size:12px;margin-bottom:6px"><strong>Needs your answer.</strong> '+escapeHtml(ex.missing_info||'This reply doesn\'t match a known scenario.')+'</div>'
+          +'<button class="small" onclick="openReplyCompose(\''+escAttr(order.order_id)+'\','+m.id+')">✍ Write reply &amp; teach AI</button>';
+      } else if(m.status==='suggested'){
+        ai+='<div style="font-size:11px;color:var(--ink-faded);margin-bottom:3px">Suggested reply (edit before sending):</div>'
+          +'<textarea id="sugg_'+m.id+'" rows="4" style="width:100%;font-size:12px">'+escapeHtml(m.ai_suggestion||'')+'</textarea>'
+          +'<div style="margin-top:5px"><button class="small primary" onclick="approveAndSend(\''+escAttr(order.order_id)+'\','+m.id+')">✓ Approve &amp; send</button></div>';
+      } else if(m.status==='replied'){
+        ai+='<div style="font-size:11px;color:var(--green)">✓ Replied</div>';
+      }
+      ai+='</div>';
+    }
+    return '<div style="border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin-bottom:8px;background:'+(inbound?'var(--bg-soft,#fafafa)':'#fff')+'">'+head+inner+ai+'</div>';
+  }).join('');
+  const steps='<div style="font-size:11px;color:var(--ink-faded);margin-bottom:8px">Timeline: request sent → retailer reply → AI analysis → suggested reply → your approval → reply sent → waiting / escalation.</div>';
+  return steps+rows;
+}
+// Approve a suggested reply and send it inside the same Gmail thread.
+function approveAndSend(orderId, msgId){
+  const msg=(window.__conv&&window.__conv.messages||[]).find(m=>m.id===msgId); if(!msg) return;
+  const ta=document.getElementById('sugg_'+msgId); const bodyText=ta?ta.value:(msg.ai_suggestion||'');
+  const order=DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
+  openReplyCompose(orderId, msgId, bodyText, false);
+}
+// Open the compose modal pre-filled as an in-thread reply. mode: troubleshoot offers KB learning.
+function openReplyCompose(orderId, msgId, prefillBody, isTroubleshoot){
+  const order=DATA.orders.find(o=>o.order_id===orderId); if(!order) return;
+  const msg=(window.__conv&&window.__conv.messages||[]).find(m=>m.id===msgId)||{};
+  const troubleshoot=(isTroubleshoot!==undefined)?isTroubleshoot:(msg.status==='troubleshoot');
+  const references=(msg.rfc_references?(msg.rfc_references+' '):'')+(msg.rfc_message_id||'');
+  const ctx={
+    to: order.retailer_email||storeRetailerEmail(order),
+    from: order.gmail_account||order.email||'',
+    subject: 'Re: '+(order.email_subject||('order '+(order.store_order_number||order.order_id))),
+    body: (prefillBody!=null?prefillBody:(msg.ai_suggestion||'')),
+    threadId: order.gmail_thread_id||'',
+    inReplyTo: msg.rfc_message_id||'',
+    references: references.trim(),
+    msgId: msgId,
+    kbLearn: troubleshoot ? { question:(msg.ai_extract&&msg.ai_extract.summary)||msg.snippet||'', category:order.store||'' } : null,
+  };
+  openRetailerEmail(orderId, '__reply__', ctx);
+}
+// After sending a troubleshooting reply, offer to save the Q→A into the knowledge base so the AI learns.
+function offerKbLearn(learn, answer){
+  let ov=document.getElementById('kbLearnOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='kbLearnOv'; ov.className='modal-overlay active'; ov.style.cssText='display:flex';
+  ov.innerHTML='<div class="modal" style="max-width:520px"><div class="modal-head"><h2>Teach the AI this answer?</h2><button class="modal-close" onclick="document.getElementById(\'kbLearnOv\').remove()">&times;</button></div>'
+    +'<div class="modal-body"><div style="font-size:12px;color:var(--ink-faded);margin-bottom:8px">Save this so the AI can suggest it automatically next time a retailer asks something similar.</div>'
+    +'<div class="form-field"><label>Retailer question / scenario</label><textarea id="kb_q" rows="2">'+escapeHtml(learn.question||'')+'</textarea></div>'
+    +'<div class="form-field"><label>Approved answer</label><textarea id="kb_a" rows="5">'+escapeHtml(answer||'')+'</textarea></div>'
+    +'<div class="form-field"><label>Retailer category (optional)</label><input type="text" id="kb_cat" value="'+escAttr(learn.category||'')+'"></div>'
+    +'<div id="kb_status" style="font-size:12px;min-height:15px"></div></div>'
+    +'<div class="modal-foot"><button class="primary" onclick="saveKbLearn()">Save to knowledge base</button><button onclick="document.getElementById(\'kbLearnOv\').remove()">Skip</button></div></div>';
+  document.body.appendChild(ov);
+}
+async function saveKbLearn(){
+  const q=(document.getElementById('kb_q')||{}).value||''; const a=(document.getElementById('kb_a')||{}).value||''; const cat=(document.getElementById('kb_cat')||{}).value||'';
+  const st=document.getElementById('kb_status');
+  if(!q.trim()||!a.trim()){ if(st){st.style.color='var(--amber)';st.textContent='Question and answer are both required.';} return; }
+  try{
+    const r=await fetch('/api/gmail/kb', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ scenario:{ question:q, approved_answer:a, retailer_category:cat, kind:'known' } }) });
+    const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||'save failed');
+    showToast('Saved to knowledge base — the AI will use it next time.','success');
+    const ov=document.getElementById('kbLearnOv'); if(ov) ov.remove();
+  }catch(e){ if(st){st.style.color='var(--red)';st.textContent='Failed: '+(e.message||e);} }
+}
+// Knowledge-base admin: view + add approved scenarios.
+async function openKbAdmin(){
+  let scenarios=[]; try{ const r=await fetch('/api/gmail/kb'); const d=await r.json(); scenarios=d.scenarios||[]; }catch(e){}
+  let ov=document.getElementById('kbAdminOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='kbAdminOv'; ov.className='modal-overlay active'; ov.style.cssText='display:flex';
+  const list=scenarios.length?scenarios.map(s=>'<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:6px"><div style="font-size:12px;font-weight:600">'+escapeHtml(s.question||'')+(s.retailer_category?' · <span style="color:var(--ink-faded);font-weight:400">'+escapeHtml(s.retailer_category)+'</span>':'')+'</div><div style="font-size:12px;color:var(--ink-soft);white-space:pre-wrap;margin-top:3px">'+escapeHtml(s.approved_answer||'')+'</div></div>').join(''):'<div style="font-size:13px;color:var(--ink-faded)">No scenarios yet. They\'re added automatically when you answer a retailer question the AI didn\'t recognise, or add one below.</div>';
+  ov.innerHTML='<div class="modal" style="max-width:640px"><div class="modal-head"><h2>Knowledge base</h2><button class="modal-close" onclick="document.getElementById(\'kbAdminOv\').remove()">&times;</button></div>'
+    +'<div class="modal-body"><div style="font-size:12px;color:var(--ink-faded);margin-bottom:8px">Approved answers the AI checks before drafting a reply.</div>'+list
+    +'<div style="border-top:1px solid var(--line);margin-top:10px;padding-top:10px"><div style="font-weight:600;font-size:12px;margin-bottom:6px">Add a scenario</div>'
+    +'<div class="form-field"><label>Retailer question / scenario</label><textarea id="kba_q" rows="2"></textarea></div>'
+    +'<div class="form-field"><label>Approved answer</label><textarea id="kba_a" rows="4"></textarea></div>'
+    +'<div class="form-field"><label>Retailer category (optional)</label><input type="text" id="kba_cat"></div>'
+    +'<div id="kba_status" style="font-size:12px;min-height:15px"></div><button class="small primary" onclick="addKbScenario()">Add scenario</button></div></div>'
+    +'<div class="modal-foot"><button onclick="document.getElementById(\'kbAdminOv\').remove()">Close</button></div></div>';
+  document.body.appendChild(ov);
+}
+async function addKbScenario(){
+  const q=(document.getElementById('kba_q')||{}).value||''; const a=(document.getElementById('kba_a')||{}).value||''; const cat=(document.getElementById('kba_cat')||{}).value||'';
+  const st=document.getElementById('kba_status');
+  if(!q.trim()||!a.trim()){ if(st){st.style.color='var(--amber)';st.textContent='Question and answer are both required.';} return; }
+  try{
+    const r=await fetch('/api/gmail/kb', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ scenario:{ question:q, approved_answer:a, retailer_category:cat, kind:'known' } }) });
+    const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||'save failed');
+    showToast('Scenario added.','success'); openKbAdmin();
+  }catch(e){ if(st){st.style.color='var(--red)';st.textContent='Failed: '+(e.message||e);} }
+}
 
 // ============================================================
 // FORMATTING
@@ -7444,33 +7665,95 @@ function applyRole(role) {
   }
 }
 function methodBadgeClass(m){ return ['DNA','PEB','EB'].includes(m)?'background:var(--red-soft);color:var(--red)':(m&&!m.startsWith('('))?'background:var(--green-soft);color:var(--green)':'background:var(--line-soft);color:var(--ink-faded)'; }
-// PEB ("partial empty box"): recommend WHICH items to claim as missing. The best candidates are
-// the highest-value items that are also the lightest / smallest — high £ maximises the refund, and
-// low weight + volume makes a "missing from the box" claim most plausible. Returns items ranked
-// best-first, each with a per-unit price and a score.
-// HTML for the PEB recommendation panel (only meaningful when method is PEB).
+// PEB ("partial empty box"): pick WHICH items to claim missing. Rule: the claimed set stays UNDER 2 kg
+// total (so it's plausible those items were removed from the parcel), and aims to reach at least 20% of
+// the order's value and 30% of its weight — optimising for the highest value + highest weight items that
+// fit under the 2 kg cap. The panel is fully editable: tick/untick items and the totals update live.
+const PEB_WEIGHT_CAP = 2;      // kg — claimed items must total LESS than this
+const PEB_VALUE_FLOOR = 0.20;  // aim ≥20% of order value
+const PEB_WEIGHT_FLOOR = 0.30; // aim ≥30% of order weight
+function pebRows(order){
+  const list = Array.isArray(order && order.items_list) ? order.items_list : [];
+  const rows = [];
+  list.forEach((it, idx)=>{
+    if(!it.name) return;
+    const qty = parseInt(it.qty)||1;
+    const unitPrice = parseFloat(it.price)||0;
+    const unitWeight = parseFloat(it.weight)||0;
+    const unitVol = parseFloat(it.volume)||0;
+    rows.push({ idx, name: it.name, qty, unitPrice, unitWeight, unitVol, lineValue: unitPrice*qty, lineWeight: unitWeight*qty });
+  });
+  return rows;
+}
+function pebOrderTotals(rows){ return { value: rows.reduce((s,r)=>s+r.lineValue,0), weight: rows.reduce((s,r)=>s+r.lineWeight,0) }; }
+// Greedy recommendation: highest value (then weight) first, adding while we stay under the 2 kg cap.
+function pebRecommend(rows){
+  const cand = rows.slice().sort((a,b)=> (b.lineValue-a.lineValue) || (b.lineWeight-a.lineWeight));
+  const chosen = new Set(); let w = 0;
+  cand.forEach(r=>{ if(w + r.lineWeight < PEB_WEIGHT_CAP){ chosen.add(r.idx); w += r.lineWeight; } });
+  return chosen;
+}
+// Current selection: an explicit user choice (order.peb_claim, by name) if present, else the recommendation.
+function pebSelectedIdx(order, rows){
+  if(Array.isArray(order.peb_claim)){
+    const names = new Set(order.peb_claim); const s = new Set();
+    rows.forEach(r=>{ if(names.has(r.name)) s.add(r.idx); });
+    return s;
+  }
+  return pebRecommend(rows);
+}
+function pebSelectedNames(order){
+  const rows = pebRows(order); if(!rows.length) return [];
+  const sel = pebSelectedIdx(order, rows);
+  return rows.filter(r=>sel.has(r.idx)).map(r=>r.name);
+}
+// Back-compat: returns the SELECTED items (value-ordered) — used by the box-photo instructions.
+function pebMissingItems(order){
+  const rows = pebRows(order).sort((a,b)=> (b.lineValue-a.lineValue) || (b.lineWeight-a.lineWeight));
+  const sel = pebSelectedIdx(order, rows);
+  return rows.filter(r=>sel.has(r.idx)).map(r=>({ name:r.name, qty:r.qty, price:r.unitPrice, weight:r.unitWeight, volume:r.unitVol }));
+}
+function pebTotalsHtml(order){
+  const rows = pebRows(order); const tot = pebOrderTotals(rows);
+  const sel = pebSelectedIdx(order, rows);
+  const selRows = rows.filter(r=>sel.has(r.idx));
+  const selW = selRows.reduce((s,r)=>s+r.lineWeight,0);
+  const selV = selRows.reduce((s,r)=>s+r.lineValue,0);
+  const vPct = tot.value>0 ? (selV/tot.value*100) : 0;
+  const wPct = tot.weight>0 ? (selW/tot.weight*100) : 0;
+  const col = (ok)=> ok ? 'var(--green)' : 'var(--red)';
+  const capOk = selW>0 && selW < PEB_WEIGHT_CAP;
+  return '<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">'
+    + '<span>Weight: <strong style="color:'+col(capOk)+'">'+selW.toFixed(2)+' kg</strong> <span style="color:var(--ink-faded)">/ under '+PEB_WEIGHT_CAP+' kg</span></span>'
+    + '<span>Value: <strong style="color:'+col(vPct>=20)+'">£'+selV.toFixed(2)+' ('+vPct.toFixed(0)+'%)</strong> <span style="color:var(--ink-faded)">/ ≥20%</span></span>'
+    + '<span>Weight share: <strong style="color:'+col(wPct>=30)+'">'+wPct.toFixed(0)+'%</strong> <span style="color:var(--ink-faded)">/ ≥30%</span></span>'
+    + '</div>';
+}
 function renderPebPanelHtml(order){
   if(!order || order.method !== 'PEB') return '';
-  const rows = pebMissingItems(order);
-  if(!rows.length || !rows.some(r=>r.price>0)) return '<div style="font-size:11px;color:var(--ink-faded)">Add per-item prices (and weights/volumes) in the items list above to get a PEB missing-items recommendation.</div>';
-  const fmt = (n)=> (n||n===0) ? n : '?';
-  const best = rows.filter(r=>r.price>0).slice(0, Math.max(1, Math.min(rows.length, Math.ceil(rows.length/2))));
-  const bestNames = {}; best.forEach(r=>bestNames[r.name]=true);
+  const rows = pebRows(order);
+  if(!rows.length || !rows.some(r=>r.unitPrice>0 || r.unitWeight>0)) return '<div style="font-size:11px;color:var(--ink-faded)">Add per-item prices and weights in the items list above to get a PEB missing-items recommendation.</div>';
+  const sel = pebSelectedIdx(order, rows);
+  const disp = rows.slice().sort((a,b)=> (b.lineValue-a.lineValue) || (b.lineWeight-a.lineWeight));
   let h = '<div style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--red-soft)">'
-    + '<div style="font-weight:600;font-size:12px;margin-bottom:4px">PEB — recommended items to claim missing</div>'
-    + '<div style="font-size:11px;color:var(--ink-faded);margin-bottom:8px">Best claims are high value but low weight &amp; volume (most refund, most believable as "missing from the box"). Ranked best first.</div>';
-  h += '<div style="display:flex;font-size:10px;color:var(--ink-faded);text-transform:uppercase;letter-spacing:.4px;gap:8px;padding:0 4px 3px"><span style="flex:1">Item</span><span style="width:60px">£ each</span><span style="width:110px">weight · volume</span><span style="width:54px">claim?</span></div>';
-  rows.forEach(r=>{
-    const claim = bestNames[r.name];
-    h += '<div style="display:flex;gap:8px;align-items:center;font-size:12px;padding:3px 4px;'+(claim?'background:rgba(255,255,255,.55);border-radius:4px':'')+'">'
-      + '<span style="flex:1">'+escapeHtml(r.name)+'</span>'
-      + '<span style="width:60px">£'+fmt(r.price)+'</span>'
-      + '<span style="width:110px;color:var(--ink-faded)">'+fmt(r.weight)+'kg · '+fmt(r.volume)+'L</span>'
-      + '<span style="width:54px">'+(claim?'<strong style="color:var(--red)">✓ claim</strong>':'<span style="color:var(--ink-faded)">keep</span>')+'</span>'
-      + '</div>';
-  });
+    + '<div style="font-weight:600;font-size:12px;margin-bottom:2px">PEB — items to claim missing</div>'
+    + '<div style="font-size:11px;color:var(--ink-faded);margin-bottom:8px">Recommended set stays under '+PEB_WEIGHT_CAP+' kg and aims for ≥20% of order value &amp; ≥30% of order weight, favouring the highest value + weight. Tick/untick to adjust — totals update live.</div>'
+    + '<div style="display:flex;font-size:10px;color:var(--ink-faded);text-transform:uppercase;letter-spacing:.4px;gap:8px;padding:0 4px 3px"><span style="width:20px"></span><span style="flex:1">Item</span><span style="width:64px">£ line</span><span style="width:80px">weight</span></div>';
+  h += disp.map(r=>'<label style="display:flex;gap:8px;align-items:center;font-size:12px;padding:3px 4px;font-weight:400">'
+    + '<input type="checkbox" class="peb_chk" data-name="'+escAttr(r.name)+'" '+(sel.has(r.idx)?'checked':'')+' onchange="pebRecalc()" style="width:auto;margin:0">'
+    + '<span style="flex:1">'+escapeHtml(r.name)+(r.qty>1?' <span style="color:var(--ink-faded)">×'+r.qty+'</span>':'')+'</span>'
+    + '<span style="width:64px">£'+r.lineValue.toFixed(2)+'</span>'
+    + '<span style="width:80px;color:var(--ink-faded)">'+r.lineWeight.toFixed(2)+' kg</span></label>').join('');
+  h += '<div id="peb_totals">'+pebTotalsHtml(order)+'</div>';
   h += '</div>';
   return h;
+}
+function pebRecalc(){
+  const order = DATA.orders.find(o=>o.order_id===editingOrderId); if(!order) return;
+  const names = [...document.querySelectorAll('.peb_chk:checked')].map(c=>c.getAttribute('data-name'));
+  order.peb_claim = names;
+  const box = document.getElementById('peb_totals'); if(box) box.innerHTML = pebTotalsHtml(order);
+  try{ if(typeof saveData==='function') saveData(); }catch(e){}
 }
 function renderPebPanel(){
   const order = DATA.orders.find(o=>o.order_id===editingOrderId);
@@ -7480,23 +7763,6 @@ function renderPebPanel(){
   // reflect the currently-selected method (may differ from saved) for the live panel
   const m = sel ? sel.value : (order?order.method:'');
   panel.innerHTML = renderPebPanelHtml(Object.assign({}, order||{}, { method:m }));
-}
-function pebMissingItems(order){
-  const list = Array.isArray(order && order.items_list) ? order.items_list : [];
-  const rows = [];
-  list.forEach(it=>{
-    const price = parseFloat(it.price)||0;
-    const w = parseFloat(it.weight)||0;
-    const v = parseFloat(it.volume)||0;
-    if(!it.name) return;
-    // score favours high price and low bulk; +0.1 avoids divide-by-zero for unknown weight/volume
-    const bulk = w + v;
-    const score = price / (bulk + 0.1);
-    rows.push({ name: it.name, qty: it.qty||1, price, weight: w, volume: v, bulk, score });
-  });
-  // best £-per-bulk first; ties → higher price first
-  rows.sort((a,b)=> (b.score - a.score) || (b.price - a.price));
-  return rows;
 }
 
 const _STEP_ORDER = {BBM:0, Q1:1, Q2:2, Q3:3, Q4:4, Q5:5, Q6:6};

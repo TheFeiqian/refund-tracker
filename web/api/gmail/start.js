@@ -9,8 +9,9 @@ module.exports = (req, res) => {
     client_id: cid,
     redirect_uri: redirectUri(req),
     response_type: 'code',
-    // gmail.send lets us send as the account; openid+email tells us WHICH account connected.
-    scope: 'openid email https://www.googleapis.com/auth/gmail.send',
+    // gmail.send lets us send as the account; gmail.readonly lets us read tracked reply threads;
+    // openid+email tells us WHICH account connected.
+    scope: 'openid email https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly',
     access_type: 'offline',   // needed to receive a refresh token
     prompt: 'consent',        // force a refresh token even on re-connect
     include_granted_scopes: 'true',
